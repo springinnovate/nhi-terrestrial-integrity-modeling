@@ -151,6 +151,14 @@ def read_masked(
     return data
 
 
+def valid_data_mask(array: np.ma.MaskedArray) -> np.ndarray:
+    data = np.asarray(array)
+    valid = ~np.ma.getmaskarray(array)
+    if np.issubdtype(data.dtype, np.floating):
+        valid &= np.isfinite(data)
+    return valid
+
+
 def add_rows_to_reservoir(
     reservoir: list[list[object]],
     rows: Iterable[list[object]],
@@ -186,8 +194,7 @@ def chunk_rows(
 
         valid = np.ones((height, width), dtype=bool)
         for array in arrays:
-            valid &= ~np.ma.getmaskarray(array)
-            valid &= np.isfinite(np.ma.filled(array, np.nan))
+            valid &= valid_data_mask(array)
 
         if not valid.any():
             yield []
