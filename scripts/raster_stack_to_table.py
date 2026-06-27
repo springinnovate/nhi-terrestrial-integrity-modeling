@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import random
 from contextlib import ExitStack
 from pathlib import Path
@@ -15,6 +16,7 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
+from tqdm.auto import tqdm
 
 
 RASTER_SUFFIXES = {".tif", ".tiff"}
@@ -68,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Overwrite output files if they already exist.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the raster block progress bar.",
     )
     return parser.parse_args()
 
@@ -159,6 +166,14 @@ def valid_data_mask(array: np.ma.MaskedArray) -> np.ndarray:
     return valid
 
 
+def rows_per_chunk(template_width: int, chunk_size: int) -> int:
+    return max(1, chunk_size // max(template_width, 1))
+
+
+def chunk_count(template_height: int, rows_per_chunk_value: int) -> int:
+    return math.ceil(template_height / rows_per_chunk_value)
+
+
 def add_rows_to_reservoir(
     reservoir: list[list[object]],
     rows: Iterable[list[object]],
@@ -183,14 +198,27 @@ def chunk_rows(
     template: rasterio.DatasetReader,
     band: int,
     chunk_size: int,
+    progress_bar,
 ) -> Iterable[list[list[object]]]:
     width = template.width
-    rows_per_chunk = max(1, chunk_size // max(width, 1))
+    rows_per_chunk_value = rows_per_chunk(width, chunk_size)
+    total_chunks = chunk_count(template.height, rows_per_chunk_value)
 
-    for row_start in range(0, template.height, rows_per_chunk):
-        height = min(rows_per_chunk, template.height - row_start)
+    for chunk_index, row_start in enumerate(
+        range(0, template.height, rows_per_chunk_value),
+        start=1,
+    ):
+        height = min(rows_per_chunk_value, template.height - row_start)
         window = Window(0, row_start, width, height)
-        arrays = [read_masked(reader, band, window) for reader in readers]
+        arrays = []
+        for raster_index, reader in enumerate(readers, start=1):
+            arrays.append(read_masked(reader, band, window))
+            progress_bar.update(1)
+            progress_bar.set_postfix_str(
+                f"chunk {chunk_index}/{total_chunks}, "
+                f"raster {raster_index}/{len(readers)}",
+                refresh=False,
+            )
 
         valid = np.ones((height, width), dtype=bool)
         for array in arrays:
@@ -287,44 +315,78 @@ def main() -> None:
             open_on_template_grid(stack, path, template, resampling)
             for path in raster_paths
         ]
+        rows_per_chunk_value = rows_per_chunk(template.width, args.chunk_size)
+        total_chunks = chunk_count(template.height, rows_per_chunk_value)
+        progress_bar = tqdm(
+            total=total_chunks * len(readers),
+            disable=args.no_progress,
+            unit="raster-block",
+            desc="Reading raster stack",
+            dynamic_ncols=True,
+        )
 
-        if args.max_rows and args.sample_mode == "random":
-            for chunk in chunk_rows(readers, column_names, template, args.band, args.chunk_size):
-                valid_pixel_count += len(chunk)
-                valid_seen_before = written_row_count
-                written_row_count = add_rows_to_reservoir(
-                    reservoir,
-                    chunk,
-                    args.max_rows,
-                    written_row_count,
-                    rng,
-                )
-                if valid_seen_before == written_row_count and not chunk:
-                    continue
-            rows_to_write = reservoir
-            written_row_count = len(rows_to_write)
-            with args.output_csv.open("w", newline="", encoding="utf-8") as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow(header)
-                writer.writerows(rows_to_write)
-        else:
-            with args.output_csv.open("w", newline="", encoding="utf-8") as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow(header)
-                stop = False
+        try:
+            if args.max_rows and args.sample_mode == "random":
                 for chunk in chunk_rows(
-                    readers, column_names, template, args.band, args.chunk_size
+                    readers,
+                    column_names,
+                    template,
+                    args.band,
+                    args.chunk_size,
+                    progress_bar,
                 ):
                     valid_pixel_count += len(chunk)
-                    if args.max_rows:
-                        remaining = args.max_rows - written_row_count
-                        chunk = chunk[:remaining]
-                    writer.writerows(chunk)
-                    written_row_count += len(chunk)
-                    if args.max_rows and written_row_count >= args.max_rows:
-                        stop = True
-                    if stop:
-                        break
+                    valid_seen_before = written_row_count
+                    written_row_count = add_rows_to_reservoir(
+                        reservoir,
+                        chunk,
+                        args.max_rows,
+                        written_row_count,
+                        rng,
+                    )
+                    progress_bar.set_postfix_str(
+                        f"valid pixels {valid_pixel_count:,}, "
+                        f"sampled rows {min(written_row_count, args.max_rows):,}",
+                        refresh=False,
+                    )
+                    if valid_seen_before == written_row_count and not chunk:
+                        continue
+                rows_to_write = reservoir
+                written_row_count = len(rows_to_write)
+                with args.output_csv.open("w", newline="", encoding="utf-8") as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(header)
+                    writer.writerows(rows_to_write)
+            else:
+                with args.output_csv.open("w", newline="", encoding="utf-8") as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(header)
+                    stop = False
+                    for chunk in chunk_rows(
+                        readers,
+                        column_names,
+                        template,
+                        args.band,
+                        args.chunk_size,
+                        progress_bar,
+                    ):
+                        valid_pixel_count += len(chunk)
+                        if args.max_rows:
+                            remaining = args.max_rows - written_row_count
+                            chunk = chunk[:remaining]
+                        writer.writerows(chunk)
+                        written_row_count += len(chunk)
+                        progress_bar.set_postfix_str(
+                            f"valid pixels {valid_pixel_count:,}, "
+                            f"written rows {written_row_count:,}",
+                            refresh=False,
+                        )
+                        if args.max_rows and written_row_count >= args.max_rows:
+                            stop = True
+                        if stop:
+                            break
+        finally:
+            progress_bar.close()
 
         write_metadata(
             metadata_path,

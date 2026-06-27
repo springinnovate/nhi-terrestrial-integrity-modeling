@@ -17,6 +17,7 @@ Useful options:
 - `--max-rows 100000`: limit the output table.
 - `--sample-mode random`: reservoir-sample valid pixels while walking the full stack.
 - `--resampling bilinear`: resample continuous rasters onto the template grid.
+- `--no-progress`: disable the live raster-block progress bar.
 
 The output table includes `x`, `y`, `row`, `col`, followed by one column per raster stem.
 A companion metadata JSON is written next to the CSV.
