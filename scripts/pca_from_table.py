@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,6 +14,11 @@ from sklearn.preprocessing import StandardScaler
 
 
 GRID_COLUMNS = ["x", "y", "row", "col"]
+RANGE_PATTERN = re.compile(
+    r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*-\s*"
+    r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +44,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional row limit for PCA fitting and plotting.",
     )
     parser.add_argument(
+        "--filter",
+        nargs=2,
+        action="append",
+        metavar=("COLUMN", "EXPR"),
+        help=(
+            "Keep rows matching a column expression. Repeatable. "
+            "Expressions: =value, low-high, >value, >=value, <value, <=value."
+        ),
+    )
+    parser.add_argument(
         "--random-state",
         type=int,
         default=42,
@@ -60,6 +76,86 @@ def select_feature_columns(df: pd.DataFrame, requested: list[str] | None) -> lis
 
     numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
     return [column for column in numeric_columns if column not in GRID_COLUMNS]
+
+
+def numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
+    values = pd.to_numeric(df[column], errors="coerce")
+    if values.isna().all():
+        raise SystemExit(f"Filter column is not numeric: {column}")
+    return values
+
+
+def exact_value_mask(df: pd.DataFrame, column: str, value_text: str) -> pd.Series:
+    try:
+        expected = float(value_text)
+    except ValueError:
+        return df[column].astype(str).eq(value_text)
+    return numeric_series(df, column).eq(expected)
+
+
+def parse_filter_number(value_text: str, expression: str) -> float:
+    try:
+        return float(value_text)
+    except ValueError:
+        raise SystemExit(f"Filter expression has a non-numeric threshold: {expression}")
+
+
+def filter_mask(df: pd.DataFrame, column: str, expression: str) -> pd.Series:
+    if column not in df.columns:
+        raise SystemExit(f"Filter column not found: {column}")
+
+    expression = expression.strip()
+    for operator in (">=", "<=", ">", "<"):
+        if expression.startswith(operator):
+            threshold = parse_filter_number(
+                expression[len(operator) :].strip(),
+                expression,
+            )
+            values = numeric_series(df, column)
+            if operator == ">=":
+                return values.ge(threshold)
+            if operator == "<=":
+                return values.le(threshold)
+            if operator == ">":
+                return values.gt(threshold)
+            return values.lt(threshold)
+
+    if expression.startswith("="):
+        return exact_value_mask(df, column, expression[1:].strip())
+
+    range_match = RANGE_PATTERN.match(expression)
+    if range_match:
+        low = float(range_match.group(1))
+        high = float(range_match.group(2))
+        if low > high:
+            raise SystemExit(f"Filter range lower bound exceeds upper bound: {expression}")
+        return numeric_series(df, column).between(low, high, inclusive="both")
+
+    raise SystemExit(
+        f"Unsupported filter expression: {expression}. "
+        "Use =value, low-high, >value, >=value, <value, or <=value."
+    )
+
+
+def apply_filters(
+    df: pd.DataFrame,
+    filters: list[list[str]] | None,
+) -> tuple[pd.DataFrame, list[str]]:
+    if not filters:
+        return df, []
+
+    filtered_df = df
+    summaries: list[str] = []
+    for column, expression in filters:
+        before = len(filtered_df)
+        mask = filter_mask(filtered_df, column, expression)
+        filtered_df = filtered_df[mask].copy()
+        summaries.append(f"{column} {expression}: {before:,} -> {len(filtered_df):,}")
+        if filtered_df.empty:
+            raise SystemExit(
+                f"Filter removed all rows after applying {column} {expression}."
+            )
+    return filtered_df, summaries
 
 
 def save_explained_variance(pca: PCA, output_dir: Path) -> None:
@@ -228,6 +324,7 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(args.input_csv)
+    df, filter_summaries = apply_filters(df, args.filter)
 
     feature_columns = select_feature_columns(df, args.columns)
     if len(feature_columns) < 2:
@@ -257,6 +354,8 @@ def main() -> None:
     plot_loading_heatmap(loadings, args.output_dir)
     plot_loading_intensity(loadings, args.output_dir)
 
+    for summary in filter_summaries:
+        print(f"Filter {summary}")
     print(f"Used {len(working_df)} row(s) and {len(feature_columns)} variable(s)")
     print(f"Wrote PCA outputs to {args.output_dir}")
 
