@@ -11,8 +11,11 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from tqdm.auto import tqdm
 
 
+CSV_COUNT_CHUNK_BYTES = 4 * 1024 * 1024
+CSV_READ_CHUNK_ROWS = 100_000
 GRID_COLUMNS = ["x", "y", "row", "col"]
 RANGE_PATTERN = re.compile(
     r"^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
@@ -64,7 +67,56 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not standardize variables before PCA.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bars.",
+    )
     return parser.parse_args()
+
+
+def count_csv_rows(input_csv: Path, no_progress: bool) -> int:
+    total_bytes = input_csv.stat().st_size
+    line_count = 0
+    last_byte = b""
+
+    with input_csv.open("rb") as csv_file:
+        with tqdm(
+            total=total_bytes,
+            unit="B",
+            unit_scale=True,
+            desc="Scanning table",
+            disable=no_progress,
+        ) as progress:
+            while True:
+                chunk = csv_file.read(CSV_COUNT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                line_count += chunk.count(b"\n")
+                last_byte = chunk[-1:]
+                progress.update(len(chunk))
+
+    if last_byte and last_byte != b"\n":
+        line_count += 1
+    return max(0, line_count - 1)
+
+
+def read_table(input_csv: Path, no_progress: bool) -> pd.DataFrame:
+    total_rows = count_csv_rows(input_csv, no_progress)
+    if total_rows == 0:
+        return pd.read_csv(input_csv)
+
+    chunks: list[pd.DataFrame] = []
+    with tqdm(
+        total=total_rows,
+        unit="row",
+        desc="Loading table",
+        disable=no_progress,
+    ) as progress:
+        for chunk in pd.read_csv(input_csv, chunksize=CSV_READ_CHUNK_ROWS):
+            chunks.append(chunk)
+            progress.update(len(chunk))
+    return pd.concat(chunks, ignore_index=True)
 
 
 def select_feature_columns(df: pd.DataFrame, requested: list[str] | None) -> list[str]:
@@ -140,13 +192,19 @@ def filter_mask(df: pd.DataFrame, column: str, expression: str) -> pd.Series:
 def apply_filters(
     df: pd.DataFrame,
     filters: list[list[str]] | None,
+    no_progress: bool,
 ) -> tuple[pd.DataFrame, list[str]]:
     if not filters:
         return df, []
 
     filtered_df = df
     summaries: list[str] = []
-    for column, expression in filters:
+    for column, expression in tqdm(
+        filters,
+        desc="Applying filters",
+        unit="filter",
+        disable=no_progress,
+    ):
         before = len(filtered_df)
         mask = filter_mask(filtered_df, column, expression)
         filtered_df = filtered_df[mask].copy()
@@ -156,6 +214,11 @@ def apply_filters(
                 f"Filter removed all rows after applying {column} {expression}."
             )
     return filtered_df, summaries
+
+
+def mark_step(progress, label: str) -> None:
+    progress.set_postfix_str(label, refresh=False)
+    progress.update(1)
 
 
 def save_explained_variance(pca: PCA, output_dir: Path) -> None:
@@ -322,37 +385,73 @@ def main() -> None:
     if not args.input_csv.exists():
         raise SystemExit(f"Input CSV does not exist: {args.input_csv}")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    df = pd.read_csv(args.input_csv)
-    df, filter_summaries = apply_filters(df, args.filter)
+    df = read_table(args.input_csv, args.no_progress)
+    df, filter_summaries = apply_filters(df, args.filter, args.no_progress)
 
-    feature_columns = select_feature_columns(df, args.columns)
-    if len(feature_columns) < 2:
-        raise SystemExit("PCA requires at least two numeric feature columns.")
+    with tqdm(
+        total=15,
+        desc="PCA workflow",
+        unit="step",
+        disable=args.no_progress,
+    ) as progress:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        mark_step(progress, "prepared output directory")
 
-    working_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_columns)
-    if args.max_rows and len(working_df) > args.max_rows:
-        working_df = working_df.sample(n=args.max_rows, random_state=args.random_state)
-    working_df = working_df.reset_index(drop=True)
+        feature_columns = select_feature_columns(df, args.columns)
+        if len(feature_columns) < 2:
+            raise SystemExit("PCA requires at least two numeric feature columns.")
+        mark_step(progress, "selected feature columns")
 
-    features = working_df[feature_columns].to_numpy(dtype=float)
-    if args.no_standardize:
-        transformed = features
-    else:
-        transformed = StandardScaler().fit_transform(features)
+        working_df = df.replace([np.inf, -np.inf], np.nan).dropna(
+            subset=feature_columns
+        )
+        mark_step(progress, "dropped missing feature rows")
 
-    n_components = min(args.n_components, transformed.shape[1], transformed.shape[0])
-    pca = PCA(n_components=n_components, random_state=args.random_state)
-    scores = pca.fit_transform(transformed)
+        if args.max_rows and len(working_df) > args.max_rows:
+            working_df = working_df.sample(
+                n=args.max_rows,
+                random_state=args.random_state,
+            )
+        working_df = working_df.reset_index(drop=True)
+        mark_step(progress, "sampled rows")
 
-    save_scores(working_df, scores, args.output_dir)
-    save_explained_variance(pca, args.output_dir)
-    loadings = save_loadings(pca, feature_columns, args.output_dir)
-    plot_scree(pca, args.output_dir)
-    plot_score_scatter(scores, pca, args.output_dir)
-    plot_loading_vectors(loadings, pca, args.output_dir)
-    plot_loading_heatmap(loadings, args.output_dir)
-    plot_loading_intensity(loadings, args.output_dir)
+        features = working_df[feature_columns].to_numpy(dtype=float)
+        mark_step(progress, "built feature matrix")
+
+        if args.no_standardize:
+            transformed = features
+        else:
+            transformed = StandardScaler().fit_transform(features)
+        mark_step(progress, "scaled features")
+
+        n_components = min(args.n_components, transformed.shape[1], transformed.shape[0])
+        pca = PCA(n_components=n_components, random_state=args.random_state)
+        scores = pca.fit_transform(transformed)
+        mark_step(progress, "fit PCA")
+
+        save_scores(working_df, scores, args.output_dir)
+        mark_step(progress, "saved scores")
+
+        save_explained_variance(pca, args.output_dir)
+        mark_step(progress, "saved explained variance")
+
+        loadings = save_loadings(pca, feature_columns, args.output_dir)
+        mark_step(progress, "saved loadings")
+
+        plot_scree(pca, args.output_dir)
+        mark_step(progress, "saved scree plot")
+
+        plot_score_scatter(scores, pca, args.output_dir)
+        mark_step(progress, "saved score scatter")
+
+        plot_loading_vectors(loadings, pca, args.output_dir)
+        mark_step(progress, "saved loading vectors")
+
+        plot_loading_heatmap(loadings, args.output_dir)
+        mark_step(progress, "saved loading heatmap")
+
+        plot_loading_intensity(loadings, args.output_dir)
+        mark_step(progress, "saved loading intensity")
 
     for summary in filter_summaries:
         print(f"Filter {summary}")

@@ -33,6 +33,7 @@ python scripts/pca_from_table.py outputs\stack_points.csv outputs\pca
 Filter rows before fitting PCA with `--filter COLUMN EXPR`. Expressions can be exact
 values, inclusive ranges, or comparisons: `'=1'`, `'0.2-0.8'`, `'>0.5'`, or
 `'<=10'`. Repeat `--filter` to combine multiple filters.
+Use `--no-progress` to disable table and PCA workflow progress bars.
 
 ```powershell
 python scripts/pca_from_table.py 2015_stack.csv outputs\pca_reference --filter grassland_reference_sites_year_2015_wyoming_basin_grassland_prob_90_hmi_0_1_hii_0_08 '=1'
