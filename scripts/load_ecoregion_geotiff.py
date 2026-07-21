@@ -1880,23 +1880,20 @@ def main() -> None:
             / "samples"
             / f"{ecoregion_slug or 'ecoregion'}_spatial_sample.parquet"
         )
-        try:
-            sample = create_spatial_sample(
-                raster,
-                args.sampling_block_size_m,
-                args.samples_per_class_per_block,
-                args.random_seed,
-                not args.no_progress,
-            )
-            print_spatial_sampling_report(sample)
-            table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())
-            parquet_summary = write_spatial_sample_parquet(
-                sample,
-                sample_path,
-                not args.no_progress,
-            )
-        except (ValueError, RuntimeError, OSError) as error:
-            raise SystemExit(f"Could not create spatial sample: {error}") from error
+        sample = create_spatial_sample(
+            raster,
+            args.sampling_block_size_m,
+            args.samples_per_class_per_block,
+            args.random_seed,
+            not args.no_progress,
+        )
+        print_spatial_sampling_report(sample)
+        table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())
+        parquet_summary = write_spatial_sample_parquet(
+            sample,
+            sample_path,
+            not args.no_progress,
+        )
         print_parquet_report(parquet_summary, table_memory)
 
     if not args.no_location_figure:
