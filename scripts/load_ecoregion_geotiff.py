@@ -735,8 +735,6 @@ def create_spatial_sample(
     """
 
     started = time.perf_counter()
-    if samples_per_class_per_block <= 0:
-        raise ValueError("Samples per class per block must be greater than zero.")
 
     # The export repeats the same reference surface for each year. Use the
     # first copy as the response and exclude every copy from predictor columns.
