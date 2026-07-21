@@ -346,28 +346,6 @@ class ParquetWriteSummary:
     elapsed_seconds: float
 
 
-def _positive_int(value: str) -> int:
-    """Parse a positive integer command-line value.
-
-    Args:
-        value: User-provided argument text.
-
-    Returns:
-        Parsed positive integer.
-
-    Raises:
-        argparse.ArgumentTypeError: If the value is not a positive integer.
-    """
-
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("must be an integer") from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
-
-
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -424,7 +402,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--samples-per-class-per-block",
-        type=_positive_int,
+        type=int,
         default=DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK,
         help=(
             "Maximum sampled pixels for each binary target value in each "
