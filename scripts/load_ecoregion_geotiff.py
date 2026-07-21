@@ -276,7 +276,7 @@ class SamplingClassSummary:
 
 @dataclass(frozen=True)
 class SpatialSample:
-    """A spatially balanced sample and diagnostics from one ecoregion raster.
+    """Pixels sampled across every block in one ecoregion raster.
 
     Attributes:
         table: Model-ready table of selected pixels, weights, and raster bands.
@@ -945,6 +945,8 @@ def create_spatial_sample(
         )
 
     block_populations = np.bincount(block_ids)[1:]
+    # A SpatialSample combines selected pixels from all blocks; each table row
+    # retains its sampling_block_id so block membership is not lost.
     return SpatialSample(
         table=table,
         reference_band_name=raster.band_names[reference_band_offset],
