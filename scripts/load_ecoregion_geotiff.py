@@ -613,35 +613,22 @@ def assign_sampling_blocks(
     Returns:
         Tuple containing dense block IDs, global block-column indices, and
         global block-row indices for every coordinate.
-
-    Raises:
-        ValueError: If coordinate arrays are invalid or block size is not
-            finite and positive.
     """
 
-    x_values = np.asarray(x_meters, dtype=np.float64)
-    y_values = np.asarray(y_meters, dtype=np.float64)
-    if x_values.ndim != 1 or y_values.ndim != 1:
-        raise ValueError("Sampling coordinates must be one-dimensional arrays.")
-    if x_values.shape != y_values.shape:
-        raise ValueError("Sampling coordinate arrays must have matching shapes.")
-    if x_values.size == 0:
-        raise ValueError("No eligible pixel coordinates were available for sampling.")
-    if not np.all(np.isfinite(x_values)) or not np.all(np.isfinite(y_values)):
-        raise ValueError("Sampling coordinates must all be finite.")
-    if not math.isfinite(block_size_meters) or block_size_meters <= 0:
-        raise ValueError("Sampling block size must be finite and greater than zero.")
-
-    block_columns = np.floor(x_values / block_size_meters).astype(np.int64)
-    block_rows = np.floor(y_values / block_size_meters).astype(np.int64)
+    x_coordinates = np.asarray(x_meters, dtype=np.float64)
+    y_coordinates = np.asarray(y_meters, dtype=np.float64)
+    block_columns = np.floor(x_coordinates / block_size_meters).astype(np.int64)
+    block_rows = np.floor(y_coordinates / block_size_meters).astype(np.int64)
+    # A structured array lets np.unique treat each column/row pair as one value
+    # while also returning the dense block offset for every source pixel.
     block_pairs = np.empty(
-        x_values.size,
+        x_coordinates.size,
         dtype=[("column", np.int64), ("row", np.int64)],
     )
     block_pairs["column"] = block_columns
     block_pairs["row"] = block_rows
-    _, inverse = np.unique(block_pairs, return_inverse=True)
-    return inverse.astype(np.int64) + 1, block_columns, block_rows
+    _, dense_block_offsets = np.unique(block_pairs, return_inverse=True)
+    return dense_block_offsets.astype(np.int64) + 1, block_columns, block_rows
 
 
 def _transformed_coordinates(
@@ -656,14 +643,7 @@ def _transformed_coordinates(
 
     Returns:
         Longitude, latitude, equal-area x, and equal-area y coordinate arrays.
-
-    Raises:
-        ValueError: If the raster CRS is missing or transformed coordinates are
-            not finite.
     """
-
-    if raster.crs is None:
-        raise ValueError("Spatial sampling requires a defined raster CRS.")
 
     rows = flat_pixel_indices // raster.width
     columns = flat_pixel_indices % raster.width
@@ -690,17 +670,20 @@ def _transformed_coordinates(
         EQUAL_AREA_CRS,
         always_xy=True,
     )
-    longitudes, latitudes = geographic_transformer.transform(selected_x, selected_y)
-    x_meters, y_meters = equal_area_transformer.transform(selected_x, selected_y)
-    arrays = tuple(
-        np.asarray(values, dtype=np.float64)
-        for values in (longitudes, latitudes, x_meters, y_meters)
+    transformed_longitudes, transformed_latitudes = geographic_transformer.transform(
+        selected_x,
+        selected_y,
     )
-    if any(not np.all(np.isfinite(values)) for values in arrays):
-        raise ValueError(
-            "Could not transform every eligible pixel to finite coordinates."
-        )
-    return arrays
+    transformed_x_meters, transformed_y_meters = equal_area_transformer.transform(
+        selected_x,
+        selected_y,
+    )
+    return (
+        np.asarray(transformed_longitudes, dtype=np.float64),
+        np.asarray(transformed_latitudes, dtype=np.float64),
+        np.asarray(transformed_x_meters, dtype=np.float64),
+        np.asarray(transformed_y_meters, dtype=np.float64),
+    )
 
 
 def create_spatial_sample(
@@ -738,49 +721,49 @@ def create_spatial_sample(
 
     # The export repeats the same reference surface for each year. Use the
     # first copy as the response and exclude every copy from predictor columns.
-    reference_offsets = tuple(
-        offset
-        for offset, name in enumerate(raster.band_names)
-        if name.lower() == "reference_sites"
-        or name.lower().endswith("_grassland_reference_sites")
+    reference_band_offsets = tuple(
+        band_offset
+        for band_offset, band_name in enumerate(raster.band_names)
+        if band_name.lower() == "reference_sites"
+        or band_name.lower().endswith("_grassland_reference_sites")
     )
-    reference_band_offset = reference_offsets[0]
-    predictor_offsets = tuple(
-        offset for offset in range(raster.band_count) if offset not in reference_offsets
+    reference_band_offset = reference_band_offsets[0]
+    predictor_band_offsets = tuple(
+        band_offset
+        for band_offset in range(raster.band_count)
+        if band_offset not in reference_band_offsets
     )
 
-    predictor_names = tuple(raster.band_names[offset] for offset in predictor_offsets)
-    if len(set(predictor_names)) != len(predictor_names):
-        raise ValueError(
-            "Predictor band descriptions must be unique for Parquet output."
-        )
+    predictor_band_names = tuple(
+        raster.band_names[band_offset] for band_offset in predictor_band_offsets
+    )
 
     reference_band_values = raster.values[reference_band_offset]
     reference_band_validity = raster.validity[reference_band_offset]
 
-    reference_mask = reference_band_validity & (reference_band_values == 1)
-    predictor_domain = np.zeros((raster.height, raster.width), dtype=np.bool_)
-    for offset in tqdm(
-        predictor_offsets,
-        total=len(predictor_offsets),
+    reference_site_mask = reference_band_validity & (reference_band_values == 1)
+    predictor_footprint = np.zeros((raster.height, raster.width), dtype=np.bool_)
+    for predictor_band_offset in tqdm(
+        predictor_band_offsets,
+        total=len(predictor_band_offsets),
         desc="Building predictor footprint",
         unit="band",
         disable=not show_progress,
     ):
         np.logical_or(
-            predictor_domain,
-            raster.validity[offset],
-            out=predictor_domain,
+            predictor_footprint,
+            raster.validity[predictor_band_offset],
+            out=predictor_footprint,
         )
     excluded_reference_pixels = int(
-        np.count_nonzero(reference_mask & ~predictor_domain)
+        np.count_nonzero(reference_site_mask & ~predictor_footprint)
     )
-    eligible_flat_indices = np.flatnonzero(predictor_domain.ravel())
+    eligible_flat_indices = np.flatnonzero(predictor_footprint.ravel())
     if eligible_flat_indices.size == 0:
         raise RuntimeError("No pixels contain a defined non-reference predictor value.")
 
-    pixel_area_by_row = pixel_area_by_row_square_meters(raster)
-    if pixel_area_by_row is None:
+    pixel_areas_by_row = pixel_area_by_row_square_meters(raster)
+    if pixel_areas_by_row is None:
         raise ValueError("Could not calculate square-meter pixel areas for sampling.")
 
     preparation_progress = tqdm(
@@ -791,8 +774,8 @@ def create_spatial_sample(
     )
     rows = eligible_flat_indices // raster.width
     columns = eligible_flat_indices % raster.width
-    pixel_areas = pixel_area_by_row[rows]
-    reference_site_classes = reference_mask.ravel()[eligible_flat_indices].astype(
+    pixel_areas = pixel_areas_by_row[rows]
+    reference_site_classes = reference_site_mask.ravel()[eligible_flat_indices].astype(
         np.uint8
     )
     preparation_progress.update()
@@ -829,48 +812,56 @@ def create_spatial_sample(
         available_pixels_per_group,
         samples_per_class_per_block,
     )
-    available_by_group = np.zeros(block_count * 2, dtype=np.int64)
-    sampled_by_group = np.zeros(block_count * 2, dtype=np.int64)
-    available_by_group[unique_group_keys] = available_pixels_per_group
-    sampled_by_group[unique_group_keys] = sampled_pixels_per_group
+    available_pixels_by_group_key = np.zeros(block_count * 2, dtype=np.int64)
+    sampled_pixels_by_group_key = np.zeros(block_count * 2, dtype=np.int64)
+    available_pixels_by_group_key[unique_group_keys] = available_pixels_per_group
+    sampled_pixels_by_group_key[unique_group_keys] = sampled_pixels_per_group
 
     selected_positions = np.empty(
         int(np.sum(sampled_pixels_per_group)),
         dtype=np.int64,
     )
-    random_generator = np.random.default_rng(random_seed)
-    cursor = 0
+    sampling_random_generator = np.random.default_rng(random_seed)
+    selection_write_offset = 0
     group_iterator = zip(
         group_start_offsets,
         available_pixels_per_group,
         sampled_pixels_per_group,
         strict=True,
     )
-    for start, available_count, sampled_count in tqdm(
+    for (
+        group_start_offset,
+        available_pixels_in_group,
+        sampled_pixels_in_group,
+    ) in tqdm(
         group_iterator,
         total=unique_group_keys.size,
         desc="Sampling block classes",
         unit="stratum",
         disable=not show_progress,
     ):
-        group_positions = positions_sorted_by_group[start : start + available_count]
-        if sampled_count < available_count:
-            chosen = random_generator.choice(
-                group_positions,
-                size=sampled_count,
+        positions_in_group = positions_sorted_by_group[
+            group_start_offset : group_start_offset + available_pixels_in_group
+        ]
+        if sampled_pixels_in_group < available_pixels_in_group:
+            selected_positions_in_group = sampling_random_generator.choice(
+                positions_in_group,
+                size=sampled_pixels_in_group,
                 replace=False,
             )
         else:
-            chosen = group_positions
-        selected_positions[cursor : cursor + sampled_count] = chosen
-        cursor += sampled_count
+            selected_positions_in_group = positions_in_group
+        selected_positions[
+            selection_write_offset : selection_write_offset + sampled_pixels_in_group
+        ] = selected_positions_in_group
+        selection_write_offset += sampled_pixels_in_group
     selected_positions.sort()
 
     selected_flat_indices = eligible_flat_indices[selected_positions]
     selected_reference_site_classes = reference_site_classes[selected_positions]
     selected_group_keys = group_keys[selected_positions]
-    selected_available_counts = available_by_group[selected_group_keys]
-    selected_sampled_counts = sampled_by_group[selected_group_keys]
+    selected_available_counts = available_pixels_by_group_key[selected_group_keys]
+    selected_sampled_counts = sampled_pixels_by_group_key[selected_group_keys]
     sampling_probabilities = selected_sampled_counts / selected_available_counts
     sampling_weights = selected_available_counts / selected_sampled_counts
     selected_pixel_areas = pixel_areas[selected_positions]
@@ -897,40 +888,49 @@ def create_spatial_sample(
     # and vegetation measurements; reference-site bands were excluded above.
     pixel_values = raster.pixel_values()
     pixel_validity = raster.pixel_validity()
-    predictor_defined_pixels = []
+    predictor_defined_pixels: list[int] = []
     complete_predictor_mask = np.ones(selected_positions.size, dtype=np.bool_)
-    for offset, name in tqdm(
-        zip(predictor_offsets, predictor_names, strict=True),
-        total=len(predictor_offsets),
+    for predictor_band_offset, predictor_band_name in tqdm(
+        zip(predictor_band_offsets, predictor_band_names, strict=True),
+        total=len(predictor_band_offsets),
         desc="Building predictor columns",
         unit="band",
         disable=not show_progress,
     ):
-        valid_values = pixel_validity[selected_flat_indices, offset]
+        predictor_value_is_defined = pixel_validity[
+            selected_flat_indices,
+            predictor_band_offset,
+        ]
         predictor_values = np.asarray(
-            pixel_values[selected_flat_indices, offset],
+            pixel_values[selected_flat_indices, predictor_band_offset],
             dtype=np.float64,
         ).copy()
-        predictor_values[~valid_values] = np.nan
-        table_columns[name] = predictor_values
-        predictor_defined_pixels.append(int(np.count_nonzero(valid_values)))
-        complete_predictor_mask &= valid_values
+        predictor_values[~predictor_value_is_defined] = np.nan
+        table_columns[predictor_band_name] = predictor_values
+        predictor_defined_pixels.append(
+            int(np.count_nonzero(predictor_value_is_defined))
+        )
+        complete_predictor_mask &= predictor_value_is_defined
 
-    table = pd.DataFrame(table_columns, copy=False)
+    sample_table = pd.DataFrame(table_columns, copy=False)
     class_summaries = []
     for reference_site_class in (0, 1):
-        available_mask = reference_site_classes == reference_site_class
-        sampled_mask = selected_reference_site_classes == reference_site_class
-        class_sampling_weights = sampling_weights[sampled_mask]
+        available_class_mask = reference_site_classes == reference_site_class
+        sampled_class_mask = selected_reference_site_classes == reference_site_class
+        class_sampling_weights = sampling_weights[sampled_class_mask]
         class_summaries.append(
             SamplingClassSummary(
                 reference_site_class=reference_site_class,
-                available_pixels=int(np.count_nonzero(available_mask)),
-                sampled_pixels=int(np.count_nonzero(sampled_mask)),
-                available_area_square_meters=float(np.sum(pixel_areas[available_mask])),
+                available_pixels=int(np.count_nonzero(available_class_mask)),
+                sampled_pixels=int(np.count_nonzero(sampled_class_mask)),
+                available_area_square_meters=float(
+                    np.sum(pixel_areas[available_class_mask])
+                ),
                 weighted_pixels=float(np.sum(class_sampling_weights)),
-                weighted_area_square_meters=float(np.sum(area_weights[sampled_mask])),
-                blocks_with_class=int(np.unique(block_ids[available_mask]).size),
+                weighted_area_square_meters=float(
+                    np.sum(area_weights[sampled_class_mask])
+                ),
+                blocks_with_class=int(np.unique(block_ids[available_class_mask]).size),
                 minimum_sampling_weight=(
                     float(np.min(class_sampling_weights))
                     if class_sampling_weights.size
@@ -944,16 +944,16 @@ def create_spatial_sample(
             )
         )
 
-    block_populations = np.bincount(block_ids)[1:]
+    available_pixels_per_block = np.bincount(block_ids)[1:]
     # A SpatialSample combines selected pixels from all blocks; each table row
     # retains its sampling_block_id so block membership is not lost.
     return SpatialSample(
-        table=table,
+        table=sample_table,
         reference_band_name=raster.band_names[reference_band_offset],
         ignored_reference_band_names=tuple(
-            raster.band_names[offset] for offset in reference_offsets[1:]
+            raster.band_names[band_offset] for band_offset in reference_band_offsets[1:]
         ),
-        predictor_band_names=predictor_names,
+        predictor_band_names=predictor_band_names,
         predictor_defined_pixels=tuple(predictor_defined_pixels),
         complete_predictor_rows=int(np.count_nonzero(complete_predictor_mask)),
         block_size_meters=block_size_meters,
@@ -962,9 +962,9 @@ def create_spatial_sample(
         block_count=block_count,
         reference_block_count=class_summaries[1].blocks_with_class,
         nonreference_block_count=class_summaries[0].blocks_with_class,
-        minimum_available_pixels_per_block=int(np.min(block_populations)),
-        median_available_pixels_per_block=float(np.median(block_populations)),
-        maximum_available_pixels_per_block=int(np.max(block_populations)),
+        minimum_available_pixels_per_block=int(np.min(available_pixels_per_block)),
+        median_available_pixels_per_block=float(np.median(available_pixels_per_block)),
+        maximum_available_pixels_per_block=int(np.max(available_pixels_per_block)),
         excluded_reference_pixels=excluded_reference_pixels,
         class_summaries=(class_summaries[0], class_summaries[1]),
         elapsed_seconds=time.perf_counter() - started,
@@ -1585,21 +1585,6 @@ def _print_coverage(label: str, summary: CoverageSummary) -> None:
     )
 
 
-def _format_weight(value: float) -> str:
-    """Format a sampling weight or missing weight marker.
-
-    Args:
-        value: Sampling weight, potentially ``NaN`` for an empty class.
-
-    Returns:
-        Compact weight text.
-    """
-
-    if not math.isfinite(value):
-        return "n/a"
-    return f"{value:,.3f}"
-
-
 def print_spatial_sampling_report(sample: SpatialSample) -> None:
     """Print detailed diagnostics for a completed spatial sample.
 
@@ -1623,7 +1608,7 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
         )
     else:
         print("Ignored duplicate reference band(s): none")
-    print("Target interpretation: 1 = reference site; 0 = non-reference site")
+    print("Reference-site class: 1 = reference site; 0 = non-reference site")
     print(f"Equal-area sampling CRS: {EQUAL_AREA_CRS}")
     print(
         f"Block size: {sample.block_size_meters:,.0f} m x "
@@ -1657,7 +1642,7 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
     print()
     print("Class sampling and weight checks")
     print(
-        f"{'Target':<15} {'Available':>12} {'Sampled':>12} {'Retained':>10} "
+        f"{'Class':<15} {'Available':>12} {'Sampled':>12} {'Retained':>10} "
         f"{'Area km^2':>14} {'Weighted count':>16} {'Area error':>11} "
         f"{'Weight range':>21}"
     )
@@ -1681,14 +1666,15 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
         else:
             area_error = "n/a"
         label = (
-            "0 non-reference"
-            if summary.reference_site_class == 0
-            else "1 reference"
+            "0 non-reference" if summary.reference_site_class == 0 else "1 reference"
         )
-        weight_range = (
-            f"{_format_weight(summary.minimum_sampling_weight)}-"
-            f"{_format_weight(summary.maximum_sampling_weight)}"
-        )
+        if summary.sampled_pixels:
+            weight_range = (
+                f"{summary.minimum_sampling_weight:,.3f}-"
+                f"{summary.maximum_sampling_weight:,.3f}"
+            )
+        else:
+            weight_range = "n/a"
         print(
             f"{label:<15} {summary.available_pixels:>12,} "
             f"{summary.sampled_pixels:>12,} {retained_percent:>9.2f}% "
