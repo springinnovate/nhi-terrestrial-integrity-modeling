@@ -893,6 +893,8 @@ def create_spatial_sample(
         "area_weight_m2": area_weights,
     }
 
+    # Predictors are every non-reference raster band, such as climate, terrain,
+    # and vegetation measurements; reference-site bands were excluded above.
     pixel_values = raster.pixel_values()
     pixel_validity = raster.pixel_validity()
     predictor_defined_pixels = []
