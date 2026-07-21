@@ -758,28 +758,6 @@ def create_spatial_sample(
         raise ValueError(
             "Predictor band descriptions must be unique for Parquet output."
         )
-    reserved_columns = {
-        "row",
-        "column",
-        "longitude",
-        "latitude",
-        "sampling_block_id",
-        "sampling_block_column",
-        "sampling_block_row",
-        "reference_site",
-        "pixel_area_m2",
-        "available_pixels_in_block_class",
-        "sampled_pixels_in_block_class",
-        "sampling_probability",
-        "sampling_weight",
-        "area_weight_m2",
-    }
-    conflicting_names = sorted(reserved_columns.intersection(predictor_names))
-    if conflicting_names:
-        raise ValueError(
-            "Predictor band names conflict with sampling metadata columns: "
-            + ", ".join(conflicting_names)
-        )
 
     target_values = raster.values[target_offset]
     target_validity = raster.validity[target_offset]
