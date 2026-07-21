@@ -346,28 +346,6 @@ class ParquetWriteSummary:
     elapsed_seconds: float
 
 
-def _positive_float(value: str) -> float:
-    """Parse a positive floating-point command-line value.
-
-    Args:
-        value: User-provided argument text.
-
-    Returns:
-        Parsed positive floating-point value.
-
-    Raises:
-        argparse.ArgumentTypeError: If the value is not finite and positive.
-    """
-
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("must be a number") from error
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
-
-
 def _positive_int(value: str) -> int:
     """Parse a positive integer command-line value.
 
@@ -437,7 +415,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sampling-block-size-m",
-        type=_positive_float,
+        type=float,
         default=DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
         help=(
             "Square sampling-block size in meters "
