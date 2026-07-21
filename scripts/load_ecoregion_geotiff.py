@@ -594,33 +594,6 @@ def pixel_area_by_row_square_meters(
     )
 
 
-def _reference_band_offsets(band_names: Sequence[str]) -> tuple[int, ...]:
-    """Locate exported grassland reference-site bands.
-
-    Args:
-        band_names: Raster band descriptions in source order.
-
-    Returns:
-        Zero-based offsets of all reference-site bands.
-
-    Raises:
-        ValueError: If no reference-site band can be identified.
-    """
-
-    offsets = tuple(
-        offset
-        for offset, name in enumerate(band_names)
-        if name.lower() == "reference_sites"
-        or name.lower().endswith("_grassland_reference_sites")
-    )
-    if not offsets:
-        raise ValueError(
-            "Could not find a Grassland Reference Sites band. Available bands: "
-            + ", ".join(band_names)
-        )
-    return offsets
-
-
 def assign_sampling_blocks(
     x_meters: np.ndarray,
     y_meters: np.ndarray,
@@ -765,7 +738,14 @@ def create_spatial_sample(
     if samples_per_class_per_block <= 0:
         raise ValueError("Samples per class per block must be greater than zero.")
 
-    reference_offsets = _reference_band_offsets(raster.band_names)
+    # The export repeats the same reference surface for each year. Use the
+    # first copy as the response and exclude every copy from predictor columns.
+    reference_offsets = tuple(
+        offset
+        for offset, name in enumerate(raster.band_names)
+        if name.lower() == "reference_sites"
+        or name.lower().endswith("_grassland_reference_sites")
+    )
     target_offset = reference_offsets[0]
     predictor_offsets = tuple(
         offset for offset in range(raster.band_count) if offset not in reference_offsets
