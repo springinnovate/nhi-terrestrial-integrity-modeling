@@ -1,8 +1,12 @@
-var DEFAULTYEAR = "2005";
+var EXPORT_YEARS = [2018, 2019];
 var DEFAULT_DRIVE_FOLDER = "gee_response_variables";
 var DEFAULT_MAX_PIXELS = 1e13;
 var EXPORT_CRS = "EPSG:4326";
 var EXPORT_SCALE_METERS = 500;
+var ECOREGION_NAME_PROPERTIES = ["ECO_NAME", "eco_name", "NAME", "name"];
+var ECOREGION_AREA_PROPERTY = "_export_area_m2";
+var ECOREGION_NAME_PROPERTY = "_export_ecoregion_name";
+var EXPORT_NAME_PART_MAX_LENGTH = 28;
 
 var LANDSAT_NDVI_DATASET = "LANDSAT/COMPOSITES/C02/T1_L2_8DAY_NDVI";
 var MODIS_PHENOLOGY_DATASET = "MODIS/061/MCD12Q2";
@@ -27,12 +31,15 @@ var ERA5_START_YEAR = 1979;
 var INTERANNUAL_RAINFALL_WINDOW_YEARS = 10;
 var STREAM_UPSTREAM_AREA_THRESHOLD_KM2 = 25;
 
-var REGION_DEFINITIONS = [
-    {
-        name: "Wyoming Basin",
-        assetId: "projects/ecoshard-202922/assets/nhi_assets/wyoming_basin2"
-    }
-];
+var MAYBE_GRASSLAND_ECOREGIONS = ee.FeatureCollection(
+    "projects/ecoshard-202922/assets/nhi_assets/maybe_grassland_ecoregions_simplified_100m"
+);
+var MAYBE_GRASSLAND_ECOREGION_MASK = ee
+    .Image()
+    .byte()
+    .paint(MAYBE_GRASSLAND_ECOREGIONS, 1)
+    .rename("maybe_grassland_ecoregion")
+    .selfMask();
 
 var GRASSLAND_PROB_IC = ee.ImageCollection(
     "projects/global-pasture-watch/assets/ggc-30m/v1/nat-semi-grassland_p"
@@ -46,7 +53,7 @@ var HII_IC = ee
 
 var PROBABILITY_INTEGRITY_START_YEAR = 2001;
 var PROBABILITY_INTEGRITY_END_YEAR = 2020;
-var DEFAULT_GRASSLAND_PROB_THRESHOLD = 60;
+var DEFAULT_GRASSLAND_PROB_THRESHOLD = 80;
 var DEFAULT_HMI_THRESHOLD = 0.1;
 var DEFAULT_HII_THRESHOLD = 0.08;
 
@@ -129,6 +136,7 @@ function probabilityIntegrityIndex(year, thresholds) {
             })
         )
         .and(HMI_IMG.lte(thresholds.hmi))
+        .and(MAYBE_GRASSLAND_ECOREGION_MASK)
         .selfMask()
         .toByte();
 }
@@ -683,32 +691,10 @@ var LAYER_DEFINITIONS = [
     )
 ];
 
-function regionNames() {
-    return REGION_DEFINITIONS.map(function (region) {
-        return region.name;
-    });
-}
-
-function regionDefinitionByName(name) {
-    for (var i = 0; i < REGION_DEFINITIONS.length; i++) {
-        if (REGION_DEFINITIONS[i].name === name) {
-            return REGION_DEFINITIONS[i];
-        }
-    }
-    return REGION_DEFINITIONS[0];
-}
-
-function regionGeometry(regionDefinition) {
-    return ee.FeatureCollection(regionDefinition.assetId).geometry();
-}
-
-function exportRegion(region) {
-    return region.bounds(1, ee.Projection(EXPORT_CRS));
-}
-
 function exportImage(image, region) {
     var exportGeometry = region.transform(ee.Projection(EXPORT_CRS), 1);
     return image
+        .updateMask(MAYBE_GRASSLAND_ECOREGION_MASK)
         .reproject({
             crs: EXPORT_CRS,
             scale: EXPORT_SCALE_METERS
@@ -717,298 +703,218 @@ function exportImage(image, region) {
         .toFloat();
 }
 
-function regionOutline(regionDefinition) {
-    return ee.FeatureCollection(regionDefinition.assetId).style({
-        color: "ffff00",
-        fillColor: "00000000",
-        width: 2
-    });
-}
-
-function referenceSitesLayer(region, thresholds) {
-    return probabilityIntegrityIndex(null, thresholds)
-        .eq(1)
-        .selfMask()
-        .clip(region);
-}
-
 function slug(text) {
     return text
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
+        .replace(/^_+|_+$/g, "")
+        .slice(0, EXPORT_NAME_PART_MAX_LENGTH)
+        .replace(/_+$/g, "");
 }
 
 function thresholdNameParts(thresholds) {
     return [
-        slug("grassland_prob_" + thresholds.grasslandProbability),
+        slug("gp_" + thresholds.grasslandProbability),
         slug("hmi_" + thresholds.hmi),
         slug("hii_" + thresholds.hii)
     ];
 }
 
-function exportName(layerDefinition, year, regionDefinition, thresholds) {
-    var parts = [
-        slug(layerDefinition.name),
-        slug("year_" + year),
-        slug(regionDefinition.name)
-    ];
-    if (layerDefinition.isReferenceLayer) {
-        parts = parts.concat(thresholdNameParts(thresholds));
+function zeroPad(value, width) {
+    var text = String(value);
+    while (text.length < width) {
+        text = "0" + text;
     }
-    return parts.join("_");
+    return text;
+}
+
+function exportBandName(layerDefinition, layerNumber, year) {
+    return (
+        "y" +
+        year +
+        "_d" +
+        zeroPad(layerNumber, 2) +
+        "_" +
+        slug(layerDefinition.name)
+    );
+}
+
+function exportName(years, ecoregionName, ecoregionNumber, thresholds) {
+    var ecoregionSlug = slug(ecoregionName) || "unnamed_ecoregion";
+    var parts = [
+        ecoregionSlug,
+        "e" + zeroPad(ecoregionNumber, 4),
+        "response_variables",
+        slug("years_" + years.join("_"))
+    ];
+    return parts.concat(thresholdNameParts(thresholds)).join("_");
+}
+
+function buildYearExportStack(year, thresholds) {
+    var firstLayer = LAYER_DEFINITIONS[0];
+    var stack = firstLayer
+        .build(year, thresholds)
+        .rename(exportBandName(firstLayer, 1, year));
+
+    for (
+        var layerIndex = 1;
+        layerIndex < LAYER_DEFINITIONS.length;
+        layerIndex++
+    ) {
+        var layerDefinition = LAYER_DEFINITIONS[layerIndex];
+        stack = stack.addBands(
+            layerDefinition
+                .build(year, thresholds)
+                .rename(exportBandName(layerDefinition, layerIndex + 1, year))
+        );
+    }
+    return stack;
+}
+
+function buildExportStack(years, thresholds) {
+    var stack = buildYearExportStack(years[0], thresholds);
+    for (var yearIndex = 1; yearIndex < years.length; yearIndex++) {
+        stack = stack.addBands(
+            buildYearExportStack(years[yearIndex], thresholds)
+        );
+    }
+    return stack;
+}
+
+function firstAvailableProperty(feature, propertyNames, fallback) {
+    var availableProperties = feature.propertyNames();
+    var value = fallback;
+    propertyNames
+        .slice()
+        .reverse()
+        .forEach(function (propertyName) {
+            value = ee.Algorithms.If(
+                availableProperties.contains(propertyName),
+                feature.get(propertyName),
+                value
+            );
+        });
+    return value;
+}
+
+function orderedEcoregions() {
+    return MAYBE_GRASSLAND_ECOREGIONS.map(function (feature) {
+        var fallbackName = ee
+            .String("unnamed_")
+            .cat(feature.get("system:index"));
+        return feature.set({
+            _export_area_m2: feature.geometry().area(100),
+            _export_ecoregion_name: firstAvailableProperty(
+                feature,
+                ECOREGION_NAME_PROPERTIES,
+                fallbackName
+            )
+        });
+    }).sort(ECOREGION_AREA_PROPERTY);
 }
 
 var controlPanel = ui.Panel({
     layout: ui.Panel.Layout.flow("vertical"),
-    style: { width: "520px", padding: "12px" }
-});
-
-var title = ui.Label({
-    value: "Response Variable Raster Exports",
-    style: { fontWeight: "bold", fontSize: "18px", margin: "0 0 8px 0" }
-});
-
-var grasslandProbabilityInput = ui.Textbox({
-    value: String(DEFAULT_GRASSLAND_PROB_THRESHOLD),
-    style: { width: "120px" },
-    onChange: function () {
-        updateMapLayers();
-    }
-});
-
-var hmiThresholdInput = ui.Textbox({
-    value: String(DEFAULT_HMI_THRESHOLD),
-    style: { width: "120px" },
-    onChange: function () {
-        updateMapLayers();
-    }
-});
-
-var hiiThresholdInput = ui.Textbox({
-    value: String(DEFAULT_HII_THRESHOLD),
-    style: { width: "120px" },
-    onChange: function () {
-        updateMapLayers();
-    }
-});
-
-var yearInput = ui.Textbox({
-    value: DEFAULTYEAR,
-    style: { width: "120px" }
-});
-
-var driveFolderInput = ui.Textbox({
-    value: DEFAULT_DRIVE_FOLDER,
-    style: { width: "260px" }
-});
-
-var exportGridLabel = ui.Label({
-    value: String(EXPORT_SCALE_METERS) + " m, " + EXPORT_CRS,
-    style: { margin: "4px 0" }
-});
-
-var regionSelect = ui.Select({
-    items: regionNames(),
-    value: REGION_DEFINITIONS[0].name,
-    onChange: function () {
-        updateMapLayers();
-    },
-    style: { width: "260px" }
+    style: { width: "420px", padding: "12px" }
 });
 
 var statusLabel = ui.Label({
-    value: "Exports will use the selected export year and be sent to your authorized Google Drive.",
-    style: { margin: "8px 0 0 0" }
+    value: "Ordering ecoregions and staging Drive export tasks...",
+    style: { margin: "12px 0 0 0", whiteSpace: "pre-wrap" }
 });
 
-function fieldRow(label, widget) {
-    return ui.Panel({
-        widgets: [
-            ui.Label({
-                value: label,
-                style: { width: "150px", margin: "4px 8px 4px 0" }
-            }),
-            widget
-        ],
-        layout: ui.Panel.Layout.flow("horizontal")
-    });
-}
+function stageAllEcoregionExports() {
+    var thresholds = defaultReferenceThresholds();
+    var ecoregions = orderedEcoregions();
+    var ecoregionList = ecoregions.toList(ecoregions.size());
+    var exportStack = buildExportStack(EXPORT_YEARS, thresholds);
 
-function referenceThresholds() {
-    return {
-        grasslandProbability: parseFloat(grasslandProbabilityInput.getValue()),
-        hmi: parseFloat(hmiThresholdInput.getValue()),
-        hii: parseFloat(hiiThresholdInput.getValue())
-    };
-}
+    ecoregions
+        .aggregate_array(ECOREGION_NAME_PROPERTY)
+        .evaluate(function (ecoregionNames, error) {
+            if (error) {
+                statusLabel.setValue(
+                    "Could not load the ordered ecoregion list: " + error
+                );
+                return;
+            }
 
-var layerRows = [];
-var layerList = ui.Panel({
-    layout: ui.Panel.Layout.flow("vertical"),
-    style: { maxHeight: "480px", stretch: "horizontal" }
-});
+            var queuedTaskCount = 0;
+            ecoregionNames.forEach(function (ecoregionName, ecoregionIndex) {
+                var ecoregionNumber = ecoregionIndex + 1;
+                var region = ee
+                    .Feature(ecoregionList.get(ecoregionIndex))
+                    .geometry();
+                var name = exportName(
+                    EXPORT_YEARS,
+                    String(ecoregionName),
+                    ecoregionNumber,
+                    thresholds
+                );
+                Export.image.toDrive({
+                    image: exportImage(exportStack, region),
+                    description: name,
+                    folder: DEFAULT_DRIVE_FOLDER,
+                    fileNamePrefix: name,
+                    region: region,
+                    crs: EXPORT_CRS,
+                    scale: EXPORT_SCALE_METERS,
+                    maxPixels: DEFAULT_MAX_PIXELS
+                });
+                queuedTaskCount += 1;
+            });
 
-LAYER_DEFINITIONS.forEach(function (layerDefinition) {
-    var checkbox = ui.Checkbox({
-        label: layerDefinition.name,
-        value: false,
-        style: { width: "300px", margin: "0 8px 0 0" }
-    });
-    layerRows.push({
-        layerDefinition: layerDefinition,
-        checkbox: checkbox
-    });
-    layerList.add(
-        ui.Panel({
-            widgets: [
-                checkbox,
-                ui.Label({
-                    value: layerDefinition.yearRange,
-                    style: { width: "120px", margin: "0 8px 0 0" }
-                }),
-                ui.Label({
-                    value: String(EXPORT_SCALE_METERS) + " m",
-                    style: { width: "80px", margin: "0" }
-                })
-            ],
-            layout: ui.Panel.Layout.flow("horizontal")
-        })
-    );
-});
-
-function setAllLayerCheckboxes(value) {
-    layerRows.forEach(function (row) {
-        row.checkbox.setValue(value, false);
-    });
-}
-
-function selectedLayerDefinitions() {
-    var selected = [];
-    layerRows.forEach(function (row) {
-        if (row.checkbox.getValue()) {
-            selected.push(row.layerDefinition);
-        }
-    });
-    return selected;
-}
-
-function queueDriveExports() {
-    var year = parseInt(yearInput.getValue(), 10);
-    var regionDefinition = regionDefinitionByName(regionSelect.getValue());
-    var region = regionGeometry(regionDefinition);
-    var regionBounds = exportRegion(region);
-    var thresholds = referenceThresholds();
-    var selectedLayers = selectedLayerDefinitions();
-
-    selectedLayers.forEach(function (layerDefinition) {
-        var name = exportName(
-            layerDefinition,
-            year,
-            regionDefinition,
-            thresholds
-        );
-        Export.image.toDrive({
-            image: exportImage(layerDefinition.build(year, thresholds), region),
-            description: name,
-            folder: driveFolderInput.getValue(),
-            fileNamePrefix: name,
-            region: regionBounds,
-            crs: EXPORT_CRS,
-            scale: EXPORT_SCALE_METERS,
-            maxPixels: DEFAULT_MAX_PIXELS
+            statusLabel.setValue(
+                queuedTaskCount +
+                    " Drive export task(s) staged: one multiband raster for " +
+                    "each of " +
+                    ecoregionNames.length +
+                    " ecoregion(s), ordered from smallest to largest. " +
+                    "Open the Tasks tab and click Run on each task."
+            );
         });
-    });
-
-    statusLabel.setValue(
-        selectedLayers.length +
-            " Drive export task(s) queued for export year " +
-            year +
-            " in the Tasks tab."
-    );
 }
 
 var map = ui.Map();
 map.setOptions("HYBRID");
 map.style().set("stretch", "both");
 map.setControlVisibility({ mapTypeControl: true });
+map.layers().reset([
+    ui.Map.Layer(
+        MAYBE_GRASSLAND_ECOREGIONS.style({
+            color: "00ff00",
+            width: 1,
+            fillColor: "00ff0026"
+        }),
+        {},
+        "Maybe Grassland Ecoregions"
+    )
+]);
+map.centerObject(MAYBE_GRASSLAND_ECOREGIONS, 3);
 
-function updateMapLayers() {
-    var regionDefinition = regionDefinitionByName(regionSelect.getValue());
-    var region = regionGeometry(regionDefinition);
-    var thresholds = referenceThresholds();
-    map.layers().reset([
-        ui.Map.Layer(
-            referenceSitesLayer(region, thresholds),
-            { palette: ["ff2db2"], min: 1, max: 1 },
-            "Grassland Reference Sites"
-        ),
-        ui.Map.Layer(regionOutline(regionDefinition), {}, regionDefinition.name)
-    ]);
-    map.centerObject(region, 7);
-}
-
-controlPanel.add(title);
 controlPanel.add(
     ui.Label({
-        value: "Reference site thresholds",
-        style: { fontWeight: "bold", margin: "8px 0 4px 0" }
-    })
-);
-controlPanel.add(fieldRow("Grassland prob", grasslandProbabilityInput));
-controlPanel.add(fieldRow("HMI", hmiThresholdInput));
-controlPanel.add(fieldRow("HII", hiiThresholdInput));
-controlPanel.add(fieldRow("Export year", yearInput));
-controlPanel.add(fieldRow("Region", regionSelect));
-controlPanel.add(fieldRow("Drive folder", driveFolderInput));
-controlPanel.add(fieldRow("Export grid", exportGridLabel));
-controlPanel.add(
-    ui.Panel({
-        widgets: [
-            ui.Button("Select all", function () {
-                setAllLayerCheckboxes(true);
-            }),
-            ui.Button("Clear all", function () {
-                setAllLayerCheckboxes(false);
-            }),
-            ui.Button("Queue Drive exports", queueDriveExports)
-        ],
-        layout: ui.Panel.Layout.flow("horizontal"),
-        style: { margin: "8px 0" }
+        value: "Ecoregion Raster Exports",
+        style: { fontWeight: "bold", fontSize: "18px", margin: "0 0 8px 0" }
     })
 );
 controlPanel.add(
-    ui.Panel({
-        widgets: [
-            ui.Label({
-                value: "Dataset",
-                style: {
-                    width: "300px",
-                    fontWeight: "bold",
-                    margin: "0 8px 4px 0"
-                }
-            }),
-            ui.Label({
-                value: "Years",
-                style: {
-                    width: "120px",
-                    fontWeight: "bold",
-                    margin: "0 8px 4px 0"
-                }
-            }),
-            ui.Label({
-                value: "Export",
-                style: {
-                    width: "80px",
-                    fontWeight: "bold",
-                    margin: "0 0 4px 0"
-                }
-            })
-        ],
-        layout: ui.Panel.Layout.flow("horizontal")
-    })
+    ui.Label(
+        "This run stages one multiband raster task per maybe-grassland ecoregion. Each raster contains every response-variable dataset for 2018 and 2019, and tasks are ordered by feature area from smallest to largest."
+    )
 );
-controlPanel.add(layerList);
+controlPanel.add(
+    ui.Label(
+        "Years: " +
+            EXPORT_YEARS.join(", ") +
+            " | Drive folder: " +
+            DEFAULT_DRIVE_FOLDER +
+            " | Grid: " +
+            EXPORT_SCALE_METERS +
+            " m, " +
+            EXPORT_CRS
+    )
+);
 controlPanel.add(statusLabel);
 
 ui.root.widgets().reset([
@@ -1019,4 +925,4 @@ ui.root.widgets().reset([
         style: { stretch: "both" }
     })
 ]);
-updateMapLayers();
+stageAllEcoregionExports();

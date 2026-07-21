@@ -2,6 +2,22 @@
 
 First-pass local analysis scripts for raster stacks exported from Google Earth Engine.
 
+## Load one ecoregion GeoTIFF
+
+Load every band and pixel from one multiband ecoregion export into memory and print
+raster metadata, memory use, defined-pixel coverage, approximate defined area, and
+per-band descriptive statistics:
+
+```powershell
+python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif
+```
+
+The importable `RasterPixelData` object retains a value cube and a separate per-band
+validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
+`pixel_validity()` methods expose pixel-by-band views for later stratification without
+copying the arrays. Use `--no-band-report` for only the dataset-level summary or
+`--no-progress` to suppress tqdm output.
+
 ## Raster stack table
 
 Build a CSV of pixels where every GeoTIFF has a defined value. Rasters are sampled onto
