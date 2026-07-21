@@ -248,7 +248,7 @@ def _common_dtype(source_dtypes: Sequence[str]) -> np.dtype:
 def load_raster_pixels(
     geotiff_path: Path,
     *,
-    show_progress: bool = True,
+    show_progress: bool,
 ) -> RasterPixelData:
     """Load every pixel value and validity flag from a GeoTIFF.
 
