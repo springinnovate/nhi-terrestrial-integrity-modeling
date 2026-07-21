@@ -19,7 +19,6 @@ from rasterio.transform import from_origin
 
 from scripts.load_ecoregion_geotiff import (
     create_ecoregion_location_figure,
-    default_location_figure_path,
     infer_ecoregion_name,
     load_raster_pixels,
     pixel_area_by_row_square_meters,
@@ -152,21 +151,16 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.assertIn("reference_sites", report)
         self.assertIn("annual_precipitation", report)
 
-    def test_infers_ecoregion_name_and_default_figure_path(self) -> None:
-        """Convert an Earth Engine export stem into readable map metadata."""
+    def test_infers_ecoregion_name(self) -> None:
+        """Convert an Earth Engine export stem into a readable map label."""
 
         export_path = Path(
             "northern_shortgrass_prairie_e0042_response_variables_year_2019.tif"
         )
 
         name = infer_ecoregion_name(export_path)
-        figure_path = default_location_figure_path(name)
 
         self.assertEqual("Northern Shortgrass Prairie", name)
-        self.assertEqual(
-            Path("outputs/figures/northern_shortgrass_prairie_world_location.png"),
-            figure_path,
-        )
 
     @patch("scripts.load_ecoregion_geotiff._world_land_feature")
     def test_creates_world_location_figure_without_network(

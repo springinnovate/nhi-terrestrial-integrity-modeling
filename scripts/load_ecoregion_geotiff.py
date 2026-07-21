@@ -573,20 +573,6 @@ def infer_ecoregion_name(geotiff_path: Path) -> str:
     return words.title() or "Ecoregion"
 
 
-def default_location_figure_path(ecoregion_name: str) -> Path:
-    """Build the default location-figure path for an ecoregion.
-
-    Args:
-        ecoregion_name: Human-readable ecoregion label.
-
-    Returns:
-        Relative PNG output path beneath ``outputs/figures``.
-    """
-
-    slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
-    return Path("outputs") / "figures" / f"{slug or 'ecoregion'}_world_location.png"
-
-
 def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
     """Coarsen and reproject the raster's defined footprint to EPSG:4326.
 
@@ -1130,7 +1116,12 @@ def main() -> None:
         return
 
     ecoregion_name = infer_ecoregion_name(raster.path)
-    figure_path = args.location_figure or default_location_figure_path(ecoregion_name)
+    ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
+    figure_path = args.location_figure or (
+        Path("outputs")
+        / "figures"
+        / f"{ecoregion_slug or 'ecoregion'}_world_location.png"
+    )
     try:
         figure_summary = create_ecoregion_location_figure(
             raster,
