@@ -4,20 +4,32 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
+from matplotlib.colors import ListedColormap
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, Rectangle
 from rasterio.coords import BoundingBox
 from rasterio.crs import CRS
 from rasterio.transform import Affine
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
 
 EARTH_RADIUS_METERS = 6_371_008.8
 MEBIBYTE = 1024**2
+MAX_FOOTPRINT_DIMENSION = 600
+LOCATION_FIGURE_DPI = 300
+SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
 
 
 @dataclass(frozen=True)
@@ -189,6 +201,44 @@ class BandSummary:
     maximum: float | None
 
 
+@dataclass(frozen=True)
+class GeographicFootprint:
+    """Coarsened ecoregion footprint in geographic coordinates.
+
+    Attributes:
+        mask: Two-dimensional Boolean mask in EPSG:4326.
+        transform: Affine transform from mask pixels to longitude and latitude.
+        bounds: Bounds of defined mask cells in longitude and latitude.
+        source_defined_pixels: Number of defined source-grid cells.
+    """
+
+    mask: np.ndarray
+    transform: Affine
+    bounds: BoundingBox
+    source_defined_pixels: int
+
+
+@dataclass(frozen=True)
+class LocationFigureSummary:
+    """Metadata describing a generated ecoregion locator figure.
+
+    Attributes:
+        path: Saved figure path.
+        ecoregion_name: Label shown in the figure.
+        bounds: Mapped footprint bounds in longitude and latitude.
+        display_width: Number of columns in the coarsened display mask.
+        display_height: Number of rows in the coarsened display mask.
+        display_defined_pixels: Number of defined cells in the display mask.
+    """
+
+    path: Path
+    ecoregion_name: str
+    bounds: BoundingBox
+    display_width: int
+    display_height: int
+    display_defined_pixels: int
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -212,6 +262,26 @@ def parse_args() -> argparse.Namespace:
         "--no-progress",
         action="store_true",
         help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--ecoregion-name",
+        help=(
+            "Name shown on the location map. Defaults to a readable name "
+            "inferred from the GeoTIFF filename."
+        ),
+    )
+    parser.add_argument(
+        "--location-figure",
+        type=Path,
+        help=(
+            "Output path for the location map (.png, .pdf, or .svg). Defaults "
+            "to outputs/figures/<ecoregion>_world_location.png."
+        ),
+    )
+    parser.add_argument(
+        "--no-location-figure",
+        action="store_true",
+        help="Skip generation of the world location map.",
     )
     return parser.parse_args()
 
@@ -478,6 +548,425 @@ def summarize_bands(
     return summaries
 
 
+def infer_ecoregion_name(geotiff_path: Path) -> str:
+    """Infer a readable ecoregion name from an Earth Engine export filename.
+
+    Earth Engine exports in this project place a numeric ecoregion identifier
+    and response-variable suffix after the ecoregion name. The source name can
+    be truncated by export naming limits, so callers can override this inferred
+    label through the command line.
+
+    Args:
+        geotiff_path: GeoTIFF path whose filename should be interpreted.
+
+    Returns:
+        Human-readable ecoregion label.
+    """
+
+    name_stem = geotiff_path.stem
+    name_stem = re.sub(
+        r"_e\d+(?:_response_variables.*)?$",
+        "",
+        name_stem,
+        flags=re.IGNORECASE,
+    )
+    name_stem = re.sub(
+        r"_response_variables.*$",
+        "",
+        name_stem,
+        flags=re.IGNORECASE,
+    )
+    words = re.sub(r"[_-]+", " ", name_stem).strip()
+    return words.title() or "Ecoregion"
+
+
+def default_location_figure_path(ecoregion_name: str) -> Path:
+    """Build the default location-figure path for an ecoregion.
+
+    Args:
+        ecoregion_name: Human-readable ecoregion label.
+
+    Returns:
+        Relative PNG output path beneath ``outputs/figures``.
+    """
+
+    slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
+    return Path("outputs") / "figures" / f"{slug or 'ecoregion'}_world_location.png"
+
+
+def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
+    """Coarsen and reproject the raster's defined footprint to EPSG:4326.
+
+    Maximum-value resampling keeps a destination cell defined when any source
+    cell contributing to it is defined. This preserves small and fragmented
+    ecoregion parts while limiting figure-generation work.
+
+    Args:
+        raster: Fully loaded raster values, validity, and spatial metadata.
+
+    Returns:
+        Coarsened Boolean footprint and geographic bounds.
+
+    Raises:
+        ValueError: If the raster has no CRS or no defined pixels.
+    """
+
+    if raster.crs is None:
+        raise ValueError("A CRS is required to generate the world location map.")
+
+    source_mask = np.any(raster.validity, axis=0)
+    source_defined_pixels = int(np.count_nonzero(source_mask))
+    if source_defined_pixels == 0:
+        raise ValueError("The raster has no defined pixels to map.")
+
+    destination_crs = CRS.from_epsg(4326)
+    default_transform, default_width, default_height = calculate_default_transform(
+        raster.crs,
+        destination_crs,
+        raster.width,
+        raster.height,
+        *raster.bounds,
+    )
+    largest_dimension = max(default_width, default_height)
+    scale = max(1.0, largest_dimension / MAX_FOOTPRINT_DIMENSION)
+    destination_width = max(1, int(math.ceil(default_width / scale)))
+    destination_height = max(1, int(math.ceil(default_height / scale)))
+    destination_transform = default_transform * Affine.scale(
+        default_width / destination_width,
+        default_height / destination_height,
+    )
+    destination_mask = np.zeros(
+        (destination_height, destination_width),
+        dtype=np.uint8,
+    )
+    reproject(
+        source=source_mask.astype(np.uint8),
+        destination=destination_mask,
+        src_transform=raster.transform,
+        src_crs=raster.crs,
+        dst_transform=destination_transform,
+        dst_crs=destination_crs,
+        src_nodata=0,
+        dst_nodata=0,
+        resampling=Resampling.max,
+    )
+    geographic_mask = destination_mask.astype(np.bool_)
+    defined_rows, defined_columns = np.nonzero(geographic_mask)
+    if len(defined_rows) == 0:
+        raise ValueError("The raster footprint became empty during reprojection.")
+
+    minimum_column = int(np.min(defined_columns))
+    maximum_column = int(np.max(defined_columns)) + 1
+    minimum_row = int(np.min(defined_rows))
+    maximum_row = int(np.max(defined_rows)) + 1
+    first_corner = destination_transform * (minimum_column, minimum_row)
+    second_corner = destination_transform * (maximum_column, maximum_row)
+    bounds = BoundingBox(
+        left=min(first_corner[0], second_corner[0]),
+        bottom=min(first_corner[1], second_corner[1]),
+        right=max(first_corner[0], second_corner[0]),
+        top=max(first_corner[1], second_corner[1]),
+    )
+    return GeographicFootprint(
+        mask=geographic_mask,
+        transform=destination_transform,
+        bounds=bounds,
+        source_defined_pixels=source_defined_pixels,
+    )
+
+
+def _world_land_feature() -> cfeature.Feature:
+    """Return low-resolution Natural Earth land geometry.
+
+    Returns:
+        Cartopy feature backed by Natural Earth 1:110 million land polygons.
+    """
+
+    return cfeature.LAND.with_scale("110m")
+
+
+def _callout_position(bounds: BoundingBox) -> tuple[float, float]:
+    """Choose a map-relative label position opposite the footprint.
+
+    Args:
+        bounds: Geographic ecoregion bounds.
+
+    Returns:
+        Pair of x and y positions in axes-fraction coordinates.
+    """
+
+    center_longitude = (bounds.left + bounds.right) / 2.0
+    center_latitude = (bounds.bottom + bounds.top) / 2.0
+    label_x = 0.16 if center_longitude >= 0.0 else 0.84
+    label_y = 0.20 if center_latitude >= 0.0 else 0.80
+    return label_x, label_y
+
+
+def _locator_bounds(bounds: BoundingBox, minimum_span_degrees: float) -> BoundingBox:
+    """Expand small footprint bounds into a visible world-map locator box.
+
+    Args:
+        bounds: Geographic ecoregion bounds.
+        minimum_span_degrees: Minimum displayed width and height in degrees.
+
+    Returns:
+        Geographic bounds enclosing the footprint with a visible minimum span.
+    """
+
+    center_longitude = (bounds.left + bounds.right) / 2.0
+    center_latitude = (bounds.bottom + bounds.top) / 2.0
+    longitude_span = max(bounds.right - bounds.left, minimum_span_degrees)
+    latitude_span = max(bounds.top - bounds.bottom, minimum_span_degrees)
+    return BoundingBox(
+        left=max(-180.0, center_longitude - longitude_span / 2.0),
+        bottom=max(-90.0, center_latitude - latitude_span / 2.0),
+        right=min(180.0, center_longitude + longitude_span / 2.0),
+        top=min(90.0, center_latitude + latitude_span / 2.0),
+    )
+
+
+def create_ecoregion_location_figure(
+    raster: RasterPixelData,
+    ecoregion_name: str,
+    figure_path: Path,
+    show_progress: bool,
+) -> LocationFigureSummary:
+    """Create a publication-quality world locator map for an ecoregion.
+
+    The highlighted footprint is defined by cells valid in at least one raster
+    band. The display mask is reprojected and coarsened before plotting, while
+    maximum-value resampling retains small disconnected parts.
+
+    Args:
+        raster: Fully loaded raster values, validity, and spatial metadata.
+        ecoregion_name: Label to show in the map callout.
+        figure_path: PNG, PDF, or SVG output path.
+        show_progress: Whether to display a tqdm figure-generation progress bar.
+
+    Returns:
+        Saved figure path and mapped-footprint metadata.
+
+    Raises:
+        ValueError: If the label is empty, the suffix is unsupported, or the
+            raster footprint cannot be mapped.
+    """
+
+    cleaned_name = ecoregion_name.strip()
+    if not cleaned_name:
+        raise ValueError("The ecoregion name cannot be empty.")
+    path = figure_path.expanduser().resolve()
+    if path.suffix.lower() not in SUPPORTED_FIGURE_SUFFIXES:
+        supported = ", ".join(sorted(SUPPORTED_FIGURE_SUFFIXES))
+        raise ValueError(f"Location figure must use one of: {supported}.")
+
+    progress = tqdm(
+        total=4,
+        desc="Generating location figure",
+        unit="step",
+        disable=not show_progress,
+    )
+    figure = None
+    try:
+        footprint = _geographic_footprint(raster)
+        progress.update()
+
+        style = {
+            "font.family": "DejaVu Sans",
+            "font.size": 10,
+            "axes.titleweight": "bold",
+            "axes.titlesize": 16,
+        }
+        with plt.rc_context(style):
+            figure = plt.figure(figsize=(12.0, 6.4), facecolor="white")
+            axis = figure.add_subplot(1, 1, 1, projection=ccrs.Robinson())
+            axis.set_global()
+            axis.set_facecolor("#DCEAF1")
+            axis.add_feature(
+                _world_land_feature(),
+                facecolor="#EEEDE8",
+                edgecolor="#586166",
+                linewidth=0.45,
+                zorder=1,
+            )
+            axis.gridlines(
+                crs=ccrs.PlateCarree(),
+                draw_labels=False,
+                linewidth=0.35,
+                color="#FFFFFF",
+                alpha=0.9,
+                linestyle="-",
+                zorder=2,
+            )
+            axis.set_title("Global ecoregion location", pad=16)
+            progress.update()
+
+            longitude_edges = (
+                footprint.transform.c
+                + np.arange(footprint.mask.shape[1] + 1) * footprint.transform.a
+            )
+            latitude_edges = (
+                footprint.transform.f
+                + np.arange(footprint.mask.shape[0] + 1) * footprint.transform.e
+            )
+            highlighted_mask = np.ma.masked_where(
+                ~footprint.mask,
+                np.ones(footprint.mask.shape, dtype=np.uint8),
+            )
+            axis.pcolormesh(
+                longitude_edges,
+                latitude_edges,
+                highlighted_mask,
+                cmap=ListedColormap(["#D1493F"]),
+                vmin=0,
+                vmax=1,
+                shading="flat",
+                transform=ccrs.PlateCarree(),
+                alpha=0.88,
+                zorder=4,
+            )
+
+            bounds = footprint.bounds
+            locator_bounds = _locator_bounds(bounds, 5.0)
+            axis.add_patch(
+                Rectangle(
+                    (locator_bounds.left, locator_bounds.bottom),
+                    locator_bounds.right - locator_bounds.left,
+                    locator_bounds.top - locator_bounds.bottom,
+                    fill=False,
+                    edgecolor="#161A1D",
+                    linewidth=1.25,
+                    linestyle=(0, (4, 2)),
+                    transform=ccrs.PlateCarree(),
+                    zorder=5,
+                )
+            )
+            center_longitude = (bounds.left + bounds.right) / 2.0
+            center_latitude = (bounds.bottom + bounds.top) / 2.0
+            axis.plot(
+                center_longitude,
+                center_latitude,
+                marker="o",
+                markersize=5,
+                markerfacecolor="#D1493F",
+                markeredgecolor="#161A1D",
+                markeredgewidth=0.9,
+                transform=ccrs.PlateCarree(),
+                zorder=6,
+            )
+            label_x, label_y = _callout_position(bounds)
+            axis.annotate(
+                textwrap.fill(cleaned_name, width=28, break_long_words=False),
+                xy=(center_longitude, center_latitude),
+                xycoords=ccrs.PlateCarree()._as_mpl_transform(axis),
+                xytext=(label_x, label_y),
+                textcoords="axes fraction",
+                ha="center",
+                va="center",
+                fontsize=11,
+                fontweight="bold",
+                color="#161A1D",
+                bbox={
+                    "boxstyle": "square,pad=0.45",
+                    "facecolor": "white",
+                    "edgecolor": "#161A1D",
+                    "linewidth": 0.7,
+                    "alpha": 0.96,
+                },
+                arrowprops={
+                    "arrowstyle": "-|>",
+                    "color": "#161A1D",
+                    "linewidth": 1.15,
+                    "shrinkA": 5,
+                    "shrinkB": 4,
+                    "connectionstyle": "arc3,rad=0.08",
+                },
+                zorder=7,
+            )
+            legend_handles = [
+                Patch(
+                    facecolor="#D1493F",
+                    edgecolor="none",
+                    label="Defined ecoregion footprint",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    color="#161A1D",
+                    linewidth=1.25,
+                    linestyle=(0, (4, 2)),
+                    label="Ecoregion locator box",
+                ),
+            ]
+            axis.legend(
+                handles=legend_handles,
+                loc="lower left",
+                bbox_to_anchor=(0.025, 0.025),
+                ncol=2,
+                frameon=True,
+                facecolor="white",
+                edgecolor="none",
+                framealpha=0.88,
+                fontsize=9,
+                handlelength=2.4,
+            )
+            figure.text(
+                0.99,
+                0.015,
+                "Base map: Natural Earth 1:110m",
+                ha="right",
+                va="bottom",
+                fontsize=7.5,
+                color="#596268",
+            )
+            figure.subplots_adjust(left=0.025, right=0.975, bottom=0.09, top=0.90)
+            progress.update()
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(
+                path,
+                dpi=LOCATION_FIGURE_DPI,
+                bbox_inches="tight",
+                facecolor=figure.get_facecolor(),
+            )
+            progress.update()
+    finally:
+        if figure is not None:
+            plt.close(figure)
+        progress.close()
+
+    return LocationFigureSummary(
+        path=path,
+        ecoregion_name=cleaned_name,
+        bounds=footprint.bounds,
+        display_width=footprint.mask.shape[1],
+        display_height=footprint.mask.shape[0],
+        display_defined_pixels=int(np.count_nonzero(footprint.mask)),
+    )
+
+
+def print_location_figure_report(summary: LocationFigureSummary) -> None:
+    """Print output and footprint details for a location figure.
+
+    Args:
+        summary: Generated figure metadata.
+    """
+
+    print()
+    print("Location figure")
+    print(f"Path: {summary.path}")
+    print(f"Ecoregion label: {summary.ecoregion_name}")
+    print(
+        "Geographic bounds: "
+        f"west={summary.bounds.left:.4f}, south={summary.bounds.bottom:.4f}, "
+        f"east={summary.bounds.right:.4f}, north={summary.bounds.top:.4f}"
+    )
+    print(
+        "Display footprint: "
+        f"{summary.display_defined_pixels:,} defined cells on a "
+        f"{summary.display_width:,} x {summary.display_height:,} coarsened grid"
+    )
+
+
 def _format_area(area_square_kilometers: float | None) -> str:
     """Format an optional area for report output.
 
@@ -633,7 +1122,7 @@ def print_raster_report(
 
 
 def main() -> None:
-    """Load the requested GeoTIFF and print its diagnostic report."""
+    """Load a GeoTIFF, report diagnostics, and create its location figure."""
 
     args = parse_args()
     try:
@@ -644,6 +1133,21 @@ def main() -> None:
     except (FileNotFoundError, ValueError, RuntimeError, rasterio.errors.RasterioError) as error:
         raise SystemExit(str(error)) from error
     print_raster_report(raster, not args.no_band_report, not args.no_progress)
+    if args.no_location_figure:
+        return
+
+    ecoregion_name = args.ecoregion_name or infer_ecoregion_name(raster.path)
+    figure_path = args.location_figure or default_location_figure_path(ecoregion_name)
+    try:
+        figure_summary = create_ecoregion_location_figure(
+            raster,
+            ecoregion_name,
+            figure_path,
+            not args.no_progress,
+        )
+    except (ValueError, OSError, rasterio.errors.RasterioError) as error:
+        raise SystemExit(f"Could not generate location figure: {error}") from error
+    print_location_figure_report(figure_summary)
 
 
 if __name__ == "__main__":

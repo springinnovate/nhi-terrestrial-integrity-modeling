@@ -6,7 +6,9 @@ First-pass local analysis scripts for raster stacks exported from Google Earth E
 
 Load every band and pixel from one multiband ecoregion export into memory and print
 raster metadata, memory use, defined-pixel coverage, approximate defined area, and
-per-band descriptive statistics:
+per-band descriptive statistics. The same run creates a 300 DPI world locator map in
+`outputs/figures` with the defined ecoregion footprint, its bounding box, and a labeled
+callout:
 
 ```powershell
 python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif
@@ -16,7 +18,19 @@ The importable `RasterPixelData` object retains a value cube and a separate per-
 validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
 `pixel_validity()` methods expose pixel-by-band views for later stratification without
 copying the arrays. Use `--no-band-report` for only the dataset-level summary or
-`--no-progress` to suppress tqdm output.
+`--no-progress` to suppress tqdm output. The first map run may download Cartopy's
+Natural Earth 1:110 million land geometry.
+
+Earth Engine can truncate ecoregion names in export filenames. Supply the complete
+publication label and an explicit PNG, PDF, or SVG path when needed:
+
+```powershell
+python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
+  --ecoregion-name "Northern Shortgrass Prairie" `
+  --location-figure outputs\figures\northern_shortgrass_prairie.svg
+```
+
+Use `--no-location-figure` when only the in-memory data and text report are needed.
 
 ## Raster stack table
 

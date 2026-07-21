@@ -8,13 +8,19 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import numpy as np
 import rasterio
 from rasterio.crs import CRS
 from rasterio.transform import from_origin
 
 from scripts.load_ecoregion_geotiff import (
+    create_ecoregion_location_figure,
+    default_location_figure_path,
+    infer_ecoregion_name,
     load_raster_pixels,
     pixel_area_by_row_square_meters,
     print_raster_report,
@@ -145,6 +151,51 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.assertIn("approx. area", report)
         self.assertIn("reference_sites", report)
         self.assertIn("annual_precipitation", report)
+
+    def test_infers_ecoregion_name_and_default_figure_path(self) -> None:
+        """Convert an Earth Engine export stem into readable map metadata."""
+
+        export_path = Path(
+            "northern_shortgrass_prairie_e0042_response_variables_year_2019.tif"
+        )
+
+        name = infer_ecoregion_name(export_path)
+        figure_path = default_location_figure_path(name)
+
+        self.assertEqual("Northern Shortgrass Prairie", name)
+        self.assertEqual(
+            Path("outputs/figures/northern_shortgrass_prairie_world_location.png"),
+            figure_path,
+        )
+
+    @patch("scripts.load_ecoregion_geotiff._world_land_feature")
+    def test_creates_world_location_figure_without_network(
+        self,
+        land_feature_mock,
+    ) -> None:
+        """Render the footprint, bounds, and label without downloading map data."""
+
+        land_feature_mock.return_value = cfeature.ShapelyFeature(
+            [],
+            ccrs.PlateCarree(),
+        )
+        raster = load_raster_pixels(self.raster_path, show_progress=False)
+        figure_path = Path(self.temporary_directory.name) / "location.png"
+
+        summary = create_ecoregion_location_figure(
+            raster,
+            "Test Prairie",
+            figure_path,
+            False,
+        )
+
+        self.assertEqual(figure_path.resolve(), summary.path)
+        self.assertEqual("Test Prairie", summary.ecoregion_name)
+        self.assertTrue(figure_path.exists())
+        self.assertGreater(figure_path.stat().st_size, 1_000)
+        self.assertGreater(summary.display_defined_pixels, 0)
+        self.assertLess(summary.bounds.left, summary.bounds.right)
+        self.assertLess(summary.bounds.bottom, summary.bounds.top)
 
 
 if __name__ == "__main__":
