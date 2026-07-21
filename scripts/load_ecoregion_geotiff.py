@@ -543,9 +543,8 @@ def _print_coverage(label: str, summary: CoverageSummary) -> None:
 
 def print_raster_report(
     raster: RasterPixelData,
-    *,
-    include_band_report: bool = True,
-    show_progress: bool = True,
+    include_band_report: bool,
+    show_progress: bool,
 ) -> None:
     """Print metadata, memory, coverage, and optional per-band diagnostics.
 
@@ -644,11 +643,7 @@ def main() -> None:
         )
     except (FileNotFoundError, ValueError, RuntimeError, rasterio.errors.RasterioError) as error:
         raise SystemExit(str(error)) from error
-    print_raster_report(
-        raster,
-        include_band_report=not args.no_band_report,
-        show_progress=not args.no_progress,
-    )
+    print_raster_report(raster, not args.no_band_report, not args.no_progress)
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         raster = load_raster_pixels(self.raster_path, show_progress=False)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            print_raster_report(raster, show_progress=False)
+            print_raster_report(raster, True, False)
 
         report = output.getvalue()
         self.assertIn("2 rows x 2 bands", report)
