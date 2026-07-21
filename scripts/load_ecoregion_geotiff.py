@@ -757,18 +757,6 @@ def create_spatial_sample(
 
     target_values = raster.values[target_offset]
     target_validity = raster.validity[target_offset]
-    defined_target_values = target_values[target_validity]
-    unexpected_values = np.unique(
-        defined_target_values[
-            (defined_target_values != 0) & (defined_target_values != 1)
-        ]
-    )
-    if unexpected_values.size:
-        rendered = ", ".join(str(value) for value in unexpected_values[:10])
-        raise ValueError(
-            "Grassland Reference Sites must contain only zero and one; found "
-            f"{rendered}."
-        )
 
     reference_mask = target_validity & (target_values == 1)
     predictor_domain = np.zeros((raster.height, raster.width), dtype=np.bool_)
