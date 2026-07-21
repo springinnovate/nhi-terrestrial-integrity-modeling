@@ -809,6 +809,8 @@ def create_spatial_sample(
     preparation_progress.close()
 
     block_count = int(np.max(block_ids))
+    # Reserve two adjacent integer keys per block, one for non-reference pixels
+    # and one for reference pixels, so each block/class pair is sampled alone.
     group_keys = (block_ids - 1) * 2 + targets
     order = np.argsort(group_keys, kind="stable")
     sorted_group_keys = group_keys[order]
