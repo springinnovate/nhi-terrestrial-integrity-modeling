@@ -57,27 +57,3 @@ python scripts/pca_from_table.py 2015_stack.csv outputs\pca_reference --filter g
 
 Outputs include PCA scores, loadings, explained variance, a scree plot, PC1/PC2 score
 scatter, PC1/PC2 loading vectors, a loading heatmap, and loading intensity bars.
-
-## Reference-site block sampling
-
-Queue small Google Earth Engine Drive exports around randomly sampled grassland
-reference-site centers. This uses the same Global Pasture Watch, HMI, and HII
-reference mask as `gee_apps/nhi_raster_export_app.js`, but starts tasks from the
-Python API so you do not need to click each task in the Code Editor.
-
-```powershell
-python scripts/sample_reference_site_blocks.py `
-  --region-asset projects/ecoshard-202922/assets/nhi_assets/wyoming_basin2 `
-  --region-name "Wyoming Basin" `
-  --blocks 15 `
-  --candidate-points 5000 `
-  --manifest-csv outputs\reference_blocks.csv
-```
-
-Useful options:
-
-- `--bounds -180 -90 180 90`: sample a bounding-box AOI, including global bounds.
-- `--block-size-meters 10000`: choose the approximate width/height of each block.
-- `--candidate-points 20000`: test more random centers when reference sites are sparse.
-- `--context-bands`: include reference mask, mean grassland probability, mean HII, and HMI.
-- `--dry-run`: sample and print planned exports without starting Drive tasks.
