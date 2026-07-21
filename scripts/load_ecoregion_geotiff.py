@@ -812,23 +812,38 @@ def create_spatial_sample(
     # Reserve two adjacent integer keys per block, one for non-reference pixels
     # and one for reference pixels, so each block/class pair is sampled alone.
     group_keys = (block_ids - 1) * 2 + targets
-    order = np.argsort(group_keys, kind="stable")
-    sorted_group_keys = group_keys[order]
-    unique_group_keys, starts, available_counts = np.unique(
+    positions_sorted_by_group = np.argsort(group_keys, kind="stable")
+    sorted_group_keys = group_keys[positions_sorted_by_group]
+    # These integer arrays describe each populated block/class group: its key,
+    # start offset in positions_sorted_by_group, and available source pixels.
+    unique_group_keys, group_start_offsets, available_pixels_per_group = np.unique(
         sorted_group_keys,
         return_index=True,
         return_counts=True,
     )
-    sampled_counts = np.minimum(available_counts, samples_per_class_per_block)
+    # This integer array is the number of pixels that will be retained from
+    # each group after applying the caller's per-class sampling cap.
+    sampled_pixels_per_group = np.minimum(
+        available_pixels_per_group,
+        samples_per_class_per_block,
+    )
     available_by_group = np.zeros(block_count * 2, dtype=np.int64)
     sampled_by_group = np.zeros(block_count * 2, dtype=np.int64)
-    available_by_group[unique_group_keys] = available_counts
-    sampled_by_group[unique_group_keys] = sampled_counts
+    available_by_group[unique_group_keys] = available_pixels_per_group
+    sampled_by_group[unique_group_keys] = sampled_pixels_per_group
 
-    selected_positions = np.empty(int(np.sum(sampled_counts)), dtype=np.int64)
+    selected_positions = np.empty(
+        int(np.sum(sampled_pixels_per_group)),
+        dtype=np.int64,
+    )
     random_generator = np.random.default_rng(random_seed)
     cursor = 0
-    group_iterator = zip(starts, available_counts, sampled_counts, strict=True)
+    group_iterator = zip(
+        group_start_offsets,
+        available_pixels_per_group,
+        sampled_pixels_per_group,
+        strict=True,
+    )
     for start, available_count, sampled_count in tqdm(
         group_iterator,
         total=unique_group_keys.size,
@@ -836,7 +851,7 @@ def create_spatial_sample(
         unit="stratum",
         disable=not show_progress,
     ):
-        group_positions = order[start : start + available_count]
+        group_positions = positions_sorted_by_group[start : start + available_count]
         if sampled_count < available_count:
             chosen = random_generator.choice(
                 group_positions,
