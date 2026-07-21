@@ -431,7 +431,7 @@ def summarize_bands(
     raster: RasterPixelData,
     pixel_area_by_row: np.ndarray | None,
     *,
-    show_progress: bool = True,
+    show_progress: bool,
 ) -> list[BandSummary]:
     """Calculate coverage and descriptive statistics for every band.
 
