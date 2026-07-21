@@ -225,7 +225,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.assertNotEqual(block_ids[0], block_ids[1])
 
     def test_samples_classes_separately_and_calculates_weights(self) -> None:
-        """Cap each target class and reconstruct source pixel populations."""
+        """Cap each reference-site class and reconstruct source populations."""
 
         raster = load_raster_pixels(
             self._create_sampling_raster(),
@@ -311,7 +311,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         pd.testing.assert_frame_equal(sample.table, restored)
 
     def test_prints_detailed_spatial_sampling_report(self) -> None:
-        """Report target, block, class, weight, and predictor diagnostics."""
+        """Report reference, block, class, weight, and predictor diagnostics."""
 
         raster = load_raster_pixels(
             self._create_sampling_raster(),

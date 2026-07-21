@@ -249,10 +249,10 @@ class LocationFigureSummary:
 
 @dataclass(frozen=True)
 class SamplingClassSummary:
-    """Sampling measurements for one binary target value.
+    """Sampling measurements for one binary reference-site class.
 
     Attributes:
-        target_value: Binary reference-site value represented by this class.
+        reference_site_class: Zero for non-reference or one for reference.
         available_pixels: Eligible source pixels before sampling.
         sampled_pixels: Pixels retained in the sample table.
         available_area_square_meters: Source area represented by the class.
@@ -263,7 +263,7 @@ class SamplingClassSummary:
         maximum_sampling_weight: Largest sampling weight in this class.
     """
 
-    target_value: int
+    reference_site_class: int
     available_pixels: int
     sampled_pixels: int
     available_area_square_meters: float
@@ -280,7 +280,7 @@ class SpatialSample:
 
     Attributes:
         table: Model-ready table of selected pixels, weights, and raster bands.
-        target_band_name: Reference-site band used to construct the target.
+        reference_band_name: Reference-site band used to classify pixels.
         ignored_reference_band_names: Additional reference-site bands excluded
             from the predictor table.
         predictor_band_names: Non-reference raster bands written as columns.
@@ -304,7 +304,7 @@ class SpatialSample:
     """
 
     table: pd.DataFrame
-    target_band_name: str
+    reference_band_name: str
     ignored_reference_band_names: tuple[str, ...]
     predictor_band_names: tuple[str, ...]
     predictor_defined_pixels: tuple[int, ...]
@@ -405,7 +405,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK,
         help=(
-            "Maximum sampled pixels for each binary target value in each "
+            "Maximum sampled pixels for each binary reference-site class in each "
             "block "
             f"(default: {DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK})."
         ),
@@ -462,7 +462,7 @@ def load_raster_pixels(
 
     Each source band is read separately so loading progress remains visible.
     Values retain their common source dtype, while a separate Boolean array
-    preserves band-specific masks for later target/background stratification.
+    preserves band-specific masks for later reference/non-reference sampling.
 
     Args:
         geotiff_path: GeoTIFF path to read.
@@ -714,14 +714,14 @@ def create_spatial_sample(
 
     Earth Engine masks zeroes from the exported reference-site bands. Within
     the usable predictor footprint, a defined reference value of one becomes
-    target one and every other pixel becomes target zero. Reference and
+    the reference class and every other pixel becomes the non-reference class. Reference and
     non-reference pixels are sampled separately inside each equal-area block.
 
     Args:
         raster: Fully loaded ecoregion raster.
         block_size_meters: Width and height of square sampling blocks.
-        samples_per_class_per_block: Maximum pixels retained for each target
-            value within each block.
+        samples_per_class_per_block: Maximum pixels retained for each
+            reference-site class within each block.
         random_seed: Seed for reproducible sampling without replacement.
         show_progress: Whether to display tqdm progress bars.
 
@@ -729,7 +729,7 @@ def create_spatial_sample(
         Sample table and diagnostics describing its source population.
 
     Raises:
-        ValueError: If bands, target values, pixel areas, or coordinates cannot
+        ValueError: If bands, pixel areas, or coordinates cannot
             support sampling.
         RuntimeError: If no eligible pixels remain in the predictor footprint.
     """
@@ -744,7 +744,7 @@ def create_spatial_sample(
         if name.lower() == "reference_sites"
         or name.lower().endswith("_grassland_reference_sites")
     )
-    target_offset = reference_offsets[0]
+    reference_band_offset = reference_offsets[0]
     predictor_offsets = tuple(
         offset for offset in range(raster.band_count) if offset not in reference_offsets
     )
@@ -755,10 +755,10 @@ def create_spatial_sample(
             "Predictor band descriptions must be unique for Parquet output."
         )
 
-    target_values = raster.values[target_offset]
-    target_validity = raster.validity[target_offset]
+    reference_band_values = raster.values[reference_band_offset]
+    reference_band_validity = raster.validity[reference_band_offset]
 
-    reference_mask = target_validity & (target_values == 1)
+    reference_mask = reference_band_validity & (reference_band_values == 1)
     predictor_domain = np.zeros((raster.height, raster.width), dtype=np.bool_)
     for offset in tqdm(
         predictor_offsets,
@@ -792,7 +792,9 @@ def create_spatial_sample(
     rows = eligible_flat_indices // raster.width
     columns = eligible_flat_indices % raster.width
     pixel_areas = pixel_area_by_row[rows]
-    targets = reference_mask.ravel()[eligible_flat_indices].astype(np.uint8)
+    reference_site_classes = reference_mask.ravel()[eligible_flat_indices].astype(
+        np.uint8
+    )
     preparation_progress.update()
 
     longitudes, latitudes, x_meters, y_meters = _transformed_coordinates(
@@ -811,7 +813,7 @@ def create_spatial_sample(
     block_count = int(np.max(block_ids))
     # Reserve two adjacent integer keys per block, one for non-reference pixels
     # and one for reference pixels, so each block/class pair is sampled alone.
-    group_keys = (block_ids - 1) * 2 + targets
+    group_keys = (block_ids - 1) * 2 + reference_site_classes
     positions_sorted_by_group = np.argsort(group_keys, kind="stable")
     sorted_group_keys = group_keys[positions_sorted_by_group]
     # These integer arrays describe each populated block/class group: its key,
@@ -865,7 +867,7 @@ def create_spatial_sample(
     selected_positions.sort()
 
     selected_flat_indices = eligible_flat_indices[selected_positions]
-    selected_targets = targets[selected_positions]
+    selected_reference_site_classes = reference_site_classes[selected_positions]
     selected_group_keys = group_keys[selected_positions]
     selected_available_counts = available_by_group[selected_group_keys]
     selected_sampled_counts = sampled_by_group[selected_group_keys]
@@ -882,7 +884,7 @@ def create_spatial_sample(
         "sampling_block_id": block_ids[selected_positions],
         "sampling_block_column": block_columns[selected_positions],
         "sampling_block_row": block_rows[selected_positions],
-        "reference_site": selected_targets,
+        "reference_site": selected_reference_site_classes,
         "pixel_area_m2": selected_pixel_areas,
         "available_pixels_in_block_class": selected_available_counts,
         "sampled_pixels_in_block_class": selected_sampled_counts,
@@ -914,13 +916,13 @@ def create_spatial_sample(
 
     table = pd.DataFrame(table_columns, copy=False)
     class_summaries = []
-    for target_value in (0, 1):
-        available_mask = targets == target_value
-        sampled_mask = selected_targets == target_value
+    for reference_site_class in (0, 1):
+        available_mask = reference_site_classes == reference_site_class
+        sampled_mask = selected_reference_site_classes == reference_site_class
         class_sampling_weights = sampling_weights[sampled_mask]
         class_summaries.append(
             SamplingClassSummary(
-                target_value=target_value,
+                reference_site_class=reference_site_class,
                 available_pixels=int(np.count_nonzero(available_mask)),
                 sampled_pixels=int(np.count_nonzero(sampled_mask)),
                 available_area_square_meters=float(np.sum(pixel_areas[available_mask])),
@@ -943,7 +945,7 @@ def create_spatial_sample(
     block_populations = np.bincount(block_ids)[1:]
     return SpatialSample(
         table=table,
-        target_band_name=raster.band_names[target_offset],
+        reference_band_name=raster.band_names[reference_band_offset],
         ignored_reference_band_names=tuple(
             raster.band_names[offset] for offset in reference_offsets[1:]
         ),
@@ -1609,7 +1611,7 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
 
     print()
     print("Spatial sampling report")
-    print(f"Target band: {sample.target_band_name}")
+    print(f"Reference band: {sample.reference_band_name}")
     if sample.ignored_reference_band_names:
         print(
             "Ignored duplicate reference band(s): "
@@ -1625,7 +1627,7 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
     )
     print(
         "Sampling cap: "
-        f"{sample.samples_per_class_per_block:,} pixels per target value per block"
+        f"{sample.samples_per_class_per_block:,} pixels per reference-site class per block"
     )
     print(f"Random seed: {sample.random_seed}")
     print(f"Eligible source pixels: {total_available:,}")
@@ -1674,7 +1676,11 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
             area_error = f"{area_error_percent:+.4f}%"
         else:
             area_error = "n/a"
-        label = "0 non-reference" if summary.target_value == 0 else "1 reference"
+        label = (
+            "0 non-reference"
+            if summary.reference_site_class == 0
+            else "1 reference"
+        )
         weight_range = (
             f"{_format_weight(summary.minimum_sampling_weight)}-"
             f"{_format_weight(summary.maximum_sampling_weight)}"
@@ -1691,7 +1697,8 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
         if not math.isclose(count_error, 0.0, abs_tol=1e-8):
             print(
                 "WARNING: weighted pixel count differs from the source for "
-                f"target {summary.target_value} by {count_error:,.6f}."
+                "reference-site class "
+                f"{summary.reference_site_class} by {count_error:,.6f}."
             )
     if sample.class_summaries[1].available_pixels == 0:
         print("WARNING: this ecoregion contains no reference-site pixels.")

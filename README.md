@@ -20,11 +20,11 @@ copying the arrays. Use `--no-band-report` for only the dataset-level summary or
 `--no-progress` to suppress tqdm output. The first map run may download Cartopy's
 Natural Earth 1:110 million land geometry.
 
-The spatial sample uses the first Grassland Reference Sites band as a binary target,
+The spatial sample uses the first Grassland Reference Sites band as a binary class,
 with `1` representing a reference site and `0` representing a non-reference site.
 Duplicate reference bands are excluded from the predictor table. Eligible pixels are
 assigned to 25 km square blocks in an equal-area coordinate system, then up to 100
-pixels of each target value are selected independently from every block. The table
+pixels of each reference-site class are selected independently from every block. The table
 records source coordinates, block IDs, pixel area, sampling probabilities, sampling
 weights, area weights, and every non-reference raster band. Missing predictor values
 remain missing.
