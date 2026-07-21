@@ -6,9 +6,8 @@ First-pass local analysis scripts for raster stacks exported from Google Earth E
 
 Load every band and pixel from one multiband ecoregion export into memory and print
 raster metadata, memory use, defined-pixel coverage, approximate defined area, and
-per-band descriptive statistics. The same run creates a 300 DPI world locator map in
-`outputs/figures` with the defined ecoregion footprint, its bounding box, and a labeled
-callout:
+per-band descriptive statistics. The same run creates a spatially balanced Parquet
+sample in `outputs/samples` and a 300 DPI world locator map in `outputs/figures`:
 
 ```powershell
 python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif
@@ -20,6 +19,31 @@ validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
 copying the arrays. Use `--no-band-report` for only the dataset-level summary or
 `--no-progress` to suppress tqdm output. The first map run may download Cartopy's
 Natural Earth 1:110 million land geometry.
+
+The spatial sample uses the first Grassland Reference Sites band as a binary target,
+with `1` representing a reference site and `0` representing a non-reference site.
+Duplicate reference bands are excluded from the predictor table. Eligible pixels are
+assigned to 25 km square blocks in an equal-area coordinate system, then up to 100
+pixels of each target value are selected independently from every block. The table
+records source coordinates, block IDs, pixel area, sampling probabilities, sampling
+weights, area weights, and every non-reference raster band. Missing predictor values
+remain missing.
+
+Sampling is reproducible with random seed 42. Override the defaults or output path as
+needed:
+
+```powershell
+python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
+  --sampling-block-size-m 25000 `
+  --samples-per-class-per-block 100 `
+  --random-seed 42 `
+  --sample-output outputs\samples\example.parquet
+```
+
+The command prints progress bars plus class counts and areas, block occupancy,
+retention rates, weight reconstruction checks, predictor missingness, and verified
+Parquet metadata. Use `--no-sampling` when only the raster report and location figure
+are needed.
 
 The map label is inferred from the GeoTIFF filename. Supply an explicit PNG, PDF, or
 SVG path when vector output or a different destination is needed:

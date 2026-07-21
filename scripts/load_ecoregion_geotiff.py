@@ -6,6 +6,7 @@ import argparse
 import math
 import re
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -14,10 +15,13 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
 import rasterio
 from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
+from pyproj import Transformer
 from rasterio.coords import BoundingBox
 from rasterio.crs import CRS
 from rasterio.transform import Affine
@@ -30,6 +34,10 @@ MEBIBYTE = 1024**2
 MAX_FOOTPRINT_DIMENSION = 600
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
+EQUAL_AREA_CRS = "EPSG:8857"
+DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000.0
+DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK = 100
+DEFAULT_RANDOM_SEED = 42
 
 
 @dataclass(frozen=True)
@@ -239,6 +247,149 @@ class LocationFigureSummary:
     display_defined_pixels: int
 
 
+@dataclass(frozen=True)
+class SamplingClassSummary:
+    """Sampling measurements for one binary target value.
+
+    Attributes:
+        target_value: Binary reference-site value represented by this class.
+        available_pixels: Eligible source pixels before sampling.
+        sampled_pixels: Pixels retained in the sample table.
+        available_area_square_meters: Source area represented by the class.
+        weighted_pixels: Source pixel count reconstructed from sampling weights.
+        weighted_area_square_meters: Source area estimated from area weights.
+        blocks_with_class: Number of sampling blocks containing the class.
+        minimum_sampling_weight: Smallest sampling weight in this class.
+        maximum_sampling_weight: Largest sampling weight in this class.
+    """
+
+    target_value: int
+    available_pixels: int
+    sampled_pixels: int
+    available_area_square_meters: float
+    weighted_pixels: float
+    weighted_area_square_meters: float
+    blocks_with_class: int
+    minimum_sampling_weight: float
+    maximum_sampling_weight: float
+
+
+@dataclass(frozen=True)
+class SpatialSample:
+    """A spatially balanced sample and diagnostics from one ecoregion raster.
+
+    Attributes:
+        table: Model-ready table of selected pixels, weights, and raster bands.
+        target_band_name: Reference-site band used to construct the target.
+        ignored_reference_band_names: Additional reference-site bands excluded
+            from the predictor table.
+        predictor_band_names: Non-reference raster bands written as columns.
+        predictor_defined_pixels: Defined sampled values for each predictor.
+        complete_predictor_rows: Sampled rows defined in every predictor.
+        block_size_meters: Width and height of each equal-area sampling block.
+        samples_per_class_per_block: Per-block cap applied separately to zeroes
+            and ones.
+        random_seed: Seed used for reproducible random selection.
+        block_count: Number of sampling blocks covering eligible pixels.
+        reference_block_count: Blocks containing at least one reference pixel.
+        nonreference_block_count: Blocks containing at least one non-reference
+            pixel.
+        minimum_available_pixels_per_block: Smallest eligible block population.
+        median_available_pixels_per_block: Median eligible block population.
+        maximum_available_pixels_per_block: Largest eligible block population.
+        excluded_reference_pixels: Reference pixels lacking every predictor and
+            therefore excluded from the modeling domain.
+        class_summaries: Diagnostics for non-reference and reference pixels.
+        elapsed_seconds: Time used to construct the sample in memory.
+    """
+
+    table: pd.DataFrame
+    target_band_name: str
+    ignored_reference_band_names: tuple[str, ...]
+    predictor_band_names: tuple[str, ...]
+    predictor_defined_pixels: tuple[int, ...]
+    complete_predictor_rows: int
+    block_size_meters: float
+    samples_per_class_per_block: int
+    random_seed: int
+    block_count: int
+    reference_block_count: int
+    nonreference_block_count: int
+    minimum_available_pixels_per_block: int
+    median_available_pixels_per_block: float
+    maximum_available_pixels_per_block: int
+    excluded_reference_pixels: int
+    class_summaries: tuple[SamplingClassSummary, SamplingClassSummary]
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class ParquetWriteSummary:
+    """Verified metadata for a written Parquet sample table.
+
+    Attributes:
+        path: Absolute path to the generated Parquet file.
+        rows: Rows reported by Parquet metadata.
+        columns: Columns reported by Parquet metadata.
+        row_groups: Number of Parquet row groups.
+        compression: Compression codec reported for the first data column.
+        file_bytes: On-disk file size.
+        elapsed_seconds: Time used to write and verify the file.
+    """
+
+    path: Path
+    rows: int
+    columns: int
+    row_groups: int
+    compression: str
+    file_bytes: int
+    elapsed_seconds: float
+
+
+def _positive_float(value: str) -> float:
+    """Parse a positive floating-point command-line value.
+
+    Args:
+        value: User-provided argument text.
+
+    Returns:
+        Parsed positive floating-point value.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not finite and positive.
+    """
+
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number") from error
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive integer command-line value.
+
+    Args:
+        value: User-provided argument text.
+
+    Returns:
+        Parsed positive integer.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not a positive integer.
+    """
+
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -275,6 +426,44 @@ def parse_args() -> argparse.Namespace:
         "--no-location-figure",
         action="store_true",
         help="Skip generation of the world location map.",
+    )
+    parser.add_argument(
+        "--sample-output",
+        type=Path,
+        help=(
+            "Output path for the spatial sample (.parquet). Defaults to "
+            "outputs/samples/<ecoregion>_spatial_sample.parquet."
+        ),
+    )
+    parser.add_argument(
+        "--sampling-block-size-m",
+        type=_positive_float,
+        default=DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
+        help=(
+            "Square sampling-block size in meters "
+            f"(default: {DEFAULT_SAMPLING_BLOCK_SIZE_METERS:g})."
+        ),
+    )
+    parser.add_argument(
+        "--samples-per-class-per-block",
+        type=_positive_int,
+        default=DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK,
+        help=(
+            "Maximum sampled pixels for each binary target value in each "
+            "block "
+            f"(default: {DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK})."
+        ),
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help=f"Random sampling seed (default: {DEFAULT_RANDOM_SEED}).",
+    )
+    parser.add_argument(
+        "--no-sampling",
+        action="store_true",
+        help="Skip spatial sampling and Parquet generation.",
     )
     return parser.parse_args()
 
@@ -446,6 +635,482 @@ def pixel_area_by_row_square_meters(
         EARTH_RADIUS_METERS**2
         * longitude_width_radians
         * np.abs(np.diff(sine_latitudes))
+    )
+
+
+def _reference_band_offsets(band_names: Sequence[str]) -> tuple[int, ...]:
+    """Locate exported grassland reference-site bands.
+
+    Args:
+        band_names: Raster band descriptions in source order.
+
+    Returns:
+        Zero-based offsets of all reference-site bands.
+
+    Raises:
+        ValueError: If no reference-site band can be identified.
+    """
+
+    offsets = tuple(
+        offset
+        for offset, name in enumerate(band_names)
+        if name.lower() == "reference_sites"
+        or name.lower().endswith("_grassland_reference_sites")
+    )
+    if not offsets:
+        raise ValueError(
+            "Could not find a Grassland Reference Sites band. Available bands: "
+            + ", ".join(band_names)
+        )
+    return offsets
+
+
+def assign_sampling_blocks(
+    x_meters: np.ndarray,
+    y_meters: np.ndarray,
+    block_size_meters: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Assign equal-area coordinates to stable square sampling blocks.
+
+    Block boundaries are anchored at the projected coordinate-system origin.
+    Returned block IDs are one-based and sorted by block-column and block-row
+    indices, making the same coordinates produce the same IDs in repeated runs.
+
+    Args:
+        x_meters: One-dimensional projected x coordinates in meters.
+        y_meters: One-dimensional projected y coordinates in meters.
+        block_size_meters: Positive square block width and height.
+
+    Returns:
+        Tuple containing dense block IDs, global block-column indices, and
+        global block-row indices for every coordinate.
+
+    Raises:
+        ValueError: If coordinate arrays are invalid or block size is not
+            finite and positive.
+    """
+
+    x_values = np.asarray(x_meters, dtype=np.float64)
+    y_values = np.asarray(y_meters, dtype=np.float64)
+    if x_values.ndim != 1 or y_values.ndim != 1:
+        raise ValueError("Sampling coordinates must be one-dimensional arrays.")
+    if x_values.shape != y_values.shape:
+        raise ValueError("Sampling coordinate arrays must have matching shapes.")
+    if x_values.size == 0:
+        raise ValueError("No eligible pixel coordinates were available for sampling.")
+    if not np.all(np.isfinite(x_values)) or not np.all(np.isfinite(y_values)):
+        raise ValueError("Sampling coordinates must all be finite.")
+    if not math.isfinite(block_size_meters) or block_size_meters <= 0:
+        raise ValueError("Sampling block size must be finite and greater than zero.")
+
+    block_columns = np.floor(x_values / block_size_meters).astype(np.int64)
+    block_rows = np.floor(y_values / block_size_meters).astype(np.int64)
+    block_pairs = np.empty(
+        x_values.size,
+        dtype=[("column", np.int64), ("row", np.int64)],
+    )
+    block_pairs["column"] = block_columns
+    block_pairs["row"] = block_rows
+    _, inverse = np.unique(block_pairs, return_inverse=True)
+    return inverse.astype(np.int64) + 1, block_columns, block_rows
+
+
+def _transformed_coordinates(
+    raster: RasterPixelData,
+    flat_pixel_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Transform selected raster-cell centers to geographic and metric CRSs.
+
+    Args:
+        raster: Loaded raster and spatial metadata.
+        flat_pixel_indices: Row-major source pixel indices to transform.
+
+    Returns:
+        Longitude, latitude, equal-area x, and equal-area y coordinate arrays.
+
+    Raises:
+        ValueError: If the raster CRS is missing or transformed coordinates are
+            not finite.
+    """
+
+    if raster.crs is None:
+        raise ValueError("Spatial sampling requires a defined raster CRS.")
+
+    rows = flat_pixel_indices // raster.width
+    columns = flat_pixel_indices % raster.width
+    column_centers = columns.astype(np.float64) + 0.5
+    row_centers = rows.astype(np.float64) + 0.5
+    selected_x = (
+        raster.transform.c
+        + column_centers * raster.transform.a
+        + row_centers * raster.transform.b
+    )
+    selected_y = (
+        raster.transform.f
+        + column_centers * raster.transform.d
+        + row_centers * raster.transform.e
+    )
+    source_crs = raster.crs.to_wkt()
+    geographic_transformer = Transformer.from_crs(
+        source_crs,
+        "EPSG:4326",
+        always_xy=True,
+    )
+    equal_area_transformer = Transformer.from_crs(
+        source_crs,
+        EQUAL_AREA_CRS,
+        always_xy=True,
+    )
+    longitudes, latitudes = geographic_transformer.transform(selected_x, selected_y)
+    x_meters, y_meters = equal_area_transformer.transform(selected_x, selected_y)
+    arrays = tuple(
+        np.asarray(values, dtype=np.float64)
+        for values in (longitudes, latitudes, x_meters, y_meters)
+    )
+    if any(not np.all(np.isfinite(values)) for values in arrays):
+        raise ValueError(
+            "Could not transform every eligible pixel to finite coordinates."
+        )
+    return arrays
+
+
+def create_spatial_sample(
+    raster: RasterPixelData,
+    block_size_meters: float,
+    samples_per_class_per_block: int,
+    random_seed: int,
+    show_progress: bool,
+) -> SpatialSample:
+    """Create a deterministic spatially balanced sample of raster pixels.
+
+    Earth Engine masks zeroes from the exported reference-site bands. Within
+    the usable predictor footprint, a defined reference value of one becomes
+    target one and every other pixel becomes target zero. Reference and
+    non-reference pixels are sampled separately inside each equal-area block.
+
+    Args:
+        raster: Fully loaded ecoregion raster.
+        block_size_meters: Width and height of square sampling blocks.
+        samples_per_class_per_block: Maximum pixels retained for each target
+            value within each block.
+        random_seed: Seed for reproducible sampling without replacement.
+        show_progress: Whether to display tqdm progress bars.
+
+    Returns:
+        Sample table and diagnostics describing its source population.
+
+    Raises:
+        ValueError: If bands, target values, pixel areas, or coordinates cannot
+            support sampling.
+        RuntimeError: If no eligible pixels remain in the predictor footprint.
+    """
+
+    started = time.perf_counter()
+    if samples_per_class_per_block <= 0:
+        raise ValueError("Samples per class per block must be greater than zero.")
+
+    reference_offsets = _reference_band_offsets(raster.band_names)
+    target_offset = reference_offsets[0]
+    predictor_offsets = tuple(
+        offset for offset in range(raster.band_count) if offset not in reference_offsets
+    )
+    if not predictor_offsets:
+        raise ValueError("Spatial sampling requires at least one non-reference band.")
+
+    predictor_names = tuple(raster.band_names[offset] for offset in predictor_offsets)
+    if len(set(predictor_names)) != len(predictor_names):
+        raise ValueError(
+            "Predictor band descriptions must be unique for Parquet output."
+        )
+    reserved_columns = {
+        "row",
+        "column",
+        "longitude",
+        "latitude",
+        "sampling_block_id",
+        "sampling_block_column",
+        "sampling_block_row",
+        "reference_site",
+        "pixel_area_m2",
+        "available_pixels_in_block_class",
+        "sampled_pixels_in_block_class",
+        "sampling_probability",
+        "sampling_weight",
+        "area_weight_m2",
+    }
+    conflicting_names = sorted(reserved_columns.intersection(predictor_names))
+    if conflicting_names:
+        raise ValueError(
+            "Predictor band names conflict with sampling metadata columns: "
+            + ", ".join(conflicting_names)
+        )
+
+    target_values = raster.values[target_offset]
+    target_validity = raster.validity[target_offset]
+    defined_target_values = target_values[target_validity]
+    unexpected_values = np.unique(
+        defined_target_values[
+            (defined_target_values != 0) & (defined_target_values != 1)
+        ]
+    )
+    if unexpected_values.size:
+        rendered = ", ".join(str(value) for value in unexpected_values[:10])
+        raise ValueError(
+            "Grassland Reference Sites must contain only zero and one; found "
+            f"{rendered}."
+        )
+
+    reference_mask = target_validity & (target_values == 1)
+    predictor_domain = np.zeros((raster.height, raster.width), dtype=np.bool_)
+    for offset in tqdm(
+        predictor_offsets,
+        total=len(predictor_offsets),
+        desc="Building predictor footprint",
+        unit="band",
+        disable=not show_progress,
+    ):
+        np.logical_or(
+            predictor_domain,
+            raster.validity[offset],
+            out=predictor_domain,
+        )
+    excluded_reference_pixels = int(
+        np.count_nonzero(reference_mask & ~predictor_domain)
+    )
+    eligible_flat_indices = np.flatnonzero(predictor_domain.ravel())
+    if eligible_flat_indices.size == 0:
+        raise RuntimeError("No pixels contain a defined non-reference predictor value.")
+
+    pixel_area_by_row = pixel_area_by_row_square_meters(raster)
+    if pixel_area_by_row is None:
+        raise ValueError("Could not calculate square-meter pixel areas for sampling.")
+
+    preparation_progress = tqdm(
+        total=3,
+        desc="Preparing sampling grid",
+        unit="step",
+        disable=not show_progress,
+    )
+    rows = eligible_flat_indices // raster.width
+    columns = eligible_flat_indices % raster.width
+    pixel_areas = pixel_area_by_row[rows]
+    targets = reference_mask.ravel()[eligible_flat_indices].astype(np.uint8)
+    preparation_progress.update()
+
+    longitudes, latitudes, x_meters, y_meters = _transformed_coordinates(
+        raster,
+        eligible_flat_indices,
+    )
+    preparation_progress.update()
+    block_ids, block_columns, block_rows = assign_sampling_blocks(
+        x_meters,
+        y_meters,
+        block_size_meters,
+    )
+    preparation_progress.update()
+    preparation_progress.close()
+
+    block_count = int(np.max(block_ids))
+    group_keys = (block_ids - 1) * 2 + targets
+    order = np.argsort(group_keys, kind="stable")
+    sorted_group_keys = group_keys[order]
+    unique_group_keys, starts, available_counts = np.unique(
+        sorted_group_keys,
+        return_index=True,
+        return_counts=True,
+    )
+    sampled_counts = np.minimum(available_counts, samples_per_class_per_block)
+    available_by_group = np.zeros(block_count * 2, dtype=np.int64)
+    sampled_by_group = np.zeros(block_count * 2, dtype=np.int64)
+    available_by_group[unique_group_keys] = available_counts
+    sampled_by_group[unique_group_keys] = sampled_counts
+
+    selected_positions = np.empty(int(np.sum(sampled_counts)), dtype=np.int64)
+    random_generator = np.random.default_rng(random_seed)
+    cursor = 0
+    group_iterator = zip(starts, available_counts, sampled_counts, strict=True)
+    for start, available_count, sampled_count in tqdm(
+        group_iterator,
+        total=unique_group_keys.size,
+        desc="Sampling block classes",
+        unit="stratum",
+        disable=not show_progress,
+    ):
+        group_positions = order[start : start + available_count]
+        if sampled_count < available_count:
+            chosen = random_generator.choice(
+                group_positions,
+                size=sampled_count,
+                replace=False,
+            )
+        else:
+            chosen = group_positions
+        selected_positions[cursor : cursor + sampled_count] = chosen
+        cursor += sampled_count
+    selected_positions.sort()
+
+    selected_flat_indices = eligible_flat_indices[selected_positions]
+    selected_targets = targets[selected_positions]
+    selected_group_keys = group_keys[selected_positions]
+    selected_available_counts = available_by_group[selected_group_keys]
+    selected_sampled_counts = sampled_by_group[selected_group_keys]
+    sampling_probabilities = selected_sampled_counts / selected_available_counts
+    sampling_weights = selected_available_counts / selected_sampled_counts
+    selected_pixel_areas = pixel_areas[selected_positions]
+    area_weights = selected_pixel_areas * sampling_weights
+
+    table_columns: dict[str, np.ndarray] = {
+        "row": rows[selected_positions].astype(np.int32),
+        "column": columns[selected_positions].astype(np.int32),
+        "longitude": longitudes[selected_positions],
+        "latitude": latitudes[selected_positions],
+        "sampling_block_id": block_ids[selected_positions],
+        "sampling_block_column": block_columns[selected_positions],
+        "sampling_block_row": block_rows[selected_positions],
+        "reference_site": selected_targets,
+        "pixel_area_m2": selected_pixel_areas,
+        "available_pixels_in_block_class": selected_available_counts,
+        "sampled_pixels_in_block_class": selected_sampled_counts,
+        "sampling_probability": sampling_probabilities,
+        "sampling_weight": sampling_weights,
+        "area_weight_m2": area_weights,
+    }
+
+    pixel_values = raster.pixel_values()
+    pixel_validity = raster.pixel_validity()
+    predictor_defined_pixels = []
+    complete_predictor_mask = np.ones(selected_positions.size, dtype=np.bool_)
+    for offset, name in tqdm(
+        zip(predictor_offsets, predictor_names, strict=True),
+        total=len(predictor_offsets),
+        desc="Building predictor columns",
+        unit="band",
+        disable=not show_progress,
+    ):
+        valid_values = pixel_validity[selected_flat_indices, offset]
+        predictor_values = np.asarray(
+            pixel_values[selected_flat_indices, offset],
+            dtype=np.float64,
+        ).copy()
+        predictor_values[~valid_values] = np.nan
+        table_columns[name] = predictor_values
+        predictor_defined_pixels.append(int(np.count_nonzero(valid_values)))
+        complete_predictor_mask &= valid_values
+
+    table = pd.DataFrame(table_columns, copy=False)
+    class_summaries = []
+    for target_value in (0, 1):
+        available_mask = targets == target_value
+        sampled_mask = selected_targets == target_value
+        class_sampling_weights = sampling_weights[sampled_mask]
+        class_summaries.append(
+            SamplingClassSummary(
+                target_value=target_value,
+                available_pixels=int(np.count_nonzero(available_mask)),
+                sampled_pixels=int(np.count_nonzero(sampled_mask)),
+                available_area_square_meters=float(np.sum(pixel_areas[available_mask])),
+                weighted_pixels=float(np.sum(class_sampling_weights)),
+                weighted_area_square_meters=float(np.sum(area_weights[sampled_mask])),
+                blocks_with_class=int(np.unique(block_ids[available_mask]).size),
+                minimum_sampling_weight=(
+                    float(np.min(class_sampling_weights))
+                    if class_sampling_weights.size
+                    else math.nan
+                ),
+                maximum_sampling_weight=(
+                    float(np.max(class_sampling_weights))
+                    if class_sampling_weights.size
+                    else math.nan
+                ),
+            )
+        )
+
+    block_populations = np.bincount(block_ids)[1:]
+    return SpatialSample(
+        table=table,
+        target_band_name=raster.band_names[target_offset],
+        ignored_reference_band_names=tuple(
+            raster.band_names[offset] for offset in reference_offsets[1:]
+        ),
+        predictor_band_names=predictor_names,
+        predictor_defined_pixels=tuple(predictor_defined_pixels),
+        complete_predictor_rows=int(np.count_nonzero(complete_predictor_mask)),
+        block_size_meters=block_size_meters,
+        samples_per_class_per_block=samples_per_class_per_block,
+        random_seed=random_seed,
+        block_count=block_count,
+        reference_block_count=class_summaries[1].blocks_with_class,
+        nonreference_block_count=class_summaries[0].blocks_with_class,
+        minimum_available_pixels_per_block=int(np.min(block_populations)),
+        median_available_pixels_per_block=float(np.median(block_populations)),
+        maximum_available_pixels_per_block=int(np.max(block_populations)),
+        excluded_reference_pixels=excluded_reference_pixels,
+        class_summaries=(class_summaries[0], class_summaries[1]),
+        elapsed_seconds=time.perf_counter() - started,
+    )
+
+
+def write_spatial_sample_parquet(
+    sample: SpatialSample,
+    output_path: Path,
+    show_progress: bool,
+) -> ParquetWriteSummary:
+    """Write and metadata-verify a compressed Parquet sample table.
+
+    Args:
+        sample: Spatial sample to serialize.
+        output_path: Destination path ending in ``.parquet``.
+        show_progress: Whether to display a tqdm stage progress bar.
+
+    Returns:
+        Verified Parquet metadata and write measurements.
+
+    Raises:
+        ValueError: If the destination does not use the Parquet suffix.
+        RuntimeError: If written row or column counts do not match the sample.
+    """
+
+    started = time.perf_counter()
+    path = output_path.expanduser().resolve()
+    if path.suffix.lower() != ".parquet":
+        raise ValueError(f"Sample output must end in .parquet: {path}")
+
+    progress = tqdm(
+        total=3,
+        desc="Writing Parquet sample",
+        unit="step",
+        disable=not show_progress,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    progress.update()
+    sample.table.to_parquet(path, engine="pyarrow", compression="zstd", index=False)
+    progress.update()
+
+    parquet_file = pq.ParquetFile(path)
+    metadata = parquet_file.metadata
+    if metadata.num_rows != len(sample.table):
+        raise RuntimeError(
+            f"Parquet row verification failed: expected {len(sample.table):,}, "
+            f"found {metadata.num_rows:,}."
+        )
+    if metadata.num_columns != sample.table.shape[1]:
+        raise RuntimeError(
+            "Parquet column verification failed: expected "
+            f"{sample.table.shape[1]:,}, found {metadata.num_columns:,}."
+        )
+    if parquet_file.schema_arrow.names != list(sample.table.columns):
+        raise RuntimeError("Parquet column-name verification failed.")
+    compression = metadata.row_group(0).column(0).compression
+    progress.update()
+    progress.close()
+    return ParquetWriteSummary(
+        path=path,
+        rows=metadata.num_rows,
+        columns=metadata.num_columns,
+        row_groups=metadata.num_row_groups,
+        compression=compression,
+        file_bytes=path.stat().st_size,
+        elapsed_seconds=time.perf_counter() - started,
     )
 
 
@@ -999,6 +1664,180 @@ def _print_coverage(label: str, summary: CoverageSummary) -> None:
     )
 
 
+def _format_weight(value: float) -> str:
+    """Format a sampling weight or missing weight marker.
+
+    Args:
+        value: Sampling weight, potentially ``NaN`` for an empty class.
+
+    Returns:
+        Compact weight text.
+    """
+
+    if not math.isfinite(value):
+        return "n/a"
+    return f"{value:,.3f}"
+
+
+def print_spatial_sampling_report(sample: SpatialSample) -> None:
+    """Print detailed diagnostics for a completed spatial sample.
+
+    Args:
+        sample: In-memory sample and source-population measurements.
+    """
+
+    total_available = sum(
+        summary.available_pixels for summary in sample.class_summaries
+    )
+    total_sampled = len(sample.table)
+    table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())
+
+    print()
+    print("Spatial sampling report")
+    print(f"Target band: {sample.target_band_name}")
+    if sample.ignored_reference_band_names:
+        print(
+            "Ignored duplicate reference band(s): "
+            + ", ".join(sample.ignored_reference_band_names)
+        )
+    else:
+        print("Ignored duplicate reference band(s): none")
+    print("Target interpretation: 1 = reference site; 0 = non-reference site")
+    print(f"Equal-area sampling CRS: {EQUAL_AREA_CRS}")
+    print(
+        f"Block size: {sample.block_size_meters:,.0f} m x "
+        f"{sample.block_size_meters:,.0f} m"
+    )
+    print(
+        "Sampling cap: "
+        f"{sample.samples_per_class_per_block:,} pixels per target value per block"
+    )
+    print(f"Random seed: {sample.random_seed}")
+    print(f"Eligible source pixels: {total_available:,}")
+    print(
+        f"Selected pixels: {total_sampled:,} "
+        f"({100.0 * total_sampled / total_available:.2f}% retained)"
+    )
+    print(f"In-memory sample table: {table_memory / MEBIBYTE:,.2f} MiB")
+    print(f"Sampling blocks: {sample.block_count:,}")
+    print(f"Blocks containing reference sites: {sample.reference_block_count:,}")
+    print(f"Blocks containing non-reference sites: {sample.nonreference_block_count:,}")
+    print(
+        "Eligible pixels per block: "
+        f"min={sample.minimum_available_pixels_per_block:,}, "
+        f"median={sample.median_available_pixels_per_block:,.1f}, "
+        f"max={sample.maximum_available_pixels_per_block:,}"
+    )
+    print(
+        "Reference pixels excluded because every predictor was missing: "
+        f"{sample.excluded_reference_pixels:,}"
+    )
+
+    print()
+    print("Class sampling and weight checks")
+    print(
+        f"{'Target':<15} {'Available':>12} {'Sampled':>12} {'Retained':>10} "
+        f"{'Area km^2':>14} {'Weighted count':>16} {'Area error':>11} "
+        f"{'Weight range':>21}"
+    )
+    for summary in sample.class_summaries:
+        retained_percent = (
+            100.0 * summary.sampled_pixels / summary.available_pixels
+            if summary.available_pixels
+            else 0.0
+        )
+        available_area_km2 = summary.available_area_square_meters / 1_000_000.0
+        if summary.available_area_square_meters:
+            area_error_percent = (
+                100.0
+                * (
+                    summary.weighted_area_square_meters
+                    - summary.available_area_square_meters
+                )
+                / summary.available_area_square_meters
+            )
+            area_error = f"{area_error_percent:+.4f}%"
+        else:
+            area_error = "n/a"
+        label = "0 non-reference" if summary.target_value == 0 else "1 reference"
+        weight_range = (
+            f"{_format_weight(summary.minimum_sampling_weight)}-"
+            f"{_format_weight(summary.maximum_sampling_weight)}"
+        )
+        print(
+            f"{label:<15} {summary.available_pixels:>12,} "
+            f"{summary.sampled_pixels:>12,} {retained_percent:>9.2f}% "
+            f"{available_area_km2:>14,.3f} "
+            f"{summary.weighted_pixels:>16,.3f} {area_error:>11} "
+            f"{weight_range:>21}"
+        )
+    for summary in sample.class_summaries:
+        count_error = summary.weighted_pixels - summary.available_pixels
+        if not math.isclose(count_error, 0.0, abs_tol=1e-8):
+            print(
+                "WARNING: weighted pixel count differs from the source for "
+                f"target {summary.target_value} by {count_error:,.6f}."
+            )
+    if sample.class_summaries[1].available_pixels == 0:
+        print("WARNING: this ecoregion contains no reference-site pixels.")
+
+    sampled_rows = len(sample.table)
+    fully_defined = sum(
+        count == sampled_rows for count in sample.predictor_defined_pixels
+    )
+    completely_missing = sum(count == 0 for count in sample.predictor_defined_pixels)
+    partially_defined = (
+        len(sample.predictor_band_names) - fully_defined - completely_missing
+    )
+    print()
+    print("Sampled predictor coverage")
+    print(f"Predictor columns: {len(sample.predictor_band_names):,}")
+    print(f"Fully defined predictors: {fully_defined:,}")
+    print(f"Partially defined predictors: {partially_defined:,}")
+    print(f"Completely missing predictors: {completely_missing:,}")
+    print(
+        "Rows complete across every predictor: "
+        f"{sample.complete_predictor_rows:,} / {sampled_rows:,} "
+        f"({100.0 * sample.complete_predictor_rows / sampled_rows:.2f}%)"
+    )
+    lowest_coverage = sorted(
+        zip(
+            sample.predictor_defined_pixels,
+            sample.predictor_band_names,
+            strict=True,
+        )
+    )[: min(8, len(sample.predictor_band_names))]
+    print("Lowest-coverage predictor bands in the sample:")
+    for defined_pixels, name in lowest_coverage:
+        print(
+            f"  {name}: {defined_pixels:,} / {sampled_rows:,} "
+            f"({100.0 * defined_pixels / sampled_rows:.2f}%)"
+        )
+    print(f"Sample construction time: {sample.elapsed_seconds:,.2f} seconds")
+
+
+def print_parquet_report(summary: ParquetWriteSummary, table_memory_bytes: int) -> None:
+    """Print verified metadata for a generated Parquet file.
+
+    Args:
+        summary: Verified Parquet metadata and file measurements.
+        table_memory_bytes: In-memory pandas table size before serialization.
+    """
+
+    compression_ratio = (
+        table_memory_bytes / summary.file_bytes if summary.file_bytes else math.nan
+    )
+    print()
+    print("Parquet output report")
+    print(f"Path: {summary.path}")
+    print(f"Verified dimensions: {summary.rows:,} rows x {summary.columns:,} columns")
+    print(f"Row groups: {summary.row_groups:,}")
+    print(f"Compression: {summary.compression}")
+    print(f"File size: {summary.file_bytes / MEBIBYTE:,.2f} MiB")
+    print(f"In-memory-to-file size ratio: {compression_ratio:,.2f}x")
+    print(f"Write and verification time: {summary.elapsed_seconds:,.2f} seconds")
+
+
 def print_raster_report(
     raster: RasterPixelData,
     include_band_report: bool,
@@ -1038,8 +1877,7 @@ def print_raster_report(
     print(f"Grid cells: {raster.pixel_count:,}")
     print(f"CRS: {raster.crs or 'undefined'}")
     print(
-        "Resolution: "
-        f"{abs(raster.transform.a):.12g} x {abs(raster.transform.e):.12g}"
+        f"Resolution: {abs(raster.transform.a):.12g} x {abs(raster.transform.e):.12g}"
     )
     print(
         "Bounds: "
@@ -1091,7 +1929,7 @@ def print_raster_report(
 
 
 def main() -> None:
-    """Load a GeoTIFF, report diagnostics, and create its location figure."""
+    """Load, report, sample, serialize, and map one ecoregion GeoTIFF."""
 
     args = parse_args()
     try:
@@ -1099,29 +1937,58 @@ def main() -> None:
             args.geotiff,
             show_progress=not args.no_progress,
         )
-    except (FileNotFoundError, ValueError, RuntimeError, rasterio.errors.RasterioError) as error:
+    except (
+        FileNotFoundError,
+        ValueError,
+        RuntimeError,
+        rasterio.errors.RasterioError,
+    ) as error:
         raise SystemExit(str(error)) from error
     print_raster_report(raster, not args.no_band_report, not args.no_progress)
-    if args.no_location_figure:
-        return
-
     ecoregion_name = infer_ecoregion_name(raster.path)
     ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
-    figure_path = args.location_figure or (
-        Path("outputs")
-        / "figures"
-        / f"{ecoregion_slug or 'ecoregion'}_world_location.png"
-    )
-    try:
-        figure_summary = create_ecoregion_location_figure(
-            raster,
-            ecoregion_name,
-            figure_path,
-            not args.no_progress,
+
+    if not args.no_sampling:
+        sample_path = args.sample_output or (
+            Path("outputs")
+            / "samples"
+            / f"{ecoregion_slug or 'ecoregion'}_spatial_sample.parquet"
         )
-    except (ValueError, OSError, rasterio.errors.RasterioError) as error:
-        raise SystemExit(f"Could not generate location figure: {error}") from error
-    print_location_figure_report(figure_summary)
+        try:
+            sample = create_spatial_sample(
+                raster,
+                args.sampling_block_size_m,
+                args.samples_per_class_per_block,
+                args.random_seed,
+                not args.no_progress,
+            )
+            print_spatial_sampling_report(sample)
+            table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())
+            parquet_summary = write_spatial_sample_parquet(
+                sample,
+                sample_path,
+                not args.no_progress,
+            )
+        except (ValueError, RuntimeError, OSError) as error:
+            raise SystemExit(f"Could not create spatial sample: {error}") from error
+        print_parquet_report(parquet_summary, table_memory)
+
+    if not args.no_location_figure:
+        figure_path = args.location_figure or (
+            Path("outputs")
+            / "figures"
+            / f"{ecoregion_slug or 'ecoregion'}_world_location.png"
+        )
+        try:
+            figure_summary = create_ecoregion_location_figure(
+                raster,
+                ecoregion_name,
+                figure_path,
+                not args.no_progress,
+            )
+        except (ValueError, OSError, rasterio.errors.RasterioError) as error:
+            raise SystemExit(f"Could not generate location figure: {error}") from error
+        print_location_figure_report(figure_summary)
 
 
 if __name__ == "__main__":
