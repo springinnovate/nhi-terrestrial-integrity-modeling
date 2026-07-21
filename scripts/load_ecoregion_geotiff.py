@@ -654,16 +654,6 @@ def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
     )
 
 
-def _world_land_feature() -> cfeature.Feature:
-    """Return low-resolution Natural Earth land geometry.
-
-    Returns:
-        Cartopy feature backed by Natural Earth 1:110 million land polygons.
-    """
-
-    return cfeature.LAND.with_scale("110m")
-
-
 def _callout_position(bounds: BoundingBox) -> tuple[float, float]:
     """Choose a map-relative label position opposite the footprint.
 
@@ -761,7 +751,7 @@ def create_ecoregion_location_figure(
             axis.set_global()
             axis.set_facecolor("#DCEAF1")
             axis.add_feature(
-                _world_land_feature(),
+                cfeature.LAND.with_scale("110m"),
                 facecolor="#EEEDE8",
                 edgecolor="#586166",
                 linewidth=0.45,

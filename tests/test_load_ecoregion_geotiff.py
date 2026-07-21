@@ -162,7 +162,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
 
         self.assertEqual("Northern Shortgrass Prairie", name)
 
-    @patch("scripts.load_ecoregion_geotiff._world_land_feature")
+    @patch("scripts.load_ecoregion_geotiff.cfeature.LAND.with_scale")
     def test_creates_world_location_figure_without_network(
         self,
         land_feature_mock,
