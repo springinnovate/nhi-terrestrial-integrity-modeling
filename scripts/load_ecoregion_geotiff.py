@@ -264,13 +264,6 @@ def parse_args() -> argparse.Namespace:
         help="Disable tqdm progress bars.",
     )
     parser.add_argument(
-        "--ecoregion-name",
-        help=(
-            "Name shown on the location map. Defaults to a readable name "
-            "inferred from the GeoTIFF filename."
-        ),
-    )
-    parser.add_argument(
         "--location-figure",
         type=Path,
         help=(
@@ -1136,7 +1129,7 @@ def main() -> None:
     if args.no_location_figure:
         return
 
-    ecoregion_name = args.ecoregion_name or infer_ecoregion_name(raster.path)
+    ecoregion_name = infer_ecoregion_name(raster.path)
     figure_path = args.location_figure or default_location_figure_path(ecoregion_name)
     try:
         figure_summary = create_ecoregion_location_figure(

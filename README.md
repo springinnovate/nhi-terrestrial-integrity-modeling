@@ -21,12 +21,11 @@ copying the arrays. Use `--no-band-report` for only the dataset-level summary or
 `--no-progress` to suppress tqdm output. The first map run may download Cartopy's
 Natural Earth 1:110 million land geometry.
 
-Earth Engine can truncate ecoregion names in export filenames. Supply the complete
-publication label and an explicit PNG, PDF, or SVG path when needed:
+The map label is inferred from the GeoTIFF filename. Supply an explicit PNG, PDF, or
+SVG path when vector output or a different destination is needed:
 
 ```powershell
 python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
-  --ecoregion-name "Northern Shortgrass Prairie" `
   --location-figure outputs\figures\northern_shortgrass_prairie.svg
 ```
 
