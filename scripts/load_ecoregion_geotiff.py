@@ -750,8 +750,6 @@ def create_spatial_sample(
     predictor_offsets = tuple(
         offset for offset in range(raster.band_count) if offset not in reference_offsets
     )
-    if not predictor_offsets:
-        raise ValueError("Spatial sampling requires at least one non-reference band.")
 
     predictor_names = tuple(raster.band_names[offset] for offset in predictor_offsets)
     if len(set(predictor_names)) != len(predictor_names):
