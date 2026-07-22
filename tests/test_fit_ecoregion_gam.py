@@ -15,8 +15,10 @@ import pandas as pd
 
 from scripts.fit_ecoregion_gam import (
     GamConfiguration,
+    _equal_area_sample_coordinates,
     assign_spatial_folds,
     calculate_imputation_values,
+    infer_sample_ecoregion_name,
     prepare_gam_data,
     run_spatial_gam,
     weighted_quantiles,
@@ -101,6 +103,30 @@ class FitEcoregionGamTest(unittest.TestCase):
         )
 
         np.testing.assert_array_equal(quantiles, [0.0, 10.0, 20.0])
+
+    def test_equal_area_footprint_keeps_north_above_south(self) -> None:
+        """Keep geographic north upward in the spatial-fold figure."""
+
+        sample_table = pd.DataFrame(
+            {
+                "longitude": [-111.0, -111.0, -110.0],
+                "latitude": [44.0, 45.0, 44.0],
+            }
+        )
+
+        x_kilometers, y_kilometers = _equal_area_sample_coordinates(sample_table)
+
+        self.assertGreater(y_kilometers[1], y_kilometers[0])
+        self.assertGreater(x_kilometers[2], x_kilometers[0])
+
+    def test_infers_ecoregion_name_from_spatial_sample(self) -> None:
+        """Turn the sample stem into a standalone figure label."""
+
+        name = infer_sample_ecoregion_name(
+            Path("montana_valley_and_foothill_spatial_sample.parquet")
+        )
+
+        self.assertEqual("Montana Valley and Foothill", name)
 
     def test_groups_four_by_four_sampling_blocks_into_validation_blocks(self) -> None:
         """Keep every grouped 100 km block wholly inside one fold."""
@@ -208,6 +234,7 @@ class FitEcoregionGamTest(unittest.TestCase):
             .all()
         )
         self.assertEqual(19, len(metadata["retained_predictors"]))
+        self.assertEqual("Sample", metadata["ecoregion_name"])
         self.assertIn("relative similarity", metadata["model"]["score_interpretation"])
         self.assertEqual(4, len(summary.figure_paths))
         self.assertTrue(

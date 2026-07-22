@@ -91,11 +91,14 @@ imputation, and held-out ranking performance. Outputs under
   continuous Boyce correlation, reference percentile rank, top-area reference
   recovery, and score separation.
 - The final serialized additive model, predictor coverage, and run metadata.
-- Publication-resolution figures for spatial folds, score distributions, fold metric
-  variability, and final-model partial response curves.
+- Publication-resolution figures for spatial folds over the sampled valid-pixel
+  footprint, score distributions, fold metric variability, and final-model partial
+  response curves.
 
 Use `--no-progress` to suppress tqdm output. Block sizes, fold count, spline knots, and
-regularization strength are also configurable; run with `--help` for the complete list.
+regularization strength are also configurable. Figure titles infer the ecoregion name
+from the sample filename; use `--ecoregion-name` to override a truncated or ambiguous
+label. Run with `--help` for the complete option list.
 
 ## Raster stack table
 

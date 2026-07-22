@@ -234,6 +234,7 @@ class LocationFigureSummary:
         path: Saved figure path.
         ecoregion_name: Label shown in the figure.
         bounds: Mapped footprint bounds in longitude and latitude.
+        land_basemap_available: Whether the Natural Earth land layer was drawn.
         display_width: Number of columns in the coarsened display mask.
         display_height: Number of rows in the coarsened display mask.
         display_defined_pixels: Number of defined cells in the display mask.
@@ -242,6 +243,7 @@ class LocationFigureSummary:
     path: Path
     ecoregion_name: str
     bounds: BoundingBox
+    land_basemap_available: bool
     display_width: int
     display_height: int
     display_defined_pixels: int
@@ -1280,6 +1282,54 @@ def _locator_bounds(bounds: BoundingBox, minimum_span_degrees: float) -> Boundin
     )
 
 
+def _save_location_figure_with_optional_land(
+    figure: plt.Figure,
+    path: Path,
+    land_artist,
+    basemap_note,
+) -> bool:
+    """Save a locator map, falling back when Cartopy cannot fetch land data.
+
+    Cartopy loads Natural Earth geometries lazily during Matplotlib drawing.
+    A missing, corrupt, or unreachable cache can therefore fail inside
+    ``savefig`` after the figure has already been assembled. Removing the land
+    artist still leaves the ecoregion footprint, locator box, callout, and grid.
+
+    Args:
+        figure: Matplotlib figure to save.
+        path: Output image path.
+        land_artist: Artist returned by ``axis.add_feature`` for land, if any.
+        basemap_note: Text artist describing the basemap source.
+
+    Returns:
+        Whether the Natural Earth land layer was included in the saved figure.
+    """
+
+    try:
+        figure.savefig(
+            path,
+            dpi=LOCATION_FIGURE_DPI,
+            bbox_inches="tight",
+            facecolor=figure.get_facecolor(),
+        )
+        return True
+    except (EOFError, OSError):
+        if land_artist is None:
+            raise
+        land_artist.remove()
+        basemap_note.set_text("Natural Earth land layer unavailable")
+        # Retry without the external-data layer that caused the draw-time
+        # failure. Any second error is unrelated to the basemap and should
+        # still reach the caller.
+        figure.savefig(
+            path,
+            dpi=LOCATION_FIGURE_DPI,
+            bbox_inches="tight",
+            facecolor=figure.get_facecolor(),
+        )
+        return False
+
+
 def create_ecoregion_location_figure(
     raster: RasterPixelData,
     ecoregion_name: str,
@@ -1321,6 +1371,7 @@ def create_ecoregion_location_figure(
         disable=not show_progress,
     )
     figure = None
+    land_basemap_available = True
     try:
         footprint = _geographic_footprint(raster)
         progress.update()
@@ -1336,7 +1387,7 @@ def create_ecoregion_location_figure(
             axis = figure.add_subplot(1, 1, 1, projection=ccrs.Robinson())
             axis.set_global()
             axis.set_facecolor("#DCEAF1")
-            axis.add_feature(
+            land_artist = axis.add_feature(
                 cfeature.LAND.with_scale("110m"),
                 facecolor="#EEEDE8",
                 edgecolor="#586166",
@@ -1464,7 +1515,7 @@ def create_ecoregion_location_figure(
                 fontsize=9,
                 handlelength=2.4,
             )
-            figure.text(
+            basemap_note = figure.text(
                 0.99,
                 0.015,
                 "Base map: Natural Earth 1:110m",
@@ -1477,11 +1528,11 @@ def create_ecoregion_location_figure(
             progress.update()
 
             path.parent.mkdir(parents=True, exist_ok=True)
-            figure.savefig(
+            land_basemap_available = _save_location_figure_with_optional_land(
+                figure,
                 path,
-                dpi=LOCATION_FIGURE_DPI,
-                bbox_inches="tight",
-                facecolor=figure.get_facecolor(),
+                land_artist,
+                basemap_note,
             )
             progress.update()
     finally:
@@ -1493,6 +1544,7 @@ def create_ecoregion_location_figure(
         path=path,
         ecoregion_name=cleaned_name,
         bounds=footprint.bounds,
+        land_basemap_available=land_basemap_available,
         display_width=footprint.mask.shape[1],
         display_height=footprint.mask.shape[0],
         display_defined_pixels=int(np.count_nonzero(footprint.mask)),
@@ -1520,6 +1572,8 @@ def print_location_figure_report(summary: LocationFigureSummary) -> None:
         f"{summary.display_defined_pixels:,} defined cells on a "
         f"{summary.display_width:,} x {summary.display_height:,} coarsened grid"
     )
+    basemap_status = "available" if summary.land_basemap_available else "unavailable"
+    print(f"Natural Earth land basemap: {basemap_status}")
 
 
 def _format_area(area_square_kilometers: float | None) -> str:

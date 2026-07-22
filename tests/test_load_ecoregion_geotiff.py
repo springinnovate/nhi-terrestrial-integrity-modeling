@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import ssl
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import matplotlib.figure
 import numpy as np
 import pandas as pd
 import rasterio
@@ -361,11 +363,52 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
 
         self.assertEqual(figure_path.resolve(), summary.path)
         self.assertEqual("Test Prairie", summary.ecoregion_name)
+        self.assertTrue(summary.land_basemap_available)
         self.assertTrue(figure_path.exists())
         self.assertGreater(figure_path.stat().st_size, 1_000)
         self.assertGreater(summary.display_defined_pixels, 0)
         self.assertLess(summary.bounds.left, summary.bounds.right)
         self.assertLess(summary.bounds.bottom, summary.bounds.top)
+
+    @patch("scripts.load_ecoregion_geotiff.cfeature.LAND.with_scale")
+    def test_saves_location_figure_when_land_basemap_download_fails(
+        self,
+        land_feature_mock,
+    ) -> None:
+        """Fall back to a footprint-only map when Cartopy land data fails."""
+
+        land_feature_mock.return_value = cfeature.ShapelyFeature(
+            [],
+            ccrs.PlateCarree(),
+        )
+        original_savefig = matplotlib.figure.Figure.savefig
+        save_attempts = 0
+
+        def savefig_with_one_ssl_failure(figure, *args, **kwargs):
+            nonlocal save_attempts
+            save_attempts += 1
+            if save_attempts == 1:
+                raise ssl.SSLError("[ASN1: NOT_ENOUGH_DATA] not enough data")
+            return original_savefig(figure, *args, **kwargs)
+
+        raster = load_raster_pixels(self.raster_path, show_progress=False)
+        figure_path = Path(self.temporary_directory.name) / "location_fallback.png"
+
+        with patch(
+            "matplotlib.figure.Figure.savefig",
+            new=savefig_with_one_ssl_failure,
+        ):
+            summary = create_ecoregion_location_figure(
+                raster,
+                "Test Prairie",
+                figure_path,
+                False,
+            )
+
+        self.assertFalse(summary.land_basemap_available)
+        self.assertEqual(2, save_attempts)
+        self.assertTrue(figure_path.exists())
+        self.assertGreater(figure_path.stat().st_size, 1_000)
 
 
 if __name__ == "__main__":
