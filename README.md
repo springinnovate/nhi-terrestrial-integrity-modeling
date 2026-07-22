@@ -55,6 +55,48 @@ python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
 
 Use `--no-location-figure` when only the in-memory data and text report are needed.
 
+## Fit and spatially validate an ecoregion GAM
+
+Fit a regularized additive logistic model from one spatial sample Parquet. The model
+uses the 2018 environmental bands d20-d39: continuous predictors enter as independent
+cubic spline terms, landform enters as a categorical term, and no interactions are
+included. The response is the supplied reference-site indicator. Model scores therefore
+measure relative similarity to those reference sites; they are not calibrated
+probabilities of natural grassland presence.
+
+```powershell
+python scripts/fit_ecoregion_gam.py `
+  outputs\samples\example_spatial_sample.parquet
+```
+
+The validation design combines each 4 by 4 group of 25 km sampling blocks into a
+100 km validation block. Whole validation blocks are assigned to one of five folds.
+Each row receives one out-of-fold score from the model that did not train on its fold,
+then a final model is refit with every usable row.
+
+Predictors covering less than 80% of represented sample area are removed. Rows missing
+more than 20% of retained predictors are flagged and excluded from fitting. For every
+held-out fold, continuous missing values are replaced with area-weighted training
+medians and missing landforms with the area-weighted training mode. These values are
+learned from training rows only. Use `--minimum-predictor-coverage` and
+`--maximum-row-missing-fraction` to change the defaults.
+
+The command reports predictor coverage, excluded rows and area, fold composition,
+imputation, and held-out ranking performance. Outputs under
+`outputs/gam/<sample stem>` include:
+
+- A ZSTD Parquet copy of the sample with validation blocks, folds, usability fields,
+  and out-of-fold scores.
+- Per-fold and aggregate metrics for weighted reference-versus-background AUC,
+  continuous Boyce correlation, reference percentile rank, top-area reference
+  recovery, and score separation.
+- The final serialized additive model, predictor coverage, and run metadata.
+- Publication-resolution figures for spatial folds, score distributions, fold metric
+  variability, and final-model partial response curves.
+
+Use `--no-progress` to suppress tqdm output. Block sizes, fold count, spline knots, and
+regularization strength are also configurable; run with `--help` for the complete list.
+
 ## Raster stack table
 
 Build a CSV of pixels where every GeoTIFF has a defined value. Rasters are sampled onto
