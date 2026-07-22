@@ -100,6 +100,62 @@ regularization strength are also configurable. Figure titles infer the ecoregion
 from the sample filename; use `--ecoregion-name` to override a truncated or ambiguous
 label. Run with `--help` for the complete option list.
 
+## Fit ecological-response reference conditions
+
+Fit separate additive models for the ecological responses in bands d02-d19. Unlike
+`fit_ecoregion_gam.py`, which classifies reference versus background, this workflow
+trains only on supplied reference rows. Each model estimates the response expected at a
+reference site with the pixel's d20-d39 environmental conditions. HMI and HII are not
+fitted predictors.
+
+```powershell
+python scripts/fit_grassland_integrity_parameters.py `
+  outputs\samples\example_spatial_sample.parquet
+```
+
+The default run screens all 2018 response bands. Bands with no reference observations,
+too little represented-area coverage, no reference-site variation, or inadequate
+spatial-fold support are listed with a reason and skipped. Fit a smaller candidate set
+with response-band aliases:
+
+```powershell
+python scripts/fit_grassland_integrity_parameters.py `
+  outputs\samples\example_spatial_sample.parquet `
+  --responses d02 d03 d11 d12 d18 d19
+```
+
+Each continuous response receives its own regularized additive ridge regression.
+Continuous environmental predictors enter as independent cubic splines, landform is
+categorical, and no interactions are included. Spatial folds match the reference-site
+GAM: each model is trained on reference rows outside one grouped 100 km fold, then
+predicts expected reference condition for every usable row inside that fold.
+
+Outputs under `outputs/integrity_parameters/<sample stem>` include:
+
+- A ZSTD Parquet table with out-of-fold expected responses, signed
+  observed-minus-expected deviations, and standardized deviations. Standardization
+  divides by the held-out reference RMSE for that response.
+- Response coverage, fold metrics, response-level metrics, predictor coverage, and an
+  area-weighted deviation-correlation table.
+- One portable Joblib model bundle per fitted response.
+- A standalone Markdown model-selection report and publication-resolution figures for
+  spatial folds, held-out fit, observed versus expected values, reference residuals,
+  response redundancy, and final-model partial responses.
+
+Area-weighted held-out R2 measures how much spatially held-out reference variation the
+environmental model explains. Rank correlation measures whether observed and expected
+responses have similar ordering. Fold ranges expose geographic instability. These
+diagnostics help choose response parameters; they do not turn a response into an
+integrity score by themselves.
+
+A positive standardized deviation means observed is above expected, not necessarily
+that ecological integrity is higher. Bare ground, vegetation cover, phenology, and
+productivity need explicit ecological direction and weighting before combination. The
+sampled zero class is background rather than a verified current-grassland mask, so use
+a defensible current-grassland layer before interpreting deviations as present-day
+grassland condition. Use `--no-partial-response-figures` for a faster screening run and
+`--help` for all coverage, fold, spline, and regularization settings.
+
 ## Raster stack table
 
 Build a CSV of pixels where every GeoTIFF has a defined value. Rasters are sampled onto
