@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Patch, Rectangle
+from pyproj import Transformer
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
@@ -33,6 +34,7 @@ DEFAULT_SPLINE_KNOT_COUNT = 6
 DEFAULT_REGULARIZATION_C = 1.0
 FIGURE_DPI = 300
 TOP_AREA_FRACTIONS = (0.10, 0.20, 0.30)
+EQUAL_AREA_CRS = "EPSG:8857"
 REQUIRED_SAMPLE_COLUMNS = (
     "longitude",
     "latitude",
@@ -205,6 +207,10 @@ def parse_args() -> argparse.Namespace:
         help="Output directory. Defaults to outputs/gam/<sample stem>.",
     )
     parser.add_argument(
+        "--ecoregion-name",
+        help="Figure label. Defaults to a name inferred from the sample filename.",
+    )
+    parser.add_argument(
         "--fold-count",
         type=int,
         default=DEFAULT_FOLD_COUNT,
@@ -270,6 +276,33 @@ def parse_args() -> argparse.Namespace:
         help="Disable tqdm progress bars.",
     )
     return parser.parse_args()
+
+
+def infer_sample_ecoregion_name(sample_path: Path) -> str:
+    """Infer a readable ecoregion label from a spatial-sample filename.
+
+    Args:
+        sample_path: Parquet path whose stem identifies the ecoregion.
+
+    Returns:
+        Human-readable ecoregion label.
+    """
+
+    name_stem = re.sub(
+        r"_spatial_sample$",
+        "",
+        sample_path.stem,
+        flags=re.IGNORECASE,
+    )
+    words = re.sub(r"[_-]+", " ", name_stem).strip()
+    display_name = words.title()
+    for conjunction in ("And", "Of", "The"):
+        display_name = re.sub(
+            rf"\b{conjunction}\b",
+            conjunction.lower(),
+            display_name,
+        )
+    return display_name or "Ecoregion"
 
 
 def weighted_quantiles(
@@ -819,16 +852,47 @@ def calculate_fold_metrics(
     return metrics
 
 
+def _equal_area_sample_coordinates(
+    sample_table: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Transform sampled pixel centers to equal-area kilometers.
+
+    Args:
+        sample_table: Sample rows containing longitude and latitude.
+
+    Returns:
+        Equal-area x and y coordinates in kilometers.
+    """
+
+    transformer = Transformer.from_crs(
+        "EPSG:4326",
+        EQUAL_AREA_CRS,
+        always_xy=True,
+    )
+    x_meters, y_meters = transformer.transform(
+        sample_table["longitude"].to_numpy(dtype=np.float64),
+        sample_table["latitude"].to_numpy(dtype=np.float64),
+    )
+    return (
+        np.asarray(x_meters, dtype=np.float64) / 1_000.0,
+        np.asarray(y_meters, dtype=np.float64) / 1_000.0,
+    )
+
+
 def create_fold_map(
     block_summary: pd.DataFrame,
+    sample_table: pd.DataFrame,
     configuration: GamConfiguration,
+    ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Map grouped validation blocks, fold membership, and reference blocks.
+    """Map grouped validation blocks over the sampled valid-pixel footprint.
 
     Args:
         block_summary: One row per assigned validation block.
+        sample_table: Sampled valid pixels used to show the raster footprint.
         configuration: Validation block dimensions and fold count.
+        ecoregion_name: Human-readable label included in the figure title.
         output_path: PNG path for the completed figure.
     """
 
@@ -837,6 +901,7 @@ def create_fold_map(
     face_colors = []
     reference_rectangles = []
     block_size_kilometers = configuration.validation_block_size_meters / 1_000.0
+    footprint_x, footprint_y = _equal_area_sample_coordinates(sample_table)
     for block in block_summary.itertuples(index=False):
         lower_left_x = block.validation_block_column * block_size_kilometers
         lower_left_y = block.validation_block_row * block_size_kilometers
@@ -866,6 +931,17 @@ def create_fold_map(
                 linewidths=0.7,
             )
         )
+        axis.scatter(
+            footprint_x,
+            footprint_y,
+            color="#30383C",
+            marker=".",
+            s=1.2,
+            alpha=0.28,
+            linewidths=0,
+            rasterized=True,
+            zorder=2,
+        )
         if reference_rectangles:
             axis.add_collection(
                 PatchCollection(
@@ -873,6 +949,7 @@ def create_fold_map(
                     facecolors="none",
                     edgecolors="#161A1D",
                     linewidths=1.5,
+                    zorder=3,
                 )
             )
         axis.autoscale_view()
@@ -880,15 +957,19 @@ def create_fold_map(
         axis.set_xlabel("Equal-area x coordinate (km)")
         axis.set_ylabel("Equal-area y coordinate (km)")
         axis.set_title(
-            "Spatial cross-validation folds",
+            f"Spatial cross-validation folds\n{ecoregion_name}",
             fontsize=15,
             weight="bold",
             pad=34,
+            linespacing=1.25,
         )
         axis.text(
             0.0,
             1.015,
-            "Outlined blocks contain sampled reference-site area",
+            (
+                "Gray points show sampled valid pixels; outlined blocks contain "
+                "reference-site area"
+            ),
             transform=axis.transAxes,
             ha="left",
             va="bottom",
@@ -898,6 +979,18 @@ def create_fold_map(
             Patch(facecolor=fold_colors[index], label=f"Fold {index + 1}")
             for index in range(configuration.fold_count)
         ]
+        legend_handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                marker=".",
+                color="none",
+                markerfacecolor="#30383C",
+                markeredgecolor="none",
+                markersize=6,
+                label="Sampled valid pixels",
+            )
+        )
         legend_handles.append(
             Patch(
                 facecolor="white",
@@ -924,12 +1017,14 @@ def create_fold_map(
 
 def create_oof_score_distribution_figure(
     scored_table: pd.DataFrame,
+    ecoregion_name: str,
     output_path: Path,
 ) -> None:
     """Plot represented-area distributions of out-of-fold scores by class.
 
     Args:
         scored_table: Sample table containing finite OOF scores.
+        ecoregion_name: Human-readable label included in the figure title.
         output_path: PNG path for the completed figure.
     """
 
@@ -957,9 +1052,13 @@ def create_oof_score_distribution_figure(
         axis.set_xlabel("Out-of-fold reference-similarity score")
         axis.set_ylabel("Represented area within class (%)")
         axis.set_title(
-            "Held-out reference-similarity score distributions",
+            (
+                "Held-out reference-similarity score distributions\n"
+                f"{ecoregion_name}"
+            ),
             fontsize=15,
             weight="bold",
+            linespacing=1.25,
         )
         axis.legend(frameon=False)
         axis.grid(axis="y", color="#D6DADD", linewidth=0.6)
@@ -972,18 +1071,25 @@ def create_oof_score_distribution_figure(
 
 def create_metric_variability_figure(
     fold_metrics: pd.DataFrame,
+    ecoregion_name: str,
     output_path: Path,
 ) -> None:
     """Plot held-out ranking metrics and their variation among folds.
 
     Args:
         fold_metrics: One row of evaluation measurements per spatial fold.
+        ecoregion_name: Human-readable label included in the figure title.
         output_path: PNG path for the completed figure.
     """
 
     metric_labels = {
-        "weighted_reference_background_auc": "Weighted AUC",
-        "continuous_boyce_correlation": "Continuous Boyce",
+        "weighted_reference_background_auc": (
+            "How often reference sites outrank background\n(weighted AUC)"
+        ),
+        "continuous_boyce_correlation": (
+            "Does reference enrichment rise with score?\n"
+            "(Continuous Boyce rank correlation)"
+        ),
         "reference_score_percentile_median": "Median reference percentile",
         "reference_recovery_top_10_pct": "Reference recovery: top 10% area",
         "reference_recovery_top_20_pct": "Reference recovery: top 20% area",
@@ -1029,11 +1135,12 @@ def create_metric_variability_figure(
         axis.invert_yaxis()
         axis.set_xlim(-1.05, 1.05)
         axis.axvline(0.0, color="#9AA2A6", linewidth=0.7)
-        axis.set_xlabel("Metric value")
+        axis.set_xlabel("Metric value (higher is better; 1 is the maximum)")
         axis.set_title(
-            "Spatial holdout performance and variability",
+            f"Spatial holdout performance and variability\n{ecoregion_name}",
             fontsize=15,
             weight="bold",
+            linespacing=1.25,
         )
         legend_handles = [
             plt.Line2D(
@@ -1077,6 +1184,7 @@ def create_metric_variability_figure(
 def create_partial_response_figure(
     fitted_model: FittedAdditiveGam,
     usable_table: pd.DataFrame,
+    ecoregion_name: str,
     output_path: Path,
 ) -> None:
     """Plot final-model partial response curves for every retained predictor.
@@ -1088,6 +1196,7 @@ def create_partial_response_figure(
     Args:
         fitted_model: Final model refit using all usable rows.
         usable_table: All rows used by the final fit.
+        ecoregion_name: Human-readable label included in the figure title.
         output_path: PNG path for the completed figure.
     """
 
@@ -1188,10 +1297,11 @@ def create_partial_response_figure(
     for axis in axes.flat[len(predictor_names) :]:
         axis.set_visible(False)
     figure.suptitle(
-        "Final additive model partial responses",
+        f"Final additive model partial responses\n{ecoregion_name}",
         fontsize=18,
         weight="bold",
         y=0.995,
+        linespacing=1.25,
     )
     figure.text(
         0.5,
@@ -1212,7 +1322,7 @@ def create_partial_response_figure(
         rotation=90,
         fontsize=11,
     )
-    figure.tight_layout(rect=(0.025, 0.025, 1.0, 0.975))
+    figure.tight_layout(rect=(0.025, 0.025, 1.0, 0.945))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
     plt.close(figure)
@@ -1223,6 +1333,7 @@ def run_spatial_gam(
     output_directory: Path,
     configuration: GamConfiguration,
     show_progress: bool,
+    ecoregion_name: str | None = None,
 ) -> GamRunSummary:
     """Run spatial cross-validation, final fitting, reporting, and outputs.
 
@@ -1231,6 +1342,7 @@ def run_spatial_gam(
         output_directory: Directory for model, tables, metadata, and figures.
         configuration: Spatial validation and model settings.
         show_progress: Whether to show tqdm progress bars.
+        ecoregion_name: Optional figure label overriding filename inference.
 
     Returns:
         Paths and principal counts for the completed run.
@@ -1239,9 +1351,13 @@ def run_spatial_gam(
     started = time.perf_counter()
     resolved_sample_path = sample_path.expanduser().resolve()
     resolved_output_directory = output_directory.expanduser().resolve()
+    resolved_ecoregion_name = (
+        ecoregion_name or infer_sample_ecoregion_name(resolved_sample_path)
+    )
     print("Spatial GAM validation")
     print(f"Input sample: {resolved_sample_path}")
     print(f"Output directory: {resolved_output_directory}")
+    print(f"Ecoregion: {resolved_ecoregion_name}")
     sample_table = pd.read_parquet(resolved_sample_path)
     print(
         f"Loaded {len(sample_table):,} sampled rows x {sample_table.shape[1]:,} columns"
@@ -1477,17 +1593,37 @@ def run_spatial_gam(
     )
     output_progress.update()
 
-    create_fold_map(prepared.block_summary, configuration, figure_paths[0])
+    create_fold_map(
+        prepared.block_summary,
+        prepared.table,
+        configuration,
+        resolved_ecoregion_name,
+        figure_paths[0],
+    )
     output_progress.update()
-    create_oof_score_distribution_figure(scored_table, figure_paths[1])
+    create_oof_score_distribution_figure(
+        scored_table,
+        resolved_ecoregion_name,
+        figure_paths[1],
+    )
     output_progress.update()
-    create_metric_variability_figure(fold_metrics, figure_paths[2])
+    create_metric_variability_figure(
+        fold_metrics,
+        resolved_ecoregion_name,
+        figure_paths[2],
+    )
     output_progress.update()
-    create_partial_response_figure(final_model, usable_table, figure_paths[3])
+    create_partial_response_figure(
+        final_model,
+        usable_table,
+        resolved_ecoregion_name,
+        figure_paths[3],
+    )
     output_progress.update()
 
     metadata = {
         "input_sample": str(resolved_sample_path),
+        "ecoregion_name": resolved_ecoregion_name,
         "configuration": asdict(configuration),
         "model": {
             "family": "regularized logistic additive model",
@@ -1602,6 +1738,7 @@ def main() -> None:
             output_directory,
             configuration,
             not args.no_progress,
+            ecoregion_name=args.ecoregion_name,
         )
     except (FileNotFoundError, OSError, ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from error
