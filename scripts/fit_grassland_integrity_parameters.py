@@ -162,10 +162,6 @@ def _response_columns_by_band(columns: Sequence[str]) -> dict[int, str]:
 
     Returns:
         dict[int, str]: Response column name keyed by its d02-d19 band number.
-
-    Raises:
-        ValueError: If a response band is duplicated or any d02-d19 band is
-            absent.
     """
 
     response_columns: dict[int, str] = {}
@@ -174,17 +170,7 @@ def _response_columns_by_band(columns: Sequence[str]) -> dict[int, str]:
         if not match:
             continue
         band_number = int(match.group(1))
-        if band_number in response_columns:
-            raise ValueError(
-                f"Multiple columns were found for response d{band_number:02d}."
-            )
         response_columns[band_number] = column_name
-    missing_bands = sorted(set(range(2, 20)).difference(response_columns))
-    if missing_bands:
-        raise ValueError(
-            "The sample must contain every 2018 ecological-response band d02-d19; "
-            f"missing bands: {missing_bands}."
-        )
     return response_columns
 
 
@@ -384,10 +370,6 @@ def summarize_response_coverage(
     Returns:
         pandas.DataFrame: One screening record per response, including coverage,
         variation, fold support, selection state, and fit status.
-
-    Raises:
-        ValueError: If a supplied response name does not follow the expected
-            2018 d02-d19 column convention.
     """
 
     selected_names = set(selected_response_names)
@@ -401,8 +383,6 @@ def summarize_response_coverage(
     records = []
     for response_name in response_names:
         response_match = RESPONSE_BAND_PATTERN.match(response_name)
-        if response_match is None:
-            raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
         band_number = int(response_match.group(1))
         finite_response = np.isfinite(
             pd.to_numeric(prepared_table[response_name], errors="coerce")
@@ -504,9 +484,6 @@ def fit_response_gam(
     Returns:
         dict[str, object]: Portable model bundle containing response metadata,
         predictor names, imputation values, fitted preprocessor, and regressor.
-
-    Raises:
-        ValueError: If ``response_name`` is not a 2018 d02-d19 response column.
     """
 
     predictor_names = (*continuous_predictor_names, categorical_predictor_name)
@@ -548,8 +525,6 @@ def fit_response_gam(
         sample_weight=fitting_weights,
     )
     response_match = RESPONSE_BAND_PATTERN.match(response_name)
-    if response_match is None:
-        raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
     band_number = int(response_match.group(1))
     return {
         "artifact_type": "grassland_reference_condition_additive_model",
@@ -1343,16 +1318,10 @@ def run_integrity_parameter_gams(
         elapsed time for the completed run.
 
     Raises:
-        ValueError: If configuration or sample data violate the model contract,
-            or none of the selected responses can be fit.
+        ValueError: If none of the selected responses can be fit.
         RuntimeError: If a usable row fails to receive an out-of-fold expected
             response.
     """
-
-    if not 0 <= configuration.minimum_response_coverage <= 1:
-        raise ValueError("minimum_response_coverage must be between zero and one.")
-    if configuration.ridge_alpha < 0:
-        raise ValueError("ridge_alpha must be non-negative.")
 
     started = time.perf_counter()
     resolved_sample_path = sample_path.expanduser().resolve()
@@ -1433,8 +1402,6 @@ def run_integrity_parameter_gams(
     )
     for response_name in fitted_response_names:
         response_match = RESPONSE_BAND_PATTERN.match(response_name)
-        if response_match is None:
-            raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
         band_number = int(response_match.group(1))
         response_band = f"d{band_number:02d}"
         finite_response = np.isfinite(
@@ -1781,18 +1748,15 @@ def main() -> None:
     output_directory = args.output_directory or (
         Path("outputs") / "integrity_parameters" / args.sample_parquet.stem
     )
-    try:
-        run_integrity_parameter_gams(
-            args.sample_parquet,
-            output_directory,
-            configuration,
-            requested_responses=args.responses,
-            show_progress=not args.no_progress,
-            ecoregion_name=args.ecoregion_name,
-            create_partial_figures=not args.no_partial_response_figures,
-        )
-    except (OSError, ValueError) as error:
-        raise SystemExit(f"Could not fit ecological-response GAMs: {error}") from error
+    run_integrity_parameter_gams(
+        args.sample_parquet,
+        output_directory,
+        configuration,
+        requested_responses=args.responses,
+        show_progress=not args.no_progress,
+        ecoregion_name=args.ecoregion_name,
+        create_partial_figures=not args.no_partial_response_figures,
+    )
 
 
 if __name__ == "__main__":

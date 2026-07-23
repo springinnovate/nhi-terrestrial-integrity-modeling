@@ -23,14 +23,6 @@ DEFAULT_MAXIMUM_ROW_MISSING_FRACTION = 0.20
 DEFAULT_SPLINE_KNOT_COUNT = 6
 FIGURE_DPI = 300
 EQUAL_AREA_CRS = "EPSG:8857"
-REQUIRED_SAMPLE_COLUMNS = (
-    "longitude",
-    "latitude",
-    "sampling_block_column",
-    "sampling_block_row",
-    "reference_site",
-    "area_weight_m2",
-)
 ENVIRONMENTAL_BAND_PATTERN = re.compile(r"^y2018_d(2[0-9]|3[0-9])_")
 LANDFORM_BAND_NUMBER = 35
 PREDICTOR_DISPLAY_NAMES = {
@@ -197,20 +189,8 @@ def assign_spatial_folds(
     Returns:
         Copy of the table with validation-block and fold fields, plus one row
         per block containing assignment diagnostics.
-
-    Raises:
-        ValueError: If block sizes are incompatible or there are too few
-            reference-containing validation blocks for the requested folds.
     """
 
-    if (
-        configuration.validation_block_size_meters
-        % configuration.sampling_block_size_meters
-        != 0
-    ):
-        raise ValueError(
-            "Validation-block size must be an integer multiple of sampling-block size."
-        )
     sampling_blocks_per_validation_side = (
         configuration.validation_block_size_meters
         // configuration.sampling_block_size_meters
@@ -263,12 +243,6 @@ def assign_spatial_folds(
         ["represented_reference_area_m2", "represented_area_m2"],
         ascending=False,
     )
-    if len(reference_blocks) < configuration.fold_count:
-        raise ValueError(
-            f"At least {configuration.fold_count} validation blocks containing "
-            f"reference sites are required; found {len(reference_blocks)}."
-        )
-
     fold_reference_areas = np.zeros(configuration.fold_count, dtype=np.float64)
     fold_total_areas = np.zeros(configuration.fold_count, dtype=np.float64)
     fold_block_counts = np.zeros(configuration.fold_count, dtype=np.int64)
@@ -335,34 +309,15 @@ def prepare_reference_condition_data(
         Prepared rows, folds, coverage diagnostics, and predictor names.
 
     Raises:
-        ValueError: If the sample violates the expected table contract.
+        ValueError: If categorical landform does not meet the configured
+            predictor coverage threshold.
     """
-
-    missing_required_columns = sorted(
-        set(REQUIRED_SAMPLE_COLUMNS).difference(sample_table.columns)
-    )
-    if missing_required_columns:
-        raise ValueError(
-            "Sample is missing required columns: " + ", ".join(missing_required_columns)
-        )
-    if not sample_table["reference_site"].isin([0, 1]).all():
-        raise ValueError("reference_site must contain only zero and one.")
-    if not (sample_table["area_weight_m2"] > 0).all():
-        raise ValueError("area_weight_m2 must be positive for every sample row.")
 
     predictor_band_numbers: dict[str, int] = {}
     for column_name in sample_table.columns:
         match = ENVIRONMENTAL_BAND_PATTERN.match(column_name)
         if match:
             predictor_band_numbers[column_name] = int(match.group(1))
-    expected_band_numbers = set(range(20, 40))
-    actual_band_numbers = set(predictor_band_numbers.values())
-    if actual_band_numbers != expected_band_numbers:
-        missing_band_numbers = sorted(expected_band_numbers - actual_band_numbers)
-        raise ValueError(
-            "The sample must contain every 2018 environmental band d20-d39; "
-            f"missing bands: {missing_band_numbers}."
-        )
     ordered_predictor_names = tuple(
         sorted(predictor_band_numbers, key=predictor_band_numbers.get)
     )
