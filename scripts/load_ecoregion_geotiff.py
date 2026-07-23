@@ -28,14 +28,25 @@ from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
+if __package__:
+    from .reference_condition_utils import (
+        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
+        EQUAL_AREA_CRS,
+        infer_ecoregion_name,
+    )
+else:
+    from reference_condition_utils import (
+        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
+        EQUAL_AREA_CRS,
+        infer_ecoregion_name,
+    )
+
 
 EARTH_RADIUS_METERS = 6_371_008.8
 MEBIBYTE = 1024**2
 MAX_FOOTPRINT_DIMENSION = 600
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
-EQUAL_AREA_CRS = "EPSG:8857"
-DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000.0
 DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK = 100
 DEFAULT_RANDOM_SEED = 42
 
@@ -426,35 +437,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _band_names(descriptions: Sequence[str | None]) -> tuple[str, ...]:
-    """Build stable names from optional raster band descriptions.
-
-    Args:
-        descriptions: Band descriptions in source order.
-
-    Returns:
-        Nonempty band name for every source band.
-    """
-
-    return tuple(
-        description or f"band_{index:02d}"
-        for index, description in enumerate(descriptions, start=1)
-    )
-
-
-def _common_dtype(source_dtypes: Sequence[str]) -> np.dtype:
-    """Choose one NumPy dtype capable of holding every source band.
-
-    Args:
-        source_dtypes: Rasterio dtype names in source band order.
-
-    Returns:
-        Common NumPy dtype for the in-memory value cube.
-    """
-
-    return np.dtype(np.result_type(*(np.dtype(dtype) for dtype in source_dtypes)))
-
-
 def load_raster_pixels(
     geotiff_path: Path,
     *,
@@ -475,7 +457,6 @@ def load_raster_pixels(
 
     Raises:
         FileNotFoundError: If ``geotiff_path`` does not exist.
-        ValueError: If the raster has no bands.
         RuntimeError: If the arrays cannot be allocated in memory.
     """
 
@@ -484,11 +465,10 @@ def load_raster_pixels(
         raise FileNotFoundError(f"GeoTIFF does not exist: {path}")
 
     with rasterio.open(path) as source:
-        if source.count < 1:
-            raise ValueError(f"GeoTIFF has no raster bands: {path}")
-
         source_dtypes = tuple(source.dtypes)
-        common_dtype = _common_dtype(source_dtypes)
+        common_dtype = np.dtype(
+            np.result_type(*(np.dtype(dtype) for dtype in source_dtypes))
+        )
         shape = (source.count, source.height, source.width)
         try:
             values = np.empty(shape, dtype=common_dtype)
@@ -533,7 +513,10 @@ def load_raster_pixels(
             path=path,
             values=values,
             validity=validity,
-            band_names=_band_names(source.descriptions),
+            band_names=tuple(
+                description or f"band_{index:02d}"
+                for index, description in enumerate(source.descriptions, start=1)
+            ),
             source_dtypes=source_dtypes,
             nodata_values=tuple(source.nodatavals),
             transform=source.transform,
@@ -1050,16 +1033,7 @@ def summarize_coverage(
 
     Returns:
         Coverage measurements for the supplied mask.
-
-    Raises:
-        ValueError: If ``mask`` is not two-dimensional or row-area dimensions
-            do not match the mask.
     """
-
-    if mask.ndim != 2:
-        raise ValueError("Coverage masks must be two-dimensional.")
-    if pixel_area_by_row is not None and len(pixel_area_by_row) != mask.shape[0]:
-        raise ValueError("Pixel-area row count does not match the coverage mask.")
 
     defined_pixels = int(np.count_nonzero(mask))
     total_pixels = int(mask.size)
@@ -1127,38 +1101,6 @@ def summarize_bands(
             )
         )
     return summaries
-
-
-def infer_ecoregion_name(geotiff_path: Path) -> str:
-    """Infer a readable ecoregion name from an Earth Engine export filename.
-
-    Earth Engine exports in this project place a numeric ecoregion identifier
-    and response-variable suffix after the ecoregion name. The source name can
-    be truncated by export naming limits, so callers can override this inferred
-    label through the command line.
-
-    Args:
-        geotiff_path: GeoTIFF path whose filename should be interpreted.
-
-    Returns:
-        Human-readable ecoregion label.
-    """
-
-    name_stem = geotiff_path.stem
-    name_stem = re.sub(
-        r"_e\d+(?:_response_variables.*)?$",
-        "",
-        name_stem,
-        flags=re.IGNORECASE,
-    )
-    name_stem = re.sub(
-        r"_response_variables.*$",
-        "",
-        name_stem,
-        flags=re.IGNORECASE,
-    )
-    words = re.sub(r"[_-]+", " ", name_stem).strip()
-    return words.title() or "Ecoregion"
 
 
 def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
@@ -1240,23 +1182,6 @@ def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
         bounds=bounds,
         source_defined_pixels=source_defined_pixels,
     )
-
-
-def _callout_position(bounds: BoundingBox) -> tuple[float, float]:
-    """Choose a map-relative label position opposite the footprint.
-
-    Args:
-        bounds: Geographic ecoregion bounds.
-
-    Returns:
-        Pair of x and y positions in axes-fraction coordinates.
-    """
-
-    center_longitude = (bounds.left + bounds.right) / 2.0
-    center_latitude = (bounds.bottom + bounds.top) / 2.0
-    label_x = 0.16 if center_longitude >= 0.0 else 0.84
-    label_y = 0.20 if center_latitude >= 0.0 else 0.80
-    return label_x, label_y
 
 
 def _locator_bounds(bounds: BoundingBox, minimum_span_degrees: float) -> BoundingBox:
@@ -1459,7 +1384,10 @@ def create_ecoregion_location_figure(
                 transform=ccrs.PlateCarree(),
                 zorder=6,
             )
-            label_x, label_y = _callout_position(bounds)
+            # Put the label in the opposite map quadrant so the callout does
+            # not cover the ecoregion footprint.
+            label_x = 0.16 if center_longitude >= 0.0 else 0.84
+            label_y = 0.20 if center_latitude >= 0.0 else 0.80
             axis.annotate(
                 textwrap.fill(cleaned_name, width=28, break_long_words=False),
                 xy=(center_longitude, center_latitude),
@@ -1898,18 +1826,10 @@ def main() -> None:
     """Load, report, sample, serialize, and map one ecoregion GeoTIFF."""
 
     args = parse_args()
-    try:
-        raster = load_raster_pixels(
-            args.geotiff,
-            show_progress=not args.no_progress,
-        )
-    except (
-        FileNotFoundError,
-        ValueError,
-        RuntimeError,
-        rasterio.errors.RasterioError,
-    ) as error:
-        raise SystemExit(str(error)) from error
+    raster = load_raster_pixels(
+        args.geotiff,
+        show_progress=not args.no_progress,
+    )
     print_raster_report(raster, not args.no_band_report, not args.no_progress)
     ecoregion_name = infer_ecoregion_name(raster.path)
     ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
@@ -1942,15 +1862,12 @@ def main() -> None:
             / "figures"
             / f"{ecoregion_slug or 'ecoregion'}_world_location.png"
         )
-        try:
-            figure_summary = create_ecoregion_location_figure(
-                raster,
-                ecoregion_name,
-                figure_path,
-                not args.no_progress,
-            )
-        except (ValueError, OSError, rasterio.errors.RasterioError) as error:
-            raise SystemExit(f"Could not generate location figure: {error}") from error
+        figure_summary = create_ecoregion_location_figure(
+            raster,
+            ecoregion_name,
+            figure_path,
+            not args.no_progress,
+        )
         print_location_figure_report(figure_summary)
 
 
