@@ -17,6 +17,7 @@ import pandas as pd
 from scripts.fit_grassland_integrity_parameters import (
     IntegrityConfiguration,
     calculate_regression_metrics,
+    create_model_performance_figure,
     create_observed_expected_figure,
     predict_expected_response,
     resolve_response_names,
@@ -203,6 +204,42 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             scatter.call_args.kwargs["color"],
         )
 
+    def test_colors_model_performance_points_by_spatial_fold(self) -> None:
+        """Reuse the fold-map palette for each response's per-fold metrics."""
+
+        response_metrics = pd.DataFrame(
+            {
+                "response_band": ["d02"],
+                "display_name": ["NDVI 95th percentile"],
+                "overall_weighted_r2": [0.6],
+                "overall_weighted_spearman": [0.7],
+            }
+        )
+        fold_metrics = pd.DataFrame(
+            {
+                "response_band": ["d02"] * 5,
+                "spatial_fold": np.arange(1, 6, dtype=np.int16),
+                "weighted_r2": np.linspace(0.4, 0.8, 5),
+                "weighted_spearman": np.linspace(0.5, 0.9, 5),
+            }
+        )
+
+        with mock.patch("matplotlib.axes.Axes.scatter", autospec=True) as scatter:
+            create_model_performance_figure(
+                response_metrics,
+                fold_metrics,
+                self.configuration,
+                "Example Ecoregion",
+                self.temporary_path / "response_model_performance.png",
+            )
+
+        fold_scatter_calls = [scatter.call_args_list[0], scatter.call_args_list[2]]
+        for scatter_call in fold_scatter_calls:
+            self.assertEqual(
+                list(SPATIAL_FOLD_COLORS[:5]),
+                scatter_call.kwargs["color"],
+            )
+
     def test_runs_selected_response_models_and_writes_reports(self) -> None:
         """Persist reloadable models, held-out deviations, metrics, and figures."""
 
@@ -240,6 +277,10 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             "no_reference_variation", response_coverage.loc["d17", "status"]
         )
         self.assertEqual(7, len(summary.figure_paths))
+        self.assertIn(
+            output_directory / "figures" / "example_observed_vs_expected.png",
+            summary.figure_paths,
+        )
         self.assertTrue(
             all(
                 path.exists() and path.stat().st_size > 1_000
@@ -269,7 +310,12 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         )
         self.assertFalse(metadata["model"]["human_impact_predictors"])
         self.assertIn("Grassland ecological-response GAM validation", report.getvalue())
-        self.assertIn("Important scope limit", summary.report_path.read_text())
+        model_selection_report = summary.report_path.read_text()
+        self.assertIn("Important scope limit", model_selection_report)
+        self.assertIn(
+            "figures/example_observed_vs_expected.png",
+            model_selection_report,
+        )
 
 
 if __name__ == "__main__":

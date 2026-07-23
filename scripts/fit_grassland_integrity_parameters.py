@@ -589,6 +589,7 @@ def _response_output_columns(response_band: str) -> tuple[str, str, str]:
 def create_model_performance_figure(
     response_metrics: pd.DataFrame,
     fold_metrics: pd.DataFrame,
+    configuration: IntegrityConfiguration,
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
@@ -599,6 +600,8 @@ def create_model_performance_figure(
             fitted ecological response.
         fold_metrics (pandas.DataFrame): Per-fold held-out metrics for each
             fitted ecological response.
+        configuration (IntegrityConfiguration): Spatial-fold settings used to
+            label and color per-fold metrics.
         ecoregion_name (str): Human-readable ecoregion figure label.
         output_path (pathlib.Path): Destination path for the PNG figure.
 
@@ -622,6 +625,7 @@ def create_model_performance_figure(
         ),
     )
     figure_height = max(6.0, 0.48 * len(ordered) + 2.5)
+    fold_colors = SPATIAL_FOLD_COLORS[: configuration.fold_count]
     with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
         figure, axes = plt.subplots(
             1,
@@ -636,13 +640,20 @@ def create_model_performance_figure(
             for y_position, response_band in zip(
                 y_positions, response_bands, strict=True
             ):
-                fold_values = fold_metrics.loc[
-                    fold_metrics["response_band"].eq(response_band), fold_column
-                ].to_numpy(dtype=np.float64)
+                response_fold_metrics = fold_metrics.loc[
+                    fold_metrics["response_band"].eq(response_band)
+                ].sort_values("spatial_fold")
+                fold_values = response_fold_metrics[fold_column].to_numpy(
+                    dtype=np.float64
+                )
+                fold_point_colors = [
+                    fold_colors[int(spatial_fold) - 1]
+                    for spatial_fold in response_fold_metrics["spatial_fold"]
+                ]
                 axis.scatter(
                     fold_values,
                     np.full(len(fold_values), y_position),
-                    color="#9AA2A6",
+                    color=fold_point_colors,
                     s=25,
                     alpha=0.85,
                     zorder=2,
@@ -650,7 +661,7 @@ def create_model_performance_figure(
             axis.scatter(
                 ordered[overall_column],
                 y_positions,
-                color="#176B73",
+                color="#273238",
                 marker="D",
                 s=42,
                 label="All held-out reference rows",
@@ -663,28 +674,34 @@ def create_model_performance_figure(
             axis.spines[["top", "right", "left"]].set_visible(False)
         axes[0].set_yticks(y_positions, labels)
         axes[1].tick_params(axis="y", left=False)
-        axes[1].legend(
+        figure.legend(
             handles=[
                 plt.Line2D(
                     [0],
                     [0],
                     marker="o",
                     linestyle="none",
-                    markerfacecolor="#9AA2A6",
+                    markerfacecolor=fold_colors[index],
                     markeredgecolor="none",
-                    label="Individual spatial fold",
-                ),
+                    label=f"Fold {index + 1}",
+                )
+                for index in range(configuration.fold_count)
+            ]
+            + [
                 plt.Line2D(
                     [0],
                     [0],
                     marker="D",
                     linestyle="none",
-                    markerfacecolor="#176B73",
+                    markerfacecolor="#273238",
                     markeredgecolor="none",
                     label="All held-out reference rows",
                 ),
             ],
-            loc="lower right",
+            title="Spatial fold excluded from training",
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.93),
+            ncol=configuration.fold_count + 1,
             frameon=False,
         )
         figure.suptitle(
@@ -698,12 +715,12 @@ def create_model_performance_figure(
         figure.text(
             0.5,
             0.006,
-            "Diamonds summarize all out-of-fold reference predictions; gray dots "
-            "show how performance changes among spatial folds",
+            "Diamonds summarize all out-of-fold reference predictions; colored "
+            "dots show how performance changes among spatial folds",
             ha="center",
             color="#4B5459",
         )
-        figure.tight_layout(rect=(0.02, 0.03, 1.0, 0.94))
+        figure.tight_layout(rect=(0.02, 0.03, 1.0, 0.87))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
         plt.close(figure)
@@ -1189,6 +1206,7 @@ def write_model_selection_report(
     response_metrics: pd.DataFrame,
     retained_predictor_count: int,
     excluded_predictor_count: int,
+    observed_expected_figure_name: str,
 ) -> None:
     """Write a standalone Markdown guide to response-model diagnostics.
 
@@ -1203,6 +1221,8 @@ def write_model_selection_report(
             retained after coverage screening.
         excluded_predictor_count (int): Number of environmental predictors
             excluded for insufficient coverage.
+        observed_expected_figure_name (str): Ecoregion-specific filename for
+            the cross-validated observed-versus-expected figure.
 
     Returns:
         None: The completed Markdown report is written to ``output_path``.
@@ -1320,7 +1340,7 @@ def write_model_selection_report(
             "",
             "- `figures/spatial_folds.png`",
             "- `figures/response_model_performance.png`",
-            "- `figures/observed_vs_expected.png`",
+            f"- `figures/{observed_expected_figure_name}`",
             "- `figures/reference_deviation_distributions.png`",
             "- `figures/response_deviation_correlation.png`",
             "- `figures/partial_responses/` (unless disabled)",
@@ -1637,10 +1657,13 @@ def run_integrity_parameter_gams(
         deviation_correlation_path, index_label="response_band"
     )
 
+    ecoregion_slug = re.sub(
+        r"[^a-z0-9]+", "_", resolved_ecoregion_name.lower()
+    ).strip("_") or "ecoregion"
     base_figure_paths = (
         figure_directory / "spatial_folds.png",
         figure_directory / "response_model_performance.png",
-        figure_directory / "observed_vs_expected.png",
+        figure_directory / f"{ecoregion_slug}_observed_vs_expected.png",
         figure_directory / "reference_deviation_distributions.png",
         figure_directory / "response_deviation_correlation.png",
     )
@@ -1654,6 +1677,7 @@ def run_integrity_parameter_gams(
     create_model_performance_figure(
         response_metrics,
         fold_metrics,
+        configuration,
         resolved_ecoregion_name,
         base_figure_paths[1],
     )
@@ -1702,6 +1726,7 @@ def run_integrity_parameter_gams(
         response_metrics,
         len(prepared.retained_predictor_names),
         len(prepared.excluded_predictor_names),
+        base_figure_paths[2].name,
     )
     metadata = {
         "input_sample": str(resolved_sample_path),
