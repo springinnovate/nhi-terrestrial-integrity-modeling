@@ -860,7 +860,19 @@ def create_residual_summary_figure(
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Compare area-weighted held-out reference residual distributions."""
+    """Compare area-weighted held-out reference residual distributions.
+
+    Args:
+        scored_table (pandas.DataFrame): Sample rows containing standardized
+            out-of-fold response deviations and area weights.
+        response_metrics (pandas.DataFrame): Aggregate metrics and display
+            metadata for each fitted response.
+        ecoregion_name (str): Human-readable ecoregion figure label.
+        output_path (pathlib.Path): Destination path for the PNG figure.
+
+    Returns:
+        None: The completed figure is written to ``output_path``.
+    """
 
     ordered = response_metrics.sort_values("overall_weighted_r2")
     y_positions = np.arange(len(ordered))
