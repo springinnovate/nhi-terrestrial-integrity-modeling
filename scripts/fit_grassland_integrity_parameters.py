@@ -1206,7 +1206,7 @@ def write_model_selection_report(
     response_metrics: pd.DataFrame,
     retained_predictor_count: int,
     excluded_predictor_count: int,
-    observed_expected_figure_name: str,
+    diagnostic_figure_names: Sequence[str],
 ) -> None:
     """Write a standalone Markdown guide to response-model diagnostics.
 
@@ -1221,8 +1221,8 @@ def write_model_selection_report(
             retained after coverage screening.
         excluded_predictor_count (int): Number of environmental predictors
             excluded for insufficient coverage.
-        observed_expected_figure_name (str): Ecoregion-specific filename for
-            the cross-validated observed-versus-expected figure.
+        diagnostic_figure_names (Sequence[str]): Ecoregion-specific filenames
+            for the top-level diagnostic figures.
 
     Returns:
         None: The completed Markdown report is written to ``output_path``.
@@ -1338,11 +1338,10 @@ def write_model_selection_report(
             "",
             "## Figures",
             "",
-            "- `figures/spatial_folds.png`",
-            "- `figures/response_model_performance.png`",
-            f"- `figures/{observed_expected_figure_name}`",
-            "- `figures/reference_deviation_distributions.png`",
-            "- `figures/response_deviation_correlation.png`",
+            *[
+                f"- `figures/{figure_name}`"
+                for figure_name in diagnostic_figure_names
+            ],
             "- `figures/partial_responses/` (unless disabled)",
             "",
         ]
@@ -1661,11 +1660,13 @@ def run_integrity_parameter_gams(
         r"[^a-z0-9]+", "_", resolved_ecoregion_name.lower()
     ).strip("_") or "ecoregion"
     base_figure_paths = (
-        figure_directory / "spatial_folds.png",
-        figure_directory / "response_model_performance.png",
+        figure_directory / f"{ecoregion_slug}_spatial_folds.png",
+        figure_directory / f"{ecoregion_slug}_response_model_performance.png",
         figure_directory / f"{ecoregion_slug}_observed_vs_expected.png",
-        figure_directory / "reference_deviation_distributions.png",
-        figure_directory / "response_deviation_correlation.png",
+        figure_directory
+        / f"{ecoregion_slug}_reference_deviation_distributions.png",
+        figure_directory
+        / f"{ecoregion_slug}_response_deviation_correlation.png",
     )
     create_fold_map(
         prepared.block_summary,
@@ -1726,7 +1727,7 @@ def run_integrity_parameter_gams(
         response_metrics,
         len(prepared.retained_predictor_names),
         len(prepared.excluded_predictor_names),
-        base_figure_paths[2].name,
+        tuple(path.name for path in base_figure_paths),
     )
     metadata = {
         "input_sample": str(resolved_sample_path),

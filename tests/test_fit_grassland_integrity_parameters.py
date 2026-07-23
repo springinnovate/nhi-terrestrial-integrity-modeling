@@ -277,9 +277,16 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             "no_reference_variation", response_coverage.loc["d17", "status"]
         )
         self.assertEqual(7, len(summary.figure_paths))
-        self.assertIn(
-            output_directory / "figures" / "example_observed_vs_expected.png",
-            summary.figure_paths,
+        expected_diagnostic_figure_names = {
+            "example_spatial_folds.png",
+            "example_response_model_performance.png",
+            "example_observed_vs_expected.png",
+            "example_reference_deviation_distributions.png",
+            "example_response_deviation_correlation.png",
+        }
+        self.assertEqual(
+            expected_diagnostic_figure_names,
+            {path.name for path in summary.figure_paths[:5]},
         )
         self.assertTrue(
             all(
@@ -312,10 +319,8 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         self.assertIn("Grassland ecological-response GAM validation", report.getvalue())
         model_selection_report = summary.report_path.read_text()
         self.assertIn("Important scope limit", model_selection_report)
-        self.assertIn(
-            "figures/example_observed_vs_expected.png",
-            model_selection_report,
-        )
+        for figure_name in expected_diagnostic_figure_names:
+            self.assertIn(f"figures/{figure_name}", model_selection_report)
 
 
 if __name__ == "__main__":
