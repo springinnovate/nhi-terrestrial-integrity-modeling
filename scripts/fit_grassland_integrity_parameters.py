@@ -192,7 +192,20 @@ def resolve_response_names(
     columns: Sequence[str],
     requested_responses: Sequence[str] | None,
 ) -> tuple[str, ...]:
-    """Resolve dNN aliases or full names to ordered response columns."""
+    """Resolve dNN aliases or full names to ordered response columns.
+
+    Args:
+        columns (Sequence[str]): Column names from the ecoregion sample table.
+        requested_responses (Sequence[str] | None): Requested dNN aliases or
+            complete response column names. ``None`` selects every response.
+
+    Returns:
+        tuple[str, ...]: Unique response column names in requested order.
+
+    Raises:
+        ValueError: If any requested response is not a d02-d19 alias or known
+            response column.
+    """
 
     response_columns = _response_columns_by_band(columns)
     if not requested_responses:
