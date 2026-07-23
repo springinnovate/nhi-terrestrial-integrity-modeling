@@ -320,12 +320,22 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(3, metadata["aggregate_deviation_figure"]["display_width"])
         self.assertEqual(2, metadata["aggregate_deviation_figure"]["display_height"])
         self.assertEqual(
-            5.0,
+            10.0,
             metadata["aggregate_deviation_figure"]["color_scale_upper_value"],
         )
         self.assertEqual(
-            "linear over the fixed 0 to 5 range",
+            "linear over the fixed 0 to 10 range",
             metadata["aggregate_deviation_figure"]["color_normalization"],
+        )
+        self.assertEqual(
+            3.0,
+            metadata["aggregate_deviation_figure"]["yellow_green_anchor_value"],
+        )
+        self.assertEqual(
+            0.3,
+            metadata["aggregate_deviation_figure"][
+                "yellow_green_anchor_normalized_position"
+            ],
         )
         self.assertIn(
             "Reference-condition raster inference",

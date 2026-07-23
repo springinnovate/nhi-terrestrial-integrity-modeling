@@ -34,7 +34,9 @@ else:
 
 DEFAULT_WINDOW_SIZE_PIXELS = 256
 MAXIMUM_DISPLAY_DIMENSION = 700
-DISPLAY_COLOR_MAXIMUM = 5.0
+DISPLAY_COLOR_MAXIMUM = 10.0
+DISPLAY_YELLOW_GREEN_VALUE = 3.0
+DISPLAY_COLOR_TICKS = (0.0, 1.0, 3.0, 5.0, 7.0, 10.0)
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -381,7 +383,8 @@ def write_inference_report(
                 "Only non-reference pixels with defined standardized deviations "
                 "for every response contribute to the colored surface. Black "
                 "outlines identify display cells containing supplied reference-site "
-                "pixels. A fixed linear scale maps 0 to green and "
+                "pixels. A fixed linear scale maps 0 to green, "
+                f"{DISPLAY_YELLOW_GREEN_VALUE:g} to yellow-green, and "
                 f"{color_scale_upper_value:g} or more to red. "
                 f"{aggregate_figure['cells_at_or_above_color_maximum_percent']:.1f}% "
                 "of colored display cells are at or above "
@@ -591,7 +594,7 @@ def create_aggregate_deviation_figure(
             rotation=90,
             labelpad=12,
         )
-        color_bar.set_ticks(np.linspace(0.0, DISPLAY_COLOR_MAXIMUM, 6))
+        color_bar.set_ticks(DISPLAY_COLOR_TICKS)
         axis.set_aspect("equal", adjustable="box")
         if raster_crs is not None and raster_crs.is_geographic:
             axis.set_xlabel("Longitude")
@@ -611,9 +614,10 @@ def create_aggregate_deviation_figure(
             0.0,
             1.015,
             (
-                "Green is lower departure on a fixed linear scale; red is "
-                f"{DISPLAY_COLOR_MAXIMUM:g} or more; black outlines contain "
-                "reference sites"
+                f"Fixed linear scale: 0 is green, "
+                f"{DISPLAY_YELLOW_GREEN_VALUE:g} is yellow-green, and "
+                f"{DISPLAY_COLOR_MAXIMUM:g} or more is red; black outlines "
+                "contain reference sites"
             ),
             transform=axis.transAxes,
             ha="left",
@@ -678,6 +682,10 @@ def create_aggregate_deviation_figure(
         ),
         "color_scale_lower_value": 0.0,
         "color_scale_upper_value": DISPLAY_COLOR_MAXIMUM,
+        "yellow_green_anchor_value": DISPLAY_YELLOW_GREEN_VALUE,
+        "yellow_green_anchor_normalized_position": (
+            DISPLAY_YELLOW_GREEN_VALUE / DISPLAY_COLOR_MAXIMUM
+        ),
         "cells_at_or_above_color_maximum": cells_at_or_above_maximum,
         "cells_at_or_above_color_maximum_percent": (
             cells_at_or_above_maximum_percent
