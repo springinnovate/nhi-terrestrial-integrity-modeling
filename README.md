@@ -164,7 +164,7 @@ each source pixel with every modeled response defined, it calculates
 display cells along the longest raster dimension by taking the mean among
 non-reference pixels in each display cell. Green indicates lower total standardized
 departure and red indicates larger departure. A fixed linear scale
-maps 0 to green and values of 10 or more to red. Black outlines show display cells
+maps 0 to green and values of 5 or more to red. Black outlines show display cells
 containing pixels from the raster stack's 2018 reference-site band. Reference pixels
 do not contribute to the colored values. This aggregate is a diagnostic, not an
 integrity score, and responses with similar ecological information can be counted

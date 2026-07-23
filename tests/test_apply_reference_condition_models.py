@@ -320,11 +320,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(3, metadata["aggregate_deviation_figure"]["display_width"])
         self.assertEqual(2, metadata["aggregate_deviation_figure"]["display_height"])
         self.assertEqual(
-            10.0,
+            5.0,
             metadata["aggregate_deviation_figure"]["color_scale_upper_value"],
         )
         self.assertEqual(
-            "linear over the fixed 0 to 10 range",
+            "linear over the fixed 0 to 5 range",
             metadata["aggregate_deviation_figure"]["color_normalization"],
         )
         self.assertIn(
