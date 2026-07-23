@@ -312,7 +312,18 @@ def calculate_regression_metrics(
     expected_values: np.ndarray,
     area_weights: np.ndarray,
 ) -> dict[str, float]:
-    """Calculate area-weighted held-out regression diagnostics."""
+    """Calculate area-weighted held-out regression diagnostics.
+
+    Args:
+        observed_values (numpy.ndarray): Observed ecological response values.
+        expected_values (numpy.ndarray): Model-predicted reference values.
+        area_weights (numpy.ndarray): Represented-area weight for each pair.
+
+    Returns:
+        dict[str, float]: Weighted R2, RMSE, MAE, Spearman correlation, and
+        signed bias. Every metric is ``NaN`` when fewer than two valid pairs
+        have positive weight.
+    """
 
     observed = np.asarray(observed_values, dtype=np.float64)
     expected = np.asarray(expected_values, dtype=np.float64)
