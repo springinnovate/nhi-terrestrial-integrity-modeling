@@ -1170,7 +1170,23 @@ def write_model_selection_report(
     retained_predictor_count: int,
     excluded_predictor_count: int,
 ) -> None:
-    """Write a standalone Markdown guide to response-model diagnostics."""
+    """Write a standalone Markdown guide to response-model diagnostics.
+
+    Args:
+        output_path (pathlib.Path): Destination path for the Markdown report.
+        ecoregion_name (str): Human-readable ecoregion report label.
+        response_coverage (pandas.DataFrame): Screening status and reference
+            coverage for every ecological response.
+        response_metrics (pandas.DataFrame): Aggregate held-out metrics for
+            fitted responses.
+        retained_predictor_count (int): Number of environmental predictors
+            retained after coverage screening.
+        excluded_predictor_count (int): Number of environmental predictors
+            excluded for insufficient coverage.
+
+    Returns:
+        None: The completed Markdown report is written to ``output_path``.
+    """
 
     metrics_by_band = response_metrics.set_index("response_band")
     lines = [
