@@ -267,7 +267,18 @@ def weighted_correlation(
     second_values: np.ndarray,
     weights: np.ndarray,
 ) -> float:
-    """Calculate a represented-area weighted Pearson correlation."""
+    """Calculate a represented-area weighted Pearson correlation.
+
+    Args:
+        first_values (numpy.ndarray): First numeric variable.
+        second_values (numpy.ndarray): Second numeric variable.
+        weights (numpy.ndarray): Represented-area weight for each paired
+            observation.
+
+    Returns:
+        float: Weighted Pearson correlation, or ``NaN`` when fewer than two
+        valid pairs remain or either variable has no weighted variation.
+    """
 
     first = np.asarray(first_values, dtype=np.float64)
     second = np.asarray(second_values, dtype=np.float64)
