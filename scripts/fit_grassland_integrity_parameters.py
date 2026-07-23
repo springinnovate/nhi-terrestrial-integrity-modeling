@@ -1162,12 +1162,6 @@ def create_partial_response_figure(
     plt.close(figure)
 
 
-def _format_report_number(value: float, digits: int = 3) -> str:
-    """Format finite report values while keeping unavailable metrics explicit."""
-
-    return f"{value:.{digits}f}" if np.isfinite(value) else "NA"
-
-
 def write_model_selection_report(
     output_path: Path,
     ecoregion_name: str,
@@ -1215,13 +1209,21 @@ def write_model_selection_report(
     for row in response_coverage.itertuples(index=False):
         if row.response_band in metrics_by_band.index:
             metric = metrics_by_band.loc[row.response_band]
-            r2_value = _format_report_number(metric["overall_weighted_r2"])
-            rank_value = _format_report_number(metric["overall_weighted_spearman"])
-            rmse_value = _format_report_number(metric["overall_weighted_rmse"])
-            fold_range = (
-                f"{_format_report_number(metric['fold_weighted_r2_minimum'])} to "
-                f"{_format_report_number(metric['fold_weighted_r2_maximum'])}"
+            r2_metric = float(metric["overall_weighted_r2"])
+            rank_metric = float(metric["overall_weighted_spearman"])
+            rmse_metric = float(metric["overall_weighted_rmse"])
+            fold_minimum = float(metric["fold_weighted_r2_minimum"])
+            fold_maximum = float(metric["fold_weighted_r2_maximum"])
+            r2_value = f"{r2_metric:.3f}" if np.isfinite(r2_metric) else "NA"
+            rank_value = f"{rank_metric:.3f}" if np.isfinite(rank_metric) else "NA"
+            rmse_value = f"{rmse_metric:.3f}" if np.isfinite(rmse_metric) else "NA"
+            fold_minimum_value = (
+                f"{fold_minimum:.3f}" if np.isfinite(fold_minimum) else "NA"
             )
+            fold_maximum_value = (
+                f"{fold_maximum:.3f}" if np.isfinite(fold_maximum) else "NA"
+            )
+            fold_range = f"{fold_minimum_value} to {fold_maximum_value}"
         else:
             r2_value = rank_value = rmse_value = fold_range = "NA"
         lines.append(
