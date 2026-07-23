@@ -15,16 +15,26 @@ import joblib
 import numpy as np
 import pandas as pd
 import rasterio
+from matplotlib import colormaps, rc_context
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.patches import Patch
+from rasterio.coords import BoundingBox
+from rasterio.crs import CRS
 from rasterio.windows import Window
 from tqdm.auto import tqdm
 
 if __package__:
     from .fit_grassland_integrity_parameters import predict_expected_response
+    from .reference_condition_utils import FIGURE_DPI
 else:
     from fit_grassland_integrity_parameters import predict_expected_response
+    from reference_condition_utils import FIGURE_DPI
 
 
 DEFAULT_WINDOW_SIZE_PIXELS = 256
+MAXIMUM_DISPLAY_DIMENSION = 700
+DISPLAY_UPPER_PERCENTILE = 95.0
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -171,6 +181,7 @@ class InferenceRunSummary:
     observed_minus_expected_path: Path
     standardized_deviation_path: Path
     inference_status_path: Path
+    aggregate_deviation_figure_path: Path
     report_path: Path
     metadata_path: Path
     response_count: int
@@ -313,6 +324,7 @@ def write_inference_report(
 
     coverage = metadata["coverage"]
     configuration = metadata["configuration"]
+    aggregate_figure = metadata["aggregate_deviation_figure"]
     lines = [
         f"# Reference-condition raster inference: {metadata['ecoregion_name']}",
         "",
@@ -354,6 +366,26 @@ def write_inference_report(
             "Status raster codes: 0 is outside the target, 1 has too many missing "
             "predictors, and 2 received model predictions. Its second band records "
             "the number of missing predictors before imputation.",
+            "",
+            "## Aggregate standardized-deviation map",
+            "",
+            (
+                "The PNG maps the mean pixel-level `sum(abs(z_j))` within each "
+                "coarsened display cell, using every fitted ecological response. "
+                "Green indicates lower total standardized departure from modeled "
+                "reference condition and red indicates larger departure."
+            ),
+            "",
+            (
+                "Only non-reference pixels with defined standardized deviations "
+                "for every response contribute to the colored surface. Black "
+                "outlines identify display cells containing supplied reference-site "
+                "pixels. The color scale is capped at the "
+                f"{aggregate_figure['color_scale_upper_percentile']:.0f}"
+                "th percentile of displayed values so isolated extremes do not "
+                "flatten the map. This is a diagnostic total-departure map, not a "
+                "grassland integrity score."
+            ),
             "",
             "## Response outputs",
             "",
@@ -413,6 +445,236 @@ def write_inference_report(
         lines.append(f"- {artifact_name}: `{artifact_path}`")
     lines.append("")
     output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def create_aggregate_deviation_figure(
+    value_sums: np.ndarray,
+    value_counts: np.ndarray,
+    reference_counts: np.ndarray,
+    raster_bounds: BoundingBox,
+    raster_crs: CRS | None,
+    response_count: int,
+    ecoregion_name: str,
+    grassland_mask_supplied: bool,
+    output_path: Path,
+) -> dict[str, object]:
+    """Map coarsened total standardized departure and reference-site locations.
+
+    The source-pixel diagnostic is the sum of absolute standardized deviations
+    across all fitted ecological responses. Each visible display cell contains
+    the mean diagnostic among complete-response, non-reference source pixels.
+    Reference pixels are excluded from the colored surface and shown as black
+    outlines around display cells containing at least one reference pixel.
+
+    Args:
+        value_sums: Sum of source-pixel aggregate deviations per display cell.
+        value_counts: Contributing non-reference source pixels per display cell.
+        reference_counts: Reference-site source pixels per display cell.
+        raster_bounds: Spatial bounds of the source raster.
+        raster_crs: Source raster coordinate reference system, when defined.
+        response_count: Number of standardized response deviations in each sum.
+        ecoregion_name: Human-readable label included in the title.
+        grassland_mask_supplied: Whether inference was limited by an external
+            grassland mask.
+        output_path: Destination path for the publication-resolution PNG.
+
+    Returns:
+        JSON-ready display dimensions, counts, aggregation, and color limits.
+
+    Raises:
+        RuntimeError: If no complete-response, non-reference pixels are available
+            to display.
+    """
+
+    display_values = np.full(value_sums.shape, np.nan, dtype=np.float64)
+    np.divide(
+        value_sums,
+        value_counts,
+        out=display_values,
+        where=value_counts > 0,
+    )
+    finite_values = display_values[np.isfinite(display_values)]
+    if len(finite_values) == 0:
+        raise RuntimeError(
+            "No non-reference pixels have standardized deviations for every "
+            "response; the aggregate deviation figure cannot be created."
+        )
+
+    percentile_upper_value = float(
+        np.percentile(finite_values, DISPLAY_UPPER_PERCENTILE)
+    )
+    color_scale_upper_value = percentile_upper_value
+    if color_scale_upper_value <= 0:
+        color_scale_upper_value = max(float(finite_values.max()), 1.0)
+
+    color_map = colormaps["RdYlGn_r"].copy()
+    color_map.set_bad("#ECEFF1")
+    reference_display_mask = reference_counts > 0
+    extent = (
+        raster_bounds.left,
+        raster_bounds.right,
+        raster_bounds.bottom,
+        raster_bounds.top,
+    )
+    with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
+        figure = Figure(figsize=(10.0, 7.5), facecolor="white")
+        FigureCanvasAgg(figure)
+        axis = figure.subplots()
+        image = axis.imshow(
+            np.ma.masked_invalid(display_values),
+            cmap=color_map,
+            origin="upper",
+            extent=extent,
+            interpolation="nearest",
+            vmin=0.0,
+            vmax=color_scale_upper_value,
+        )
+        if np.any(reference_display_mask):
+            x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
+                reference_display_mask[0]
+            )
+            y_cell_size = (raster_bounds.top - raster_bounds.bottom) / len(
+                reference_display_mask
+            )
+            x_centers = np.linspace(
+                raster_bounds.left + x_cell_size / 2.0,
+                raster_bounds.right - x_cell_size / 2.0,
+                reference_display_mask.shape[1],
+            )
+            y_centers = np.linspace(
+                raster_bounds.top - y_cell_size / 2.0,
+                raster_bounds.bottom + y_cell_size / 2.0,
+                reference_display_mask.shape[0],
+            )
+            if np.all(reference_display_mask):
+                axis.plot(
+                    [
+                        raster_bounds.left,
+                        raster_bounds.right,
+                        raster_bounds.right,
+                        raster_bounds.left,
+                        raster_bounds.left,
+                    ],
+                    [
+                        raster_bounds.bottom,
+                        raster_bounds.bottom,
+                        raster_bounds.top,
+                        raster_bounds.top,
+                        raster_bounds.bottom,
+                    ],
+                    color="#111111",
+                    linewidth=1.4,
+                    zorder=3,
+                )
+            elif min(reference_display_mask.shape) > 1:
+                axis.contour(
+                    x_centers,
+                    y_centers,
+                    reference_display_mask.astype(np.uint8),
+                    levels=[0.5],
+                    colors=["#111111"],
+                    linewidths=1.3,
+                    zorder=3,
+                )
+
+        color_bar = figure.colorbar(
+            image,
+            ax=axis,
+            pad=0.025,
+            shrink=0.88,
+            extend="max",
+        )
+        color_bar.set_label(
+            "Mean pixel sum of |z| across all fitted responses",
+            rotation=90,
+            labelpad=12,
+        )
+        axis.set_aspect("equal", adjustable="box")
+        if raster_crs is not None and raster_crs.is_geographic:
+            axis.set_xlabel("Longitude")
+            axis.set_ylabel("Latitude")
+        else:
+            axis.set_xlabel("Raster x coordinate")
+            axis.set_ylabel("Raster y coordinate")
+        axis.set_title(
+            f"Total standardized departure from modeled reference condition\n"
+            f"{ecoregion_name}",
+            fontsize=15,
+            weight="bold",
+            pad=34,
+            linespacing=1.25,
+        )
+        axis.text(
+            0.0,
+            1.015,
+            (
+                "Green is lower departure; red is larger departure (capped at "
+                f"the {DISPLAY_UPPER_PERCENTILE:.0f}th percentile); black outlines "
+                "contain reference sites"
+            ),
+            transform=axis.transAxes,
+            ha="left",
+            va="bottom",
+            color="#4B5459",
+        )
+        axis.legend(
+            handles=[
+                Patch(
+                    facecolor="white",
+                    edgecolor="#111111",
+                    linewidth=1.3,
+                    label="Contains reference sites",
+                )
+            ],
+            loc="best",
+            frameon=True,
+            facecolor="white",
+            edgecolor="none",
+            framealpha=0.94,
+        )
+        warning = (
+            " No grassland mask was supplied, so the modeled surface includes "
+            "the usable ecoregion predictor footprint."
+            if not grassland_mask_supplied
+            else ""
+        )
+        figure.text(
+            0.5,
+            0.01,
+            (
+                f"Each display cell is the mean of pixel-level sum(|z_j|) across "
+                f"{response_count} responses. Reference pixels are outlined and "
+                f"excluded from the color values. Diagnostic only, not an integrity "
+                f"score.{warning}"
+            ),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            color="#4B5459",
+            wrap=True,
+        )
+        axis.spines[["top", "right"]].set_visible(False)
+        figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
+
+    return {
+        "metric": "sum(abs(z_j)) across every fitted ecological response",
+        "display_aggregation": (
+            "mean among complete-response non-reference source pixels"
+        ),
+        "display_width": int(display_values.shape[1]),
+        "display_height": int(display_values.shape[0]),
+        "colored_display_cells": int(len(finite_values)),
+        "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
+        "contributing_source_pixels": int(value_counts.sum()),
+        "reference_source_pixels": int(reference_counts.sum()),
+        "response_count": response_count,
+        "color_scale_lower_value": 0.0,
+        "color_scale_upper_percentile": DISPLAY_UPPER_PERCENTILE,
+        "color_scale_percentile_value": percentile_upper_value,
+        "color_scale_upper_value": color_scale_upper_value,
+    }
 
 
 def run_reference_condition_inference(
@@ -486,6 +748,10 @@ def run_reference_condition_inference(
     inference_status_path = (
         resolved_output_directory / f"{ecoregion_slug}_inference_status.tif"
     )
+    aggregate_deviation_figure_path = (
+        resolved_output_directory
+        / f"{ecoregion_slug}_aggregate_standardized_deviation.png"
+    )
     report_path = resolved_output_directory / f"{ecoregion_slug}_inference_report.md"
     metadata_path = (
         resolved_output_directory / f"{ecoregion_slug}_inference_metadata.json"
@@ -548,9 +814,55 @@ def run_reference_condition_inference(
             raise ValueError(
                 "Raster stack is missing model bands: " + ", ".join(missing_band_names)
             )
+        reference_band_candidates = [
+            (band_name, band_index)
+            for band_name, band_index in source_band_indices.items()
+            if band_name.lower() == "reference_sites"
+            or band_name.lower().endswith("_grassland_reference_sites")
+        ]
+        if not reference_band_candidates:
+            raise ValueError(
+                "Raster stack must contain a reference_sites or "
+                "*_grassland_reference_sites band for the aggregate diagnostic."
+            )
+        reference_band_name, reference_band_index = min(
+            reference_band_candidates,
+            key=lambda candidate: (
+                not candidate[0].lower().startswith("y2018_"),
+                candidate[1],
+            ),
+        )
         required_band_indices = [
             source_band_indices[band_name] for band_name in required_band_names
         ]
+        required_band_indices.append(reference_band_index)
+        reference_band_offset = len(required_band_names)
+
+        display_scale = min(
+            1.0,
+            MAXIMUM_DISPLAY_DIMENSION / max(source.width, source.height),
+        )
+        display_width = max(1, round(source.width * display_scale))
+        display_height = max(1, round(source.height * display_scale))
+        aggregate_value_sums = np.zeros(
+            (display_height, display_width),
+            dtype=np.float64,
+        )
+        aggregate_value_counts = np.zeros(
+            (display_height, display_width),
+            dtype=np.int64,
+        )
+        reference_pixel_counts = np.zeros(
+            (display_height, display_width),
+            dtype=np.int64,
+        )
+        source_bounds = source.bounds
+        source_crs = source.crs
+        print(f"Reference-site band: {reference_band_name}")
+        print(
+            "Aggregate map display grid: "
+            f"{display_width:,} columns x {display_height:,} rows"
+        )
 
         float_profile = source.profile.copy()
         float_profile.update(
@@ -691,6 +1003,14 @@ def run_reference_condition_inference(
                 )
             missing_fraction = missing_predictor_counts / predictor_count
             usable = target & (missing_fraction <= maximum_missing_fraction)
+            reference_pixels = (
+                window_validity[reference_band_offset]
+                & (window_values[reference_band_offset] != 0)
+            )
+            complete_response_validity = usable.copy()
+            for model_offset in range(len(response_models)):
+                response_offset = predictor_count + model_offset
+                complete_response_validity &= window_validity[response_offset]
 
             window_height = int(window.height)
             window_width = int(window.width)
@@ -760,6 +1080,47 @@ def run_reference_condition_inference(
                         standardized_values,
                     )
 
+            aggregate_validity = complete_response_validity & ~reference_pixels
+            aggregate_values = np.sum(
+                np.abs(standardized_output.astype(np.float64)),
+                axis=0,
+            )
+            source_rows = np.arange(
+                int(window.row_off),
+                int(window.row_off + window.height),
+            )
+            source_columns = np.arange(
+                int(window.col_off),
+                int(window.col_off + window.width),
+            )
+            display_rows = np.minimum(
+                source_rows * display_height // source.height,
+                display_height - 1,
+            )
+            display_columns = np.minimum(
+                source_columns * display_width // source.width,
+                display_width - 1,
+            )
+            display_cell_indices = (
+                display_rows[:, np.newaxis] * display_width
+                + display_columns[np.newaxis, :]
+            )
+            np.add.at(
+                aggregate_value_sums.ravel(),
+                display_cell_indices[aggregate_validity],
+                aggregate_values[aggregate_validity],
+            )
+            np.add.at(
+                aggregate_value_counts.ravel(),
+                display_cell_indices[aggregate_validity],
+                1,
+            )
+            np.add.at(
+                reference_pixel_counts.ravel(),
+                display_cell_indices[reference_pixels],
+                1,
+            )
+
             expected_destination.write(expected_output, window=window)
             deviation_destination.write(deviation_output, window=window)
             standardized_destination.write(standardized_output, window=window)
@@ -768,6 +1129,17 @@ def run_reference_condition_inference(
                 window=window,
             )
 
+    aggregate_figure_metadata = create_aggregate_deviation_figure(
+        aggregate_value_sums,
+        aggregate_value_counts,
+        reference_pixel_counts,
+        source_bounds,
+        source_crs,
+        len(response_models),
+        ecoregion_name,
+        resolved_mask_path is not None,
+        aggregate_deviation_figure_path,
+    )
     elapsed_seconds = time.perf_counter() - started
     response_summaries = []
     for output_band_index, model in enumerate(response_models, start=1):
@@ -787,6 +1159,9 @@ def run_reference_condition_inference(
         "observed_minus_expected": str(observed_minus_expected_path),
         "standardized_deviation": str(standardized_deviation_path),
         "inference_status": str(inference_status_path),
+        "aggregate_standardized_deviation_figure": str(
+            aggregate_deviation_figure_path
+        ),
         "report": str(report_path),
         "metadata": str(metadata_path),
     }
@@ -828,6 +1203,7 @@ def run_reference_condition_inference(
             "255": "nodata for imputed-predictor-count band",
         },
         "responses": response_summaries,
+        "aggregate_deviation_figure": aggregate_figure_metadata,
         "artifacts": artifacts,
         "elapsed_seconds": elapsed_seconds,
     }
@@ -860,6 +1236,7 @@ def run_reference_condition_inference(
     print()
     print(f"Inference report: {report_path}")
     print(f"Metadata: {metadata_path}")
+    print(f"Aggregate deviation figure: {aggregate_deviation_figure_path}")
     print(f"Completed in {elapsed_seconds:.1f} seconds")
 
     return InferenceRunSummary(
@@ -868,6 +1245,7 @@ def run_reference_condition_inference(
         observed_minus_expected_path=observed_minus_expected_path,
         standardized_deviation_path=standardized_deviation_path,
         inference_status_path=inference_status_path,
+        aggregate_deviation_figure_path=aggregate_deviation_figure_path,
         report_path=report_path,
         metadata_path=metadata_path,
         response_count=len(response_models),

@@ -148,6 +148,7 @@ Outputs under `outputs/reference_condition_inference/<ecoregion>` include:
 - `<ecoregion>_observed_minus_expected.tif`
 - `<ecoregion>_standardized_deviation.tif`
 - `<ecoregion>_inference_status.tif`
+- `<ecoregion>_aggregate_standardized_deviation.png`
 - `<ecoregion>_inference_report.md`
 - `<ecoregion>_inference_metadata.json`
 
@@ -156,6 +157,17 @@ GeoTIFF contains an inference-status band and a missing-predictor-count band. St
 is outside the inference target, status 1 exceeds the training missingness threshold,
 and status 2 received model predictions. Pixels within the threshold use the final
 reference-training imputation values stored in each model.
+
+The aggregate PNG makes the raster result visible at publication resolution. For
+each source pixel with every modeled response defined, it calculates
+`sum(abs(z_j))` across all responses. It then enlarges the result to at most 700
+display cells along the longest raster dimension by taking the mean among
+non-reference pixels in each display cell. Green indicates lower total standardized
+departure and red indicates larger departure; the red endpoint is capped at the 95th
+percentile of displayed values. Black outlines show display cells containing pixels
+from the raster stack's 2018 reference-site band. Reference pixels do not contribute
+to the colored values. This aggregate is a diagnostic, not an integrity score, and
+responses with similar ecological information can be counted more than once.
 
 Supply an exactly aligned mask whose defined nonzero first-band pixels identify the
 target when a current-grassland layer is available:

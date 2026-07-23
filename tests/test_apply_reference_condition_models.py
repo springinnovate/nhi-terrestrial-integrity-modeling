@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import joblib
 import numpy as np
@@ -163,10 +164,15 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 expected_d11 - 2.0,
             ]
         ).astype(np.float32)
-        source_values = np.concatenate([response_values, predictor_values])
+        reference_values = np.zeros((1, height, width), dtype=np.float32)
+        reference_values[0, 1, 1] = 1.0
+        reference_values[0, 2, 2] = 1.0
+        source_values = np.concatenate(
+            [response_values, predictor_values, reference_values]
+        )
         source_values[0, 0, 2] = FLOAT_NODATA
         source_values[3, 0, 1] = FLOAT_NODATA
-        source_values[3:, 0, 0] = FLOAT_NODATA
+        source_values[3:7, 0, 0] = FLOAT_NODATA
         source_values[2, 0, 0] = predictor_values[0, 0, 0]
 
         profile = {
@@ -185,7 +191,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         with rasterio.open(self.raster_path, "w", **profile) as destination:
             destination.write(source_values)
             for band_index, band_name in enumerate(
-                (*self.response_names, *self.predictor_names),
+                (
+                    *self.response_names,
+                    *self.predictor_names,
+                    "y2018_d01_grassland_reference_sites",
+                ),
                 start=1,
             ):
                 destination.set_band_description(band_index, band_name)
@@ -196,7 +206,14 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         output_directory = self.temporary_path / "unmasked_output"
         standard_output = io.StringIO()
-        with contextlib.redirect_stdout(standard_output):
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "MAXIMUM_DISPLAY_DIMENSION",
+                3,
+            ),
+            contextlib.redirect_stdout(standard_output),
+        ):
             summary = run_reference_condition_inference(
                 self.raster_path,
                 self.model_run_directory,
@@ -227,6 +244,14 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "synthetic_prairie_inference_status.tif",
             summary.inference_status_path.name,
         )
+        self.assertEqual(
+            "synthetic_prairie_aggregate_standardized_deviation.png",
+            summary.aggregate_deviation_figure_path.name,
+        )
+        self.assertGreater(
+            summary.aggregate_deviation_figure_path.stat().st_size,
+            1_000,
+        )
         with rasterio.open(summary.expected_reference_path) as expected_source:
             expected = expected_source.read(masked=True)
             self.assertEqual(self.transform, expected_source.transform)
@@ -246,7 +271,13 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         row = 2
         column = 3
         predictor_table = pd.DataFrame(
-            [self.source_values[2:, row, column]],
+            [
+                self.source_values[
+                    2 : 2 + len(self.predictor_names),
+                    row,
+                    column,
+                ]
+            ],
             columns=self.predictor_names,
         )
         expected_d02 = predict_expected_response(
@@ -270,8 +301,23 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
         self.assertIn("No grassland mask was supplied", report)
         self.assertIn("Synthetic Prairie", report)
+        self.assertIn("mean pixel-level `sum(abs(z_j))`", report)
         self.assertIsNone(metadata["grassland_mask"])
         self.assertEqual(18, metadata["responses"][0]["statistics"]["deviation_pixels"])
+        self.assertEqual(
+            16,
+            metadata["aggregate_deviation_figure"]["contributing_source_pixels"],
+        )
+        self.assertEqual(
+            2,
+            metadata["aggregate_deviation_figure"]["reference_source_pixels"],
+        )
+        self.assertEqual(
+            2,
+            metadata["aggregate_deviation_figure"]["response_count"],
+        )
+        self.assertEqual(3, metadata["aggregate_deviation_figure"]["display_width"])
+        self.assertEqual(2, metadata["aggregate_deviation_figure"]["display_height"])
         self.assertIn(
             "Reference-condition raster inference",
             standard_output.getvalue(),
