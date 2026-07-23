@@ -1319,7 +1319,35 @@ def run_integrity_parameter_gams(
     ecoregion_name: str | None = None,
     create_partial_figures: bool = True,
 ) -> IntegrityRunSummary:
-    """Fit, spatially validate, report, and serialize response GAMs."""
+    """Fit, spatially validate, report, and serialize response GAMs.
+
+    Args:
+        sample_path (pathlib.Path): Spatial sample Parquet produced by the
+            ecoregion GeoTIFF loader.
+        output_directory (pathlib.Path): Directory for predictions, metrics,
+            models, reports, and figures.
+        configuration (IntegrityConfiguration): Predictor screening, spatial
+            validation, response screening, spline, and ridge settings.
+        requested_responses (Sequence[str] | None): Optional dNN aliases or
+            complete response column names. ``None`` fits every response that
+            passes screening.
+        show_progress (bool): Whether to display tqdm fitting and figure
+            progress bars.
+        ecoregion_name (str | None): Optional report and figure label. ``None``
+            infers the label from ``sample_path``.
+        create_partial_figures (bool): Whether to draw one partial-response
+            figure for each fitted response.
+
+    Returns:
+        IntegrityRunSummary: Artifact paths, row and response counts, and total
+        elapsed time for the completed run.
+
+    Raises:
+        ValueError: If configuration or sample data violate the model contract,
+            or none of the selected responses can be fit.
+        RuntimeError: If a usable row fails to receive an out-of-fold expected
+            response.
+    """
 
     if not 0 <= configuration.minimum_response_coverage <= 1:
         raise ValueError("minimum_response_coverage must be between zero and one.")
