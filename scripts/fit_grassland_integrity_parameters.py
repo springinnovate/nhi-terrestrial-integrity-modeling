@@ -1058,7 +1058,19 @@ def create_partial_response_figure(
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Plot one-predictor-at-a-time expected-condition model responses."""
+    """Plot one-predictor-at-a-time expected-condition model responses.
+
+    Args:
+        fitted_model (dict[str, object]): Model bundle returned by
+            ``fit_response_gam``.
+        reference_training_table (pandas.DataFrame): Reference rows used to
+            establish predictor ranges and represented-area quantiles.
+        ecoregion_name (str): Human-readable ecoregion figure label.
+        output_path (pathlib.Path): Destination path for the PNG figure.
+
+    Returns:
+        None: The completed figure is written to ``output_path``.
+    """
 
     continuous_names = tuple(fitted_model["continuous_predictor_names"])
     categorical_name = str(fitted_model["categorical_predictor_name"])
