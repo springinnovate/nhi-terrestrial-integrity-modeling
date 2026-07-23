@@ -487,7 +487,27 @@ def fit_response_gam(
     imputation_values: dict[str, float],
     configuration: IntegrityConfiguration,
 ) -> dict[str, object]:
-    """Fit one regularized additive reference-condition regression."""
+    """Fit one regularized additive reference-condition regression.
+
+    Args:
+        training_table (pandas.DataFrame): Reference rows used to fit the
+            response model, including predictors, response, and area weights.
+        response_name (str): Full 2018 ecological-response column name.
+        continuous_predictor_names (tuple[str, ...]): Environmental predictors
+            represented by independent cubic spline terms.
+        categorical_predictor_name (str): Landform predictor represented by
+            one-hot categorical terms.
+        imputation_values (dict[str, float]): Training-derived replacement value
+            for each predictor.
+        configuration (IntegrityConfiguration): Spline and ridge settings.
+
+    Returns:
+        dict[str, object]: Portable model bundle containing response metadata,
+        predictor names, imputation values, fitted preprocessor, and regressor.
+
+    Raises:
+        ValueError: If ``response_name`` is not a 2018 d02-d19 response column.
+    """
 
     predictor_names = (*continuous_predictor_names, categorical_predictor_name)
     imputed_predictors = training_table.loc[:, predictor_names].fillna(
