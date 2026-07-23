@@ -615,7 +615,19 @@ def create_model_performance_figure(
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Compare held-out fit and rank stability for candidate responses."""
+    """Compare held-out fit and rank stability for candidate responses.
+
+    Args:
+        response_metrics (pandas.DataFrame): Aggregate held-out metrics for each
+            fitted ecological response.
+        fold_metrics (pandas.DataFrame): Per-fold held-out metrics for each
+            fitted ecological response.
+        ecoregion_name (str): Human-readable ecoregion figure label.
+        output_path (pathlib.Path): Destination path for the PNG figure.
+
+    Returns:
+        None: The completed figure is written to ``output_path``.
+    """
 
     ordered = response_metrics.sort_values("overall_weighted_r2")
     response_bands = ordered["response_band"].tolist()
