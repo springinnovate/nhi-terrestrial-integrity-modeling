@@ -234,7 +234,16 @@ def weighted_standard_deviation(
     values: np.ndarray,
     weights: np.ndarray,
 ) -> float:
-    """Calculate a represented-area weighted population standard deviation."""
+    """Calculate a represented-area weighted population standard deviation.
+
+    Args:
+        values (numpy.ndarray): Numeric response observations.
+        weights (numpy.ndarray): Represented-area weight for each observation.
+
+    Returns:
+        float: Weighted population standard deviation, or ``NaN`` when no
+        finite observation has positive weight.
+    """
 
     numeric_values = np.asarray(values, dtype=np.float64)
     numeric_weights = np.asarray(weights, dtype=np.float64)
