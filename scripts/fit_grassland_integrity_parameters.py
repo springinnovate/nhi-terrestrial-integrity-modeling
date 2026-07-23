@@ -738,7 +738,19 @@ def create_observed_expected_figure(
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Plot observed against out-of-fold expected reference responses."""
+    """Plot observed against out-of-fold expected reference responses.
+
+    Args:
+        scored_table (pandas.DataFrame): Sample rows containing observed and
+            out-of-fold expected responses.
+        response_metrics (pandas.DataFrame): Aggregate metrics and display
+            metadata for each fitted response.
+        ecoregion_name (str): Human-readable ecoregion figure label.
+        output_path (pathlib.Path): Destination path for the PNG figure.
+
+    Returns:
+        None: The completed figure is written to ``output_path``.
+    """
 
     column_count = 4
     row_count = math.ceil(len(response_metrics) / column_count)
