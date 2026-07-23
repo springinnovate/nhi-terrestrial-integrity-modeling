@@ -163,12 +163,12 @@ each source pixel with every modeled response defined, it calculates
 `sum(abs(z_j))` across all responses. It then enlarges the result to at most 700
 display cells along the longest raster dimension by taking the mean among
 non-reference pixels in each display cell. Green indicates lower total standardized
-departure and red indicates larger departure. A fixed zero-safe logarithmic scale
-maps 0 to green, places 1 near green-yellow, and maps values of 50 or more to red.
-Black outlines show display cells containing pixels from the raster stack's 2018
-reference-site band. Reference pixels do not contribute to the colored values. This
-aggregate is a diagnostic, not an integrity score, and responses with similar
-ecological information can be counted more than once.
+departure and red indicates larger departure. A fixed linear scale
+maps 0 to green and values of 10 or more to red. Black outlines show display cells
+containing pixels from the raster stack's 2018 reference-site band. Reference pixels
+do not contribute to the colored values. This aggregate is a diagnostic, not an
+integrity score, and responses with similar ecological information can be counted
+more than once.
 
 Supply an exactly aligned mask whose defined nonzero first-band pixels identify the
 target when a current-grassland layer is available:

@@ -17,7 +17,6 @@ import pandas as pd
 import rasterio
 from matplotlib import colormaps, rc_context
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.colors import FuncNorm
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from rasterio.coords import BoundingBox
@@ -35,8 +34,7 @@ else:
 
 DEFAULT_WINDOW_SIZE_PIXELS = 256
 MAXIMUM_DISPLAY_DIMENSION = 700
-DISPLAY_COLOR_MAXIMUM = 50.0
-DISPLAY_LOG_OFFSET = 0.1
+DISPLAY_COLOR_MAXIMUM = 10.0
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -383,8 +381,7 @@ def write_inference_report(
                 "Only non-reference pixels with defined standardized deviations "
                 "for every response contribute to the colored surface. Black "
                 "outlines identify display cells containing supplied reference-site "
-                "pixels. A zero-safe logarithmic scale maps 0 to green, places 1 "
-                "near green-yellow, and maps "
+                "pixels. A fixed linear scale maps 0 to green and "
                 f"{color_scale_upper_value:g} or more to red. "
                 f"{aggregate_figure['cells_at_or_above_color_maximum_percent']:.1f}% "
                 "of colored display cells are at or above "
@@ -512,22 +509,6 @@ def create_aggregate_deviation_figure(
         100.0 * cells_at_or_above_maximum / len(finite_values)
     )
 
-    # The 0.1 offset makes the logarithm valid at zero and places a value of 1
-    # roughly 39% through the palette, in its green-yellow region.
-    color_norm = FuncNorm(
-        (
-            lambda values: np.log1p(values / DISPLAY_LOG_OFFSET),
-            lambda values: DISPLAY_LOG_OFFSET * np.expm1(values),
-        ),
-        vmin=0.0,
-        vmax=DISPLAY_COLOR_MAXIMUM,
-        clip=True,
-    )
-    unit_value_color_position = float(
-        np.log1p(1.0 / DISPLAY_LOG_OFFSET)
-        / np.log1p(DISPLAY_COLOR_MAXIMUM / DISPLAY_LOG_OFFSET)
-    )
-
     color_map = colormaps["RdYlGn_r"].copy()
     color_map.set_bad("#ECEFF1")
     reference_display_mask = reference_counts > 0
@@ -547,7 +528,8 @@ def create_aggregate_deviation_figure(
             origin="upper",
             extent=extent,
             interpolation="nearest",
-            norm=color_norm,
+            vmin=0.0,
+            vmax=DISPLAY_COLOR_MAXIMUM,
         )
         if np.any(reference_display_mask):
             x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
@@ -609,7 +591,7 @@ def create_aggregate_deviation_figure(
             rotation=90,
             labelpad=12,
         )
-        color_bar.set_ticks([0.0, 1.0, 5.0, 10.0, 25.0, 50.0])
+        color_bar.set_ticks(np.linspace(0.0, DISPLAY_COLOR_MAXIMUM, 6))
         axis.set_aspect("equal", adjustable="box")
         if raster_crs is not None and raster_crs.is_geographic:
             axis.set_xlabel("Longitude")
@@ -629,7 +611,7 @@ def create_aggregate_deviation_figure(
             0.0,
             1.015,
             (
-                "Green is lower departure on a zero-safe log scale; red is "
+                "Green is lower departure on a fixed linear scale; red is "
                 f"{DISPLAY_COLOR_MAXIMUM:g} or more; black outlines contain "
                 "reference sites"
             ),
@@ -692,13 +674,10 @@ def create_aggregate_deviation_figure(
         "reference_source_pixels": int(reference_counts.sum()),
         "response_count": response_count,
         "color_normalization": (
-            f"log1p(value / {DISPLAY_LOG_OFFSET:g}), normalized over the fixed "
-            f"0 to {DISPLAY_COLOR_MAXIMUM:g} range"
+            f"linear over the fixed 0 to {DISPLAY_COLOR_MAXIMUM:g} range"
         ),
         "color_scale_lower_value": 0.0,
         "color_scale_upper_value": DISPLAY_COLOR_MAXIMUM,
-        "color_scale_log_offset": DISPLAY_LOG_OFFSET,
-        "unit_value_color_position": unit_value_color_position,
         "cells_at_or_above_color_maximum": cells_at_or_above_maximum,
         "cells_at_or_above_color_maximum_percent": (
             cells_at_or_above_maximum_percent
