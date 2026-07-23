@@ -569,7 +569,17 @@ def predict_expected_response(
     fitted_model: dict[str, object],
     predictor_table: pd.DataFrame,
 ) -> np.ndarray:
-    """Predict expected reference condition with a serialized model bundle."""
+    """Predict expected reference condition with a serialized model bundle.
+
+    Args:
+        fitted_model (dict[str, object]): Model bundle returned by
+            ``fit_response_gam`` or loaded from its Joblib artifact.
+        predictor_table (pandas.DataFrame): Rows containing every predictor
+            named by the fitted model.
+
+    Returns:
+        numpy.ndarray: Expected reference-condition response for each input row.
+    """
 
     continuous_names = tuple(fitted_model["continuous_predictor_names"])
     categorical_name = str(fitted_model["categorical_predictor_name"])
