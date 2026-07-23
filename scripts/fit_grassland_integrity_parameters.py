@@ -592,7 +592,15 @@ def predict_expected_response(
 
 
 def _response_output_columns(response_band: str) -> tuple[str, str, str]:
-    """Return stable expected-condition output names for one response band."""
+    """Return stable expected-condition output names for one response band.
+
+    Args:
+        response_band (str): Short response identifier such as ``d02``.
+
+    Returns:
+        tuple[str, str, str]: Expected-reference, observed-minus-expected, and
+        standardized-deviation output column names, in that order.
+    """
 
     return (
         f"{response_band}_expected_reference_oof",
