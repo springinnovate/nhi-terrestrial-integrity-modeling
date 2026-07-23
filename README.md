@@ -116,7 +116,8 @@ productivity need explicit ecological direction and weighting before combination
 sampled zero class is background rather than a verified current-grassland mask, so use
 a defensible current-grassland layer before interpreting deviations as present-day
 grassland condition. Use `--no-partial-response-figures` for a faster screening run and
-`--help` for all coverage, fold, spline, and regularization settings.
+`--help` for response selection, output, labeling, and progress controls. Model-tuning
+defaults live in `IntegrityConfiguration` rather than being repeated as CLI options.
 
 Shared reference-condition preparation lives in
 `scripts/reference_condition_utils.py`. It is an imported library module rather than a
