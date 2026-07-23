@@ -25,6 +25,7 @@ if __package__:
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
+        SPATIAL_FOLD_COLORS,
         ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
@@ -37,6 +38,7 @@ else:
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
+        SPATIAL_FOLD_COLORS,
         ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
@@ -710,6 +712,7 @@ def create_model_performance_figure(
 def create_observed_expected_figure(
     scored_table: pd.DataFrame,
     response_metrics: pd.DataFrame,
+    configuration: IntegrityConfiguration,
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
@@ -720,6 +723,8 @@ def create_observed_expected_figure(
             out-of-fold expected responses.
         response_metrics (pandas.DataFrame): Aggregate metrics and display
             metadata for each fitted response.
+        configuration (IntegrityConfiguration): Spatial-fold settings used to
+            label and color the cross-validation predictions.
         ecoregion_name (str): Human-readable ecoregion figure label.
         output_path (pathlib.Path): Destination path for the PNG figure.
 
@@ -737,6 +742,7 @@ def create_observed_expected_figure(
         squeeze=False,
     )
     random_generator = np.random.default_rng(42)
+    fold_colors = SPATIAL_FOLD_COLORS[: configuration.fold_count]
     for axis, metric_row in zip(
         axes.flat, response_metrics.itertuples(index=False), strict=False
     ):
@@ -748,7 +754,13 @@ def create_observed_expected_figure(
             & np.isfinite(scored_table[expected_column])
         )
         plot_table = scored_table.loc[
-            valid, [metric_row.response, expected_column, "area_weight_m2"]
+            valid,
+            [
+                metric_row.response,
+                expected_column,
+                "area_weight_m2",
+                "spatial_fold",
+            ],
         ]
         if len(plot_table) > 2_500:
             probabilities = plot_table["area_weight_m2"].to_numpy(dtype=np.float64)
@@ -762,6 +774,10 @@ def create_observed_expected_figure(
             plot_table = plot_table.iloc[selected_offsets]
         observed = plot_table[metric_row.response].to_numpy(dtype=np.float64)
         expected = plot_table[expected_column].to_numpy(dtype=np.float64)
+        point_colors = [
+            fold_colors[int(spatial_fold) - 1]
+            for spatial_fold in plot_table["spatial_fold"]
+        ]
         combined = np.concatenate([observed, expected])
         lower_limit, upper_limit = np.quantile(combined, [0.01, 0.99])
         if math.isclose(lower_limit, upper_limit):
@@ -771,8 +787,8 @@ def create_observed_expected_figure(
             observed,
             expected,
             s=8,
-            color="#276678",
-            alpha=0.24,
+            color=point_colors,
+            alpha=0.55,
             linewidths=0,
             rasterized=True,
         )
@@ -808,7 +824,8 @@ def create_observed_expected_figure(
     for axis in axes.flat[len(response_metrics) :]:
         axis.set_visible(False)
     figure.suptitle(
-        f"Held-out reference observations versus expected condition\n{ecoregion_name}",
+        f"Cross-validated predictions for reference observations\n"
+        f"{ecoregion_name}",
         fontsize=17,
         weight="bold",
         y=0.995,
@@ -818,12 +835,40 @@ def create_observed_expected_figure(
     figure.text(
         0.006,
         0.5,
-        "Expected reference response",
+        "Cross-validated expected reference response",
         va="center",
         rotation=90,
         fontsize=11,
     )
-    figure.tight_layout(rect=(0.025, 0.025, 1.0, 0.94))
+    figure.legend(
+        handles=[
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor=fold_colors[index],
+                markeredgecolor="none",
+                markersize=6,
+                label=f"Fold {index + 1}",
+            )
+            for index in range(configuration.fold_count)
+        ],
+        title="Spatial fold excluded from training",
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.93),
+        ncol=configuration.fold_count,
+        frameon=False,
+    )
+    figure.text(
+        0.5,
+        0.025,
+        "Each point is predicted by a model trained without that observation's "
+        "spatial fold.",
+        ha="center",
+        color="#4B5459",
+    )
+    figure.tight_layout(rect=(0.025, 0.055, 1.0, 0.90))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
     plt.close(figure)
@@ -1615,6 +1660,7 @@ def run_integrity_parameter_gams(
     create_observed_expected_figure(
         scored_table,
         response_metrics,
+        configuration,
         resolved_ecoregion_name,
         base_figure_paths[2],
     )

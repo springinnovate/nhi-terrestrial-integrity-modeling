@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import joblib
 import numpy as np
@@ -16,12 +17,16 @@ import pandas as pd
 from scripts.fit_grassland_integrity_parameters import (
     IntegrityConfiguration,
     calculate_regression_metrics,
+    create_observed_expected_figure,
     predict_expected_response,
     resolve_response_names,
     run_integrity_parameter_gams,
     summarize_response_coverage,
 )
-from scripts.reference_condition_utils import prepare_reference_condition_data
+from scripts.reference_condition_utils import (
+    SPATIAL_FOLD_COLORS,
+    prepare_reference_condition_data,
+)
 
 
 class FitGrasslandIntegrityParametersTest(unittest.TestCase):
@@ -161,6 +166,42 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         self.assertEqual("no_reference_values", coverage.loc["d07", "status"])
         self.assertEqual("no_reference_variation", coverage.loc["d17", "status"])
         self.assertEqual("fit", coverage.loc["d02", "status"])
+
+    def test_colors_observed_expected_points_by_spatial_fold(self) -> None:
+        """Reuse the fold-map palette for cross-validation prediction points."""
+
+        scored_table = pd.DataFrame(
+            {
+                "reference_site": np.ones(5, dtype=np.int8),
+                "spatial_fold": np.arange(1, 6, dtype=np.int16),
+                "area_weight_m2": np.ones(5),
+                "y2018_d02_response": np.arange(5, dtype=np.float64),
+                "d02_expected_reference_oof": np.arange(5, dtype=np.float64),
+            }
+        )
+        response_metrics = pd.DataFrame(
+            {
+                "response": ["y2018_d02_response"],
+                "response_band": ["d02"],
+                "display_name": ["NDVI 95th percentile"],
+                "overall_weighted_r2": [1.0],
+                "overall_weighted_spearman": [1.0],
+            }
+        )
+
+        with mock.patch("matplotlib.axes.Axes.scatter", autospec=True) as scatter:
+            create_observed_expected_figure(
+                scored_table,
+                response_metrics,
+                self.configuration,
+                "Example Ecoregion",
+                self.temporary_path / "observed_vs_expected.png",
+            )
+
+        self.assertEqual(
+            list(SPATIAL_FOLD_COLORS[:5]),
+            scatter.call_args.kwargs["color"],
+        )
 
     def test_runs_selected_response_models_and_writes_reports(self) -> None:
         """Persist reloadable models, held-out deviations, metrics, and figures."""

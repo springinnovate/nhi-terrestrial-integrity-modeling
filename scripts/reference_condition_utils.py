@@ -23,6 +23,7 @@ DEFAULT_MAXIMUM_ROW_MISSING_FRACTION = 0.20
 DEFAULT_SPLINE_KNOT_COUNT = 6
 FIGURE_DPI = 300
 EQUAL_AREA_CRS = "EPSG:8857"
+SPATIAL_FOLD_COLORS = tuple(plt.get_cmap("Set2").colors)
 ENVIRONMENTAL_BAND_PATTERN = re.compile(r"^y2018_d(2[0-9]|3[0-9])_")
 LANDFORM_BAND_NUMBER = 35
 PREDICTOR_DISPLAY_NAMES = {
@@ -474,7 +475,7 @@ def create_fold_map(
         output_path: PNG path for the completed figure.
     """
 
-    fold_colors = plt.get_cmap("Set2").colors[: configuration.fold_count]
+    fold_colors = SPATIAL_FOLD_COLORS[: configuration.fold_count]
     rectangles = []
     face_colors = []
     reference_rectangles = []
