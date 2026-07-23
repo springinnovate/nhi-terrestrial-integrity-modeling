@@ -21,7 +21,7 @@ from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
 if __package__:
-    from .fit_ecoregion_gam import (
+    from .reference_condition_utils import (
         DEFAULT_FOLD_COUNT,
         DEFAULT_MAXIMUM_ROW_MISSING_FRACTION,
         DEFAULT_MINIMUM_PREDICTOR_COVERAGE,
@@ -31,14 +31,15 @@ if __package__:
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
+        ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
-        infer_sample_ecoregion_name,
-        prepare_gam_data,
+        infer_ecoregion_name,
+        prepare_reference_condition_data,
         weighted_quantiles,
     )
 else:
-    from fit_ecoregion_gam import (
+    from reference_condition_utils import (
         DEFAULT_FOLD_COUNT,
         DEFAULT_MAXIMUM_ROW_MISSING_FRACTION,
         DEFAULT_MINIMUM_PREDICTOR_COVERAGE,
@@ -48,10 +49,11 @@ else:
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
+        ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
-        infer_sample_ecoregion_name,
-        prepare_gam_data,
+        infer_ecoregion_name,
+        prepare_reference_condition_data,
         weighted_quantiles,
     )
 
@@ -89,16 +91,16 @@ REGRESSION_METRIC_NAMES = (
 
 
 @dataclass(frozen=True)
-class IntegrityConfiguration:
-    """Settings for response screening, spatial validation, and GAM fitting."""
+class IntegrityConfiguration(ReferenceConditionConfiguration):
+    """Settings for ecological-response screening and GAM fitting.
 
-    fold_count: int = DEFAULT_FOLD_COUNT
-    sampling_block_size_meters: int = DEFAULT_SAMPLING_BLOCK_SIZE_METERS
-    validation_block_size_meters: int = DEFAULT_VALIDATION_BLOCK_SIZE_METERS
-    minimum_predictor_coverage: float = DEFAULT_MINIMUM_PREDICTOR_COVERAGE
-    maximum_row_missing_fraction: float = DEFAULT_MAXIMUM_ROW_MISSING_FRACTION
+    Attributes:
+        minimum_response_coverage: Minimum represented reference-site area
+            coverage needed to fit an ecological response.
+        ridge_alpha: L2 regularization strength used by each response model.
+    """
+
     minimum_response_coverage: float = DEFAULT_MINIMUM_RESPONSE_COVERAGE
-    spline_knot_count: int = DEFAULT_SPLINE_KNOT_COUNT
     ridge_alpha: float = DEFAULT_RIDGE_ALPHA
 
 
@@ -136,8 +138,7 @@ def parse_args() -> argparse.Namespace:
         "--output-directory",
         type=Path,
         help=(
-            "Output directory. Defaults to "
-            "outputs/integrity_parameters/<sample stem>."
+            "Output directory. Defaults to outputs/integrity_parameters/<sample stem>."
         ),
     )
     parser.add_argument(
@@ -376,9 +377,7 @@ def calculate_regression_metrics(
     residuals = observed - expected
     weighted_mean = float(np.average(observed, weights=weights))
     mean_squared_error = float(np.average(residuals**2, weights=weights))
-    total_variation = float(
-        np.sum(weights * (observed - weighted_mean) ** 2)
-    )
+    total_variation = float(np.sum(weights * (observed - weighted_mean) ** 2))
     residual_variation = float(np.sum(weights * residuals**2))
     weighted_r2 = (
         1.0 - residual_variation / total_variation
@@ -465,9 +464,10 @@ def summarize_response_coverage(
             status = "insufficient_reference_coverage"
         elif unique_values < 2 or not np.isfinite(response_sd) or response_sd <= 0:
             status = "no_reference_variation"
-        elif min(fold_training_rows) < minimum_training_rows or min(
-            fold_validation_rows
-        ) < 2:
+        elif (
+            min(fold_training_rows) < minimum_training_rows
+            or min(fold_validation_rows) < 2
+        ):
             status = "insufficient_spatial_fold_support"
         else:
             status = "fit"
@@ -827,9 +827,7 @@ def create_residual_summary_figure(
                 scored_table[standardized_column]
             )
             quantiles = weighted_quantiles(
-                scored_table.loc[valid, standardized_column].to_numpy(
-                    dtype=np.float64
-                ),
+                scored_table.loc[valid, standardized_column].to_numpy(dtype=np.float64),
                 scored_table.loc[valid, "area_weight_m2"].to_numpy(dtype=np.float64),
                 [0.05, 0.25, 0.50, 0.75, 0.95],
             )
@@ -856,9 +854,7 @@ def create_residual_summary_figure(
             labels.append(f"{row.response_band}  {row.display_name}")
         axis.axvline(0.0, color="#7B3F3F", linewidth=1.0, linestyle="--")
         axis.set_yticks(y_positions, labels)
-        axis.set_xlabel(
-            "Observed minus expected, divided by held-out reference RMSE"
-        )
+        axis.set_xlabel("Observed minus expected, divided by held-out reference RMSE")
         axis.set_title(
             f"Held-out reference deviation distributions\n{ecoregion_name}",
             fontsize=16,
@@ -932,9 +928,7 @@ def create_deviation_correlation_figure(
         vmax=1.0,
         cmap="RdBu_r",
     )
-    axis.set_xticks(
-        np.arange(len(labels)), labels, rotation=45, ha="right", fontsize=8
-    )
+    axis.set_xticks(np.arange(len(labels)), labels, rotation=45, ha="right", fontsize=8)
     axis.set_yticks(np.arange(len(labels)), labels, fontsize=8)
     for row_offset in range(len(labels)):
         for column_offset in range(len(labels)):
@@ -1016,9 +1010,7 @@ def create_partial_response_figure(
         else:
             lower, upper = weighted_quantiles(
                 reference_training_table[predictor_name].to_numpy(dtype=np.float64),
-                reference_training_table["area_weight_m2"].to_numpy(
-                    dtype=np.float64
-                ),
+                reference_training_table["area_weight_m2"].to_numpy(dtype=np.float64),
                 [0.05, 0.95],
             )
             if math.isclose(lower, upper):
@@ -1221,8 +1213,8 @@ def run_integrity_parameter_gams(
     started = time.perf_counter()
     resolved_sample_path = sample_path.expanduser().resolve()
     resolved_output_directory = output_directory.expanduser().resolve()
-    resolved_ecoregion_name = (
-        ecoregion_name or infer_sample_ecoregion_name(resolved_sample_path)
+    resolved_ecoregion_name = ecoregion_name or infer_ecoregion_name(
+        resolved_sample_path
     )
     print("Grassland ecological-response GAM validation")
     print(f"Input sample: {resolved_sample_path}")
@@ -1237,7 +1229,7 @@ def run_integrity_parameter_gams(
     selected_response_names = resolve_response_names(
         sample_table.columns, requested_responses
     )
-    prepared = prepare_gam_data(sample_table, configuration)
+    prepared = prepare_reference_condition_data(sample_table, configuration)
     response_coverage = summarize_response_coverage(
         prepared.table,
         tuple(all_response_columns[band] for band in sorted(all_response_columns)),

@@ -21,7 +21,7 @@ from scripts.fit_grassland_integrity_parameters import (
     run_integrity_parameter_gams,
     summarize_response_coverage,
 )
-from scripts.fit_ecoregion_gam import prepare_gam_data
+from scripts.reference_condition_utils import prepare_reference_condition_data
 
 
 class FitGrasslandIntegrityParametersTest(unittest.TestCase):
@@ -65,9 +65,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
                 for band_number in range(20, 40):
                     predictor_name = f"y2018_d{band_number:02d}_predictor"
                     if band_number == 35:
-                        value = float(
-                            (validation_block_column + row_in_block) % 4 + 11
-                        )
+                        value = float((validation_block_column + row_in_block) % 4 + 11)
                     else:
                         value = (
                             band_number * 0.05
@@ -136,7 +134,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         """Explain why unusable response bands are skipped."""
 
         sample_table = self._create_sample_table()
-        prepared = prepare_gam_data(sample_table, self.configuration)
+        prepared = prepare_reference_condition_data(sample_table, self.configuration)
         response_names = tuple(
             f"y2018_d{band_number:02d}_response" for band_number in range(2, 20)
         )
@@ -197,9 +195,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             )
         )
         self.assertTrue(
-            predictions.loc[
-                predictions["usable_for_gam"], "d02_expected_reference_oof"
-            ]
+            predictions.loc[predictions["usable_for_gam"], "d02_expected_reference_oof"]
             .notna()
             .all()
         )

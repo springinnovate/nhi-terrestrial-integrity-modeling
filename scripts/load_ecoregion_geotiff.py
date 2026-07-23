@@ -28,14 +28,25 @@ from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
+if __package__:
+    from .reference_condition_utils import (
+        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
+        EQUAL_AREA_CRS,
+        infer_ecoregion_name,
+    )
+else:
+    from reference_condition_utils import (
+        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
+        EQUAL_AREA_CRS,
+        infer_ecoregion_name,
+    )
+
 
 EARTH_RADIUS_METERS = 6_371_008.8
 MEBIBYTE = 1024**2
 MAX_FOOTPRINT_DIMENSION = 600
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
-EQUAL_AREA_CRS = "EPSG:8857"
-DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000.0
 DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK = 100
 DEFAULT_RANDOM_SEED = 42
 
@@ -1127,38 +1138,6 @@ def summarize_bands(
             )
         )
     return summaries
-
-
-def infer_ecoregion_name(geotiff_path: Path) -> str:
-    """Infer a readable ecoregion name from an Earth Engine export filename.
-
-    Earth Engine exports in this project place a numeric ecoregion identifier
-    and response-variable suffix after the ecoregion name. The source name can
-    be truncated by export naming limits, so callers can override this inferred
-    label through the command line.
-
-    Args:
-        geotiff_path: GeoTIFF path whose filename should be interpreted.
-
-    Returns:
-        Human-readable ecoregion label.
-    """
-
-    name_stem = geotiff_path.stem
-    name_stem = re.sub(
-        r"_e\d+(?:_response_variables.*)?$",
-        "",
-        name_stem,
-        flags=re.IGNORECASE,
-    )
-    name_stem = re.sub(
-        r"_response_variables.*$",
-        "",
-        name_stem,
-        flags=re.IGNORECASE,
-    )
-    words = re.sub(r"[_-]+", " ", name_stem).strip()
-    return words.title() or "Ecoregion"
 
 
 def _geographic_footprint(raster: RasterPixelData) -> GeographicFootprint:
