@@ -124,3 +124,51 @@ Shared reference-condition preparation lives in
 runnable command. The GeoTIFF loader and response-model script use it for consistent
 ecoregion naming, equal-area spatial configuration, predictor screening, fold
 assignment, training-only imputation, weighted quantiles, and spatial-fold figures.
+
+## Apply reference-condition models to a raster
+
+Apply every final ecological-response model from one completed model run to its
+ecoregion raster stack:
+
+```powershell
+python scripts/apply_reference_condition_models.py `
+  data\raster_stacks\example.tif `
+  outputs\integrity_parameters\example_spatial_sample
+```
+
+The command processes fixed raster windows rather than loading all inference products
+into memory. For each fitted response it writes the final model's expected reference
+value, observed-minus-expected deviation, and standardized deviation. Standardized
+deviation divides by the pooled out-of-fold reference RMSE stored with that response
+model. No models are retrained during inference.
+
+Outputs under `outputs/reference_condition_inference/<ecoregion>` include:
+
+- `<ecoregion>_expected_reference.tif`
+- `<ecoregion>_observed_minus_expected.tif`
+- `<ecoregion>_standardized_deviation.tif`
+- `<ecoregion>_inference_status.tif`
+- `<ecoregion>_inference_report.md`
+- `<ecoregion>_inference_metadata.json`
+
+The three float GeoTIFFs contain one aligned band per fitted response. The status
+GeoTIFF contains an inference-status band and a missing-predictor-count band. Status 0
+is outside the inference target, status 1 exceeds the training missingness threshold,
+and status 2 received model predictions. Pixels within the threshold use the final
+reference-training imputation values stored in each model.
+
+Supply an exactly aligned mask whose defined nonzero first-band pixels identify the
+target when a current-grassland layer is available:
+
+```powershell
+python scripts/apply_reference_condition_models.py `
+  data\raster_stacks\example.tif `
+  outputs\integrity_parameters\example_spatial_sample `
+  --grassland-mask data\masks\example_current_grassland.tif
+```
+
+Without `--grassland-mask`, the script infers across the usable ecoregion predictor
+footprint and marks the report accordingly. Unmasked outputs are diagnostic
+reference-condition deviations, not grassland integrity maps. Positive standardized
+deviation means observed is above expected; ecological direction and response
+combination remain separate modeling decisions.
