@@ -946,7 +946,18 @@ def calculate_deviation_correlation(
     scored_table: pd.DataFrame,
     response_metrics: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Calculate pairwise area-weighted correlations of response deviations."""
+    """Calculate pairwise area-weighted correlations of response deviations.
+
+    Args:
+        scored_table (pandas.DataFrame): Sample rows containing standardized
+            out-of-fold deviations and represented-area weights.
+        response_metrics (pandas.DataFrame): Fitted response bands that define
+            the matrix rows and columns.
+
+    Returns:
+        pandas.DataFrame: Symmetric weighted-correlation matrix indexed by
+        response band.
+    """
 
     response_bands = response_metrics["response_band"].tolist()
     correlation = pd.DataFrame(
