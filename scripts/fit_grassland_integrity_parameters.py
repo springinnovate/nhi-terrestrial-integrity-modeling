@@ -22,12 +22,6 @@ from tqdm.auto import tqdm
 
 if __package__:
     from .reference_condition_utils import (
-        DEFAULT_FOLD_COUNT,
-        DEFAULT_MAXIMUM_ROW_MISSING_FRACTION,
-        DEFAULT_MINIMUM_PREDICTOR_COVERAGE,
-        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
-        DEFAULT_SPLINE_KNOT_COUNT,
-        DEFAULT_VALIDATION_BLOCK_SIZE_METERS,
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
@@ -40,12 +34,6 @@ if __package__:
     )
 else:
     from reference_condition_utils import (
-        DEFAULT_FOLD_COUNT,
-        DEFAULT_MAXIMUM_ROW_MISSING_FRACTION,
-        DEFAULT_MINIMUM_PREDICTOR_COVERAGE,
-        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
-        DEFAULT_SPLINE_KNOT_COUNT,
-        DEFAULT_VALIDATION_BLOCK_SIZE_METERS,
         ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
         PREDICTOR_DISPLAY_NAMES,
@@ -152,75 +140,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ecoregion-name",
         help="Figure label. Defaults to a name inferred from the sample filename.",
-    )
-    parser.add_argument(
-        "--fold-count",
-        type=int,
-        default=DEFAULT_FOLD_COUNT,
-        help=f"Spatial fold count (default: {DEFAULT_FOLD_COUNT}).",
-    )
-    parser.add_argument(
-        "--sampling-block-size-m",
-        type=int,
-        default=DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
-        help=(
-            "Source sampling-block width in meters "
-            f"(default: {DEFAULT_SAMPLING_BLOCK_SIZE_METERS})."
-        ),
-    )
-    parser.add_argument(
-        "--validation-block-size-m",
-        type=int,
-        default=DEFAULT_VALIDATION_BLOCK_SIZE_METERS,
-        help=(
-            "Grouped validation-block width in meters "
-            f"(default: {DEFAULT_VALIDATION_BLOCK_SIZE_METERS})."
-        ),
-    )
-    parser.add_argument(
-        "--minimum-predictor-coverage",
-        type=float,
-        default=DEFAULT_MINIMUM_PREDICTOR_COVERAGE,
-        help=(
-            "Minimum represented-area coverage for an environmental predictor "
-            f"(default: {DEFAULT_MINIMUM_PREDICTOR_COVERAGE:.2f})."
-        ),
-    )
-    parser.add_argument(
-        "--maximum-row-missing-fraction",
-        type=float,
-        default=DEFAULT_MAXIMUM_ROW_MISSING_FRACTION,
-        help=(
-            "Maximum retained-predictor missing fraction per assessment row "
-            f"(default: {DEFAULT_MAXIMUM_ROW_MISSING_FRACTION:.2f})."
-        ),
-    )
-    parser.add_argument(
-        "--minimum-response-coverage",
-        type=float,
-        default=DEFAULT_MINIMUM_RESPONSE_COVERAGE,
-        help=(
-            "Minimum usable reference area with an observed response "
-            f"(default: {DEFAULT_MINIMUM_RESPONSE_COVERAGE:.2f})."
-        ),
-    )
-    parser.add_argument(
-        "--spline-knots",
-        type=int,
-        default=DEFAULT_SPLINE_KNOT_COUNT,
-        help=(
-            "Quantile knots in each continuous environmental term "
-            f"(default: {DEFAULT_SPLINE_KNOT_COUNT})."
-        ),
-    )
-    parser.add_argument(
-        "--ridge-alpha",
-        type=float,
-        default=DEFAULT_RIDGE_ALPHA,
-        help=(
-            "L2 regularization strength for each response model "
-            f"(default: {DEFAULT_RIDGE_ALPHA:g})."
-        ),
     )
     parser.add_argument(
         "--no-partial-response-figures",
@@ -1630,16 +1549,7 @@ def main() -> None:
     """Run the command-line ecological-response GAM workflow."""
 
     args = parse_args()
-    configuration = IntegrityConfiguration(
-        fold_count=args.fold_count,
-        sampling_block_size_meters=args.sampling_block_size_m,
-        validation_block_size_meters=args.validation_block_size_m,
-        minimum_predictor_coverage=args.minimum_predictor_coverage,
-        maximum_row_missing_fraction=args.maximum_row_missing_fraction,
-        minimum_response_coverage=args.minimum_response_coverage,
-        spline_knot_count=args.spline_knots,
-        ridge_alpha=args.ridge_alpha,
-    )
+    configuration = IntegrityConfiguration()
     output_directory = args.output_directory or (
         Path("outputs") / "integrity_parameters" / args.sample_parquet.stem
     )
