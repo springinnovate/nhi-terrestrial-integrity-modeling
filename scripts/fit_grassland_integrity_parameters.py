@@ -956,7 +956,7 @@ def calculate_deviation_correlation(
 
     Returns:
         pandas.DataFrame: Symmetric weighted-correlation matrix indexed by
-        response band.
+            response band.
     """
 
     response_bands = response_metrics["response_band"].tolist()
