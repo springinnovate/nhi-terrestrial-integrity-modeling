@@ -370,7 +370,25 @@ def summarize_response_coverage(
     selected_response_names: Sequence[str],
     configuration: IntegrityConfiguration,
 ) -> pd.DataFrame:
-    """Determine which response bands can support every spatial fold."""
+    """Determine which response bands can support every spatial fold.
+
+    Args:
+        prepared_table (pandas.DataFrame): Spatially folded sample with
+            reference labels, area weights, and response columns.
+        response_names (Sequence[str]): All d02-d19 response columns to assess.
+        selected_response_names (Sequence[str]): Response columns requested for
+            model fitting.
+        configuration (IntegrityConfiguration): Coverage, spline, and fold
+            requirements used to screen responses.
+
+    Returns:
+        pandas.DataFrame: One screening record per response, including coverage,
+        variation, fold support, selection state, and fit status.
+
+    Raises:
+        ValueError: If a supplied response name does not follow the expected
+            2018 d02-d19 column convention.
+    """
 
     selected_names = set(selected_response_names)
     usable_reference = prepared_table["usable_for_gam"] & prepared_table[
