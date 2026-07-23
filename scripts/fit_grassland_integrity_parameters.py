@@ -155,7 +155,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def _response_columns_by_band(columns: Sequence[str]) -> dict[int, str]:
-    """Map every available 2018 ecological-response band to its column."""
+    """Map every available 2018 ecological-response band to its column.
+
+    Args:
+        columns (Sequence[str]): Column names from the ecoregion sample table.
+
+    Returns:
+        dict[int, str]: Response column name keyed by its d02-d19 band number.
+
+    Raises:
+        ValueError: If a response band is duplicated or any d02-d19 band is
+            absent.
+    """
 
     response_columns: dict[int, str] = {}
     for column_name in columns:
