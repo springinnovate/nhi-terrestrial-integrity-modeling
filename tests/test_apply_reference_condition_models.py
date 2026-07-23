@@ -302,6 +302,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertIn("No grassland mask was supplied", report)
         self.assertIn("Synthetic Prairie", report)
         self.assertIn("mean pixel-level `sum(abs(z_j))`", report)
+        self.assertIn("zero-safe logarithmic scale", report)
         self.assertIsNone(metadata["grassland_mask"])
         self.assertEqual(18, metadata["responses"][0]["statistics"]["deviation_pixels"])
         self.assertEqual(
@@ -318,6 +319,15 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         )
         self.assertEqual(3, metadata["aggregate_deviation_figure"]["display_width"])
         self.assertEqual(2, metadata["aggregate_deviation_figure"]["display_height"])
+        self.assertEqual(
+            50.0,
+            metadata["aggregate_deviation_figure"]["color_scale_upper_value"],
+        )
+        self.assertAlmostEqual(
+            0.3857,
+            metadata["aggregate_deviation_figure"]["unit_value_color_position"],
+            places=4,
+        )
         self.assertIn(
             "Reference-condition raster inference",
             standard_output.getvalue(),
