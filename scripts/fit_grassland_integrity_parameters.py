@@ -230,15 +230,6 @@ def resolve_response_names(
     return tuple(resolved_names)
 
 
-def response_band_number(response_name: str) -> int:
-    """Extract the ecological-response band number from a column name."""
-
-    match = RESPONSE_BAND_PATTERN.match(response_name)
-    if not match:
-        raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
-    return int(match.group(1))
-
-
 def weighted_standard_deviation(
     values: np.ndarray,
     weights: np.ndarray,
@@ -360,7 +351,10 @@ def summarize_response_coverage(
     minimum_training_rows = max(2, configuration.spline_knot_count)
     records = []
     for response_name in response_names:
-        band_number = response_band_number(response_name)
+        response_match = RESPONSE_BAND_PATTERN.match(response_name)
+        if response_match is None:
+            raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
+        band_number = int(response_match.group(1))
         finite_response = np.isfinite(
             pd.to_numeric(prepared_table[response_name], errors="coerce")
         )
@@ -484,7 +478,10 @@ def fit_response_gam(
         training_table[response_name].to_numpy(dtype=np.float64),
         sample_weight=fitting_weights,
     )
-    band_number = response_band_number(response_name)
+    response_match = RESPONSE_BAND_PATTERN.match(response_name)
+    if response_match is None:
+        raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
+    band_number = int(response_match.group(1))
     return {
         "artifact_type": "grassland_reference_condition_additive_model",
         "format_version": 1,
@@ -1231,7 +1228,10 @@ def run_integrity_parameter_gams(
         disable=not show_progress,
     )
     for response_name in fitted_response_names:
-        band_number = response_band_number(response_name)
+        response_match = RESPONSE_BAND_PATTERN.match(response_name)
+        if response_match is None:
+            raise ValueError(f"Not a 2018 ecological-response column: {response_name}")
+        band_number = int(response_match.group(1))
         response_band = f"d{band_number:02d}"
         finite_response = np.isfinite(
             pd.to_numeric(prepared.table[response_name], errors="coerce")
