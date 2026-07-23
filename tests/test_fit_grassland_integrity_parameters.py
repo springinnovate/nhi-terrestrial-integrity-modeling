@@ -45,7 +45,13 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         )
 
     def _create_sample_table(self) -> pd.DataFrame:
-        """Create ten spatial blocks with reference and background responses."""
+        """Create ten spatial blocks with reference and background responses.
+
+        Returns:
+            pandas.DataFrame: Synthetic sample rows containing spatial fields,
+            reference labels, environmental predictors, and ecological
+            responses.
+        """
 
         records = []
         random_generator = np.random.default_rng(731)
