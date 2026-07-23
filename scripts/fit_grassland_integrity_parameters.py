@@ -987,7 +987,19 @@ def create_deviation_correlation_figure(
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
-    """Plot correlation among standardized observed-minus-expected responses."""
+    """Plot correlation among standardized observed-minus-expected responses.
+
+    Args:
+        deviation_correlation (pandas.DataFrame): Pairwise weighted-correlation
+            matrix indexed and columned by response band.
+        response_metrics (pandas.DataFrame): Response display names keyed by
+            response band.
+        ecoregion_name (str): Human-readable ecoregion figure label.
+        output_path (pathlib.Path): Destination path for the PNG figure.
+
+    Returns:
+        None: The completed figure is written to ``output_path``.
+    """
 
     response_names = response_metrics.set_index("response_band")["display_name"]
     labels = [f"{band} {response_names[band]}" for band in deviation_correlation.index]
