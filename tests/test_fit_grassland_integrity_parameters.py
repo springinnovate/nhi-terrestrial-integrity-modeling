@@ -105,7 +105,12 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         return pd.DataFrame.from_records(records)
 
     def test_resolves_response_band_aliases_and_full_names(self) -> None:
-        """Accept convenient dNN selectors while retaining raster column names."""
+        """Accept dNN selectors while retaining raster column names.
+
+        Returns:
+            None: The test asserts ordered alias resolution and duplicate
+            removal.
+        """
 
         sample_table = self._create_sample_table()
 
