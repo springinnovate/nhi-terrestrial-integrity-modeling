@@ -140,23 +140,28 @@ The command processes fixed raster windows rather than loading all inference pro
 into memory. For each fitted response it writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized
 deviation divides by the pooled out-of-fold reference RMSE stored with that response
-model. No models are retrained during inference.
+model. It also converts each complete standardized-departure vector into a
+covariance-aware Mahalanobis distance and an area-weighted reference percentile. No
+models are retrained during inference.
 
 Outputs under `outputs/reference_condition_inference/<ecoregion>` include:
 
 - `<ecoregion>_expected_reference.tif`
 - `<ecoregion>_observed_minus_expected.tif`
 - `<ecoregion>_standardized_deviation.tif`
+- `<ecoregion>_reference_departure_percentile.tif`
 - `<ecoregion>_inference_status.tif`
 - `<ecoregion>_aggregate_standardized_deviation.png`
+- `<ecoregion>_reference_departure_percentile.png`
 - `<ecoregion>_inference_report.md`
 - `<ecoregion>_inference_metadata.json`
 
-The three float GeoTIFFs contain one aligned band per fitted response. The status
-GeoTIFF contains an inference-status band and a missing-predictor-count band. Status 0
-is outside the inference target, status 1 exceeds the training missingness threshold,
-and status 2 received model predictions. Pixels within the threshold use the final
-reference-training imputation values stored in each model.
+The expected, raw-deviation, and standardized-deviation GeoTIFFs contain one aligned
+band per fitted response. The percentile GeoTIFF contains one aligned band. The
+status GeoTIFF contains an inference-status band and a missing-predictor-count band.
+Status 0 is outside the inference target, status 1 exceeds the training missingness
+threshold, and status 2 received model predictions. Pixels within the threshold use
+the final reference-training imputation values stored in each model.
 
 The aggregate PNG makes the raster result visible at publication resolution. For
 each source pixel with every modeled response defined, it calculates
@@ -169,6 +174,29 @@ cells containing pixels from the raster stack's 2018 reference-site band. Refere
 pixels do not contribute to the colored values. This aggregate is a diagnostic, not
 an integrity score, and responses with similar ecological information can be counted
 more than once.
+
+The reference-departure percentile uses only complete reference rows from
+`ecological_response_predictions.parquet`. It calculates their area-weighted mean
+standardized-departure vector and covariance matrix from out-of-fold predictions,
+then shrinks 10% of the covariance toward its diagonal before inversion. The
+shrinkage retains each response's variance while reducing instability from strongly
+correlated responses such as NPP and GPP. Use `--covariance-shrinkage` to change the
+fraction.
+
+For every complete non-reference raster pixel, the script calculates a Mahalanobis
+distance from the reference center and writes `P_i`: the represented-area fraction of
+complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` means the
+pixel is farther from the reference center than 95% of represented calibration area.
+The aligned single-band GeoTIFF uses the fixed 0–1 scale. Reference pixels and pixels
+missing any fitted response are nodata. The corresponding PNG shows reference-site
+display cells in blue and mean non-reference `P_i` from green at 0 through red at 1.
+The report records complete-reference coverage, covariance conditioning, reference
+distance quantiles, raster coverage, and upper-percentile frequencies.
+
+`P_i` is a multivariate reference-condition departure percentile, not proof of
+degradation or an ecological integrity score. Keep the individual standardized
+response rasters to identify the variables and directions responsible for a large
+departure.
 
 Supply an exactly aligned mask whose defined nonzero first-band pixels identify the
 target when a current-grassland layer is available:
@@ -183,5 +211,6 @@ python scripts/apply_reference_condition_models.py `
 Without `--grassland-mask`, the script infers across the usable ecoregion predictor
 footprint and marks the report accordingly. Unmasked outputs are diagnostic
 reference-condition deviations, not grassland integrity maps. Positive standardized
-deviation means observed is above expected; ecological direction and response
-combination remain separate modeling decisions.
+deviation means observed is above expected. The percentile combines multivariate
+departure without assigning ecological direction, so integrity interpretation remains
+a separate modeling decision.

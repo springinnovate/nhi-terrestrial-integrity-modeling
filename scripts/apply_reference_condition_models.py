@@ -17,6 +17,7 @@ import pandas as pd
 import rasterio
 from matplotlib import colormaps, rc_context
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from rasterio.coords import BoundingBox
@@ -33,10 +34,13 @@ else:
 
 
 DEFAULT_WINDOW_SIZE_PIXELS = 256
+DEFAULT_COVARIANCE_SHRINKAGE = 0.10
 MAXIMUM_DISPLAY_DIMENSION = 700
 DISPLAY_COLOR_MAXIMUM = 10.0
 DISPLAY_YELLOW_GREEN_VALUE = 3.0
 DISPLAY_COLOR_TICKS = (0.0, 1.0, 3.0, 5.0, 7.0, 10.0)
+PERCENTILE_COLOR_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+REFERENCE_SITE_COLOR = "#1565C0"
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -66,6 +70,100 @@ class ResponseModel:
     predictor_names: tuple[str, ...]
     reference_rmse: float
     bundle: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ReferenceDepartureCalibration:
+    """Reference distribution used to convert response vectors into percentiles.
+
+    Attributes:
+        prediction_table_path: Parquet table containing out-of-fold response
+            predictions and standardized deviations.
+        response_bands: Ordered response bands in every departure vector.
+        mean_vector: Area-weighted reference mean standardized-departure vector.
+        covariance_matrix: Area-weighted covariance before stabilization.
+        stabilized_covariance_matrix: Covariance after diagonal shrinkage.
+        precision_matrix: Inverse of the stabilized covariance matrix.
+        sorted_reference_distances: Ascending Mahalanobis distances for complete
+            reference rows.
+        cumulative_reference_area_fractions: Cumulative represented-area
+            fractions corresponding to the sorted distances.
+        covariance_shrinkage: Fraction of covariance shrunk toward its diagonal.
+        reference_rows: Number of labeled reference rows before completeness
+            filtering.
+        complete_reference_rows: Number of reference rows defining the matrix.
+        reference_area_m2: Total represented reference area before filtering.
+        complete_reference_area_m2: Represented area defining the matrix.
+        covariance_condition_number: Condition number before stabilization.
+        stabilized_covariance_condition_number: Condition number after
+            stabilization.
+    """
+
+    prediction_table_path: Path
+    response_bands: tuple[str, ...]
+    mean_vector: np.ndarray
+    covariance_matrix: np.ndarray
+    stabilized_covariance_matrix: np.ndarray
+    precision_matrix: np.ndarray
+    sorted_reference_distances: np.ndarray
+    cumulative_reference_area_fractions: np.ndarray
+    covariance_shrinkage: float
+    reference_rows: int
+    complete_reference_rows: int
+    reference_area_m2: float
+    complete_reference_area_m2: float
+    covariance_condition_number: float
+    stabilized_covariance_condition_number: float
+
+    def calculate_distances(
+        self,
+        standardized_departures: np.ndarray,
+    ) -> np.ndarray:
+        """Calculate covariance-aware distance for complete response vectors.
+
+        Args:
+            standardized_departures: Matrix with one pixel per row and one
+                standardized ecological-response departure per column.
+
+        Returns:
+            Mahalanobis distance for every input row.
+        """
+
+        centered = (
+            np.asarray(standardized_departures, dtype=np.float64) - self.mean_vector
+        )
+        squared_distances = np.einsum(
+            "ij,jk,ik->i",
+            centered,
+            self.precision_matrix,
+            centered,
+        )
+        return np.sqrt(np.maximum(squared_distances, 0.0))
+
+    def calculate_percentiles(self, distances: np.ndarray) -> np.ndarray:
+        """Evaluate distances against the area-weighted reference distribution.
+
+        Args:
+            distances: Mahalanobis distances to transform.
+
+        Returns:
+            Area-weighted empirical reference percentiles on the 0–1 scale.
+        """
+
+        values = np.asarray(distances, dtype=np.float64)
+        insertion_offsets = np.searchsorted(
+            self.sorted_reference_distances,
+            values,
+            side="right",
+        )
+        percentiles = np.zeros(values.shape, dtype=np.float64)
+        has_reference_at_or_below = insertion_offsets > 0
+        percentiles[has_reference_at_or_below] = (
+            self.cumulative_reference_area_fractions[
+                insertion_offsets[has_reference_at_or_below] - 1
+            ]
+        )
+        return percentiles
 
 
 @dataclass
@@ -174,6 +272,73 @@ class ResponseStatistics:
         }
 
 
+@dataclass
+class DeparturePercentileStatistics:
+    """Streaming summaries for non-reference departure percentiles."""
+
+    pixels: int = 0
+    value_sum: float = 0.0
+    value_sum_of_squares: float = 0.0
+    minimum: float = math.inf
+    maximum: float = -math.inf
+    at_or_above_90: int = 0
+    at_or_above_95: int = 0
+    at_or_above_99: int = 0
+
+    def update(self, percentiles: np.ndarray) -> None:
+        """Accumulate one raster window of finite percentile values.
+
+        Args:
+            percentiles: Reference-departure percentiles from one window.
+
+        Returns:
+            None: Statistics are accumulated on this object.
+        """
+
+        values = np.asarray(percentiles, dtype=np.float64)
+        if len(values) == 0:
+            return
+        self.pixels += len(values)
+        self.value_sum += float(values.sum())
+        self.value_sum_of_squares += float(np.square(values).sum())
+        self.minimum = min(self.minimum, float(values.min()))
+        self.maximum = max(self.maximum, float(values.max()))
+        self.at_or_above_90 += int(np.count_nonzero(values >= 0.90))
+        self.at_or_above_95 += int(np.count_nonzero(values >= 0.95))
+        self.at_or_above_99 += int(np.count_nonzero(values >= 0.99))
+
+    def summarize(self) -> dict[str, float | int | None]:
+        """Return JSON-ready coverage and distribution statistics.
+
+        Returns:
+            Pixel count, moments, range, and upper-percentile percentages.
+        """
+
+        if self.pixels == 0:
+            return {
+                "pixels": 0,
+                "mean": None,
+                "standard_deviation": None,
+                "minimum": None,
+                "maximum": None,
+                "at_or_above_90_percent": None,
+                "at_or_above_95_percent": None,
+                "at_or_above_99_percent": None,
+            }
+        mean = self.value_sum / self.pixels
+        variance = max(self.value_sum_of_squares / self.pixels - mean**2, 0.0)
+        return {
+            "pixels": self.pixels,
+            "mean": mean,
+            "standard_deviation": math.sqrt(variance),
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "at_or_above_90_percent": 100.0 * self.at_or_above_90 / self.pixels,
+            "at_or_above_95_percent": 100.0 * self.at_or_above_95 / self.pixels,
+            "at_or_above_99_percent": 100.0 * self.at_or_above_99 / self.pixels,
+        }
+
+
 @dataclass(frozen=True)
 class InferenceRunSummary:
     """Principal outputs and pixel counts from one raster inference run."""
@@ -182,14 +347,17 @@ class InferenceRunSummary:
     expected_reference_path: Path
     observed_minus_expected_path: Path
     standardized_deviation_path: Path
+    departure_percentile_path: Path
     inference_status_path: Path
     aggregate_deviation_figure_path: Path
+    departure_percentile_figure_path: Path
     report_path: Path
     metadata_path: Path
     response_count: int
     raster_pixels: int
     target_pixels: int
     predicted_pixels: int
+    departure_percentile_pixels: int
     insufficient_predictor_pixels: int
     imputed_pixels: int
     elapsed_seconds: float
@@ -238,6 +406,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_WINDOW_SIZE_PIXELS,
         help=f"Square processing-window size. Default: {DEFAULT_WINDOW_SIZE_PIXELS}.",
+    )
+    parser.add_argument(
+        "--covariance-shrinkage",
+        type=float,
+        default=DEFAULT_COVARIANCE_SHRINKAGE,
+        help=(
+            "Fraction of the reference covariance shrunk toward its diagonal "
+            f"before inversion. Default: {DEFAULT_COVARIANCE_SHRINKAGE:.2f}."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -310,6 +487,139 @@ def load_response_models(
     return metadata, tuple(response_models), maximum_missing_fraction
 
 
+def load_reference_departure_calibration(
+    model_run_directory: Path,
+    response_models: tuple[ResponseModel, ...],
+    covariance_shrinkage: float,
+) -> ReferenceDepartureCalibration:
+    """Fit the multivariate reference distribution from out-of-fold residuals.
+
+    Args:
+        model_run_directory: Output directory from the response-model workflow.
+        response_models: Ordered fitted responses included in each vector.
+        covariance_shrinkage: Fraction of covariance shrunk toward its diagonal
+            before inversion. Must be strictly between zero and one.
+
+    Returns:
+        Complete reference calibration for distance and percentile inference.
+
+    Raises:
+        ValueError: If shrinkage is invalid, required prediction columns are
+            missing, or too few complete reference vectors are available.
+    """
+
+    if not 0.0 < covariance_shrinkage < 1.0:
+        raise ValueError("covariance_shrinkage must be between zero and one.")
+    prediction_table_path = (
+        model_run_directory / "ecological_response_predictions.parquet"
+    )
+    prediction_table = pd.read_parquet(prediction_table_path)
+    response_bands = tuple(model.response_band for model in response_models)
+    standardized_columns = [
+        f"{response_band}_standardized_deviation_oof"
+        for response_band in response_bands
+    ]
+    required_columns = ["reference_site", "area_weight_m2", *standardized_columns]
+    missing_columns = [
+        column for column in required_columns if column not in prediction_table.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "Reference prediction table is missing columns: "
+            + ", ".join(missing_columns)
+        )
+
+    reference_rows = prediction_table["reference_site"].eq(1)
+    area_weights = pd.to_numeric(
+        prediction_table["area_weight_m2"], errors="coerce"
+    )
+    reference_weights = area_weights.loc[reference_rows]
+    reference_area_m2 = float(reference_weights.sum())
+    standardized_departures = prediction_table[standardized_columns].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    complete_reference_rows = (
+        reference_rows
+        & standardized_departures.notna().all(axis=1)
+        & np.isfinite(standardized_departures).all(axis=1)
+        & np.isfinite(area_weights)
+        & area_weights.gt(0)
+    )
+    complete_departures = standardized_departures.loc[
+        complete_reference_rows
+    ].to_numpy(dtype=np.float64)
+    complete_weights = area_weights.loc[complete_reference_rows].to_numpy(
+        dtype=np.float64
+    )
+    if len(complete_departures) <= len(response_models):
+        raise ValueError(
+            "Reference departure calibration requires more complete reference "
+            "rows than fitted responses."
+        )
+
+    complete_reference_area_m2 = float(complete_weights.sum())
+    mean_vector = np.average(
+        complete_departures,
+        axis=0,
+        weights=complete_weights,
+    )
+    centered_departures = complete_departures - mean_vector
+    covariance_matrix = (
+        (centered_departures * complete_weights[:, np.newaxis]).T
+        @ centered_departures
+        / complete_reference_area_m2
+    )
+    covariance_diagonal = np.diag(covariance_matrix)
+    if not np.isfinite(covariance_diagonal).all() or np.any(
+        covariance_diagonal <= 0
+    ):
+        raise ValueError(
+            "Every fitted response must have positive finite reference variance."
+        )
+
+    # Shrinking only off-diagonal covariance preserves each response's reference
+    # variance while preventing near-duplicate responses from destabilizing inversion.
+    stabilized_covariance_matrix = (
+        (1.0 - covariance_shrinkage) * covariance_matrix
+        + covariance_shrinkage * np.diag(covariance_diagonal)
+    )
+    precision_matrix = np.linalg.inv(stabilized_covariance_matrix)
+    squared_reference_distances = np.einsum(
+        "ij,jk,ik->i",
+        centered_departures,
+        precision_matrix,
+        centered_departures,
+    )
+    reference_distances = np.sqrt(np.maximum(squared_reference_distances, 0.0))
+    distance_order = np.argsort(reference_distances, kind="stable")
+    sorted_reference_distances = reference_distances[distance_order]
+    cumulative_reference_area_fractions = np.cumsum(
+        complete_weights[distance_order]
+    ) / complete_reference_area_m2
+    cumulative_reference_area_fractions[-1] = 1.0
+
+    return ReferenceDepartureCalibration(
+        prediction_table_path=prediction_table_path,
+        response_bands=response_bands,
+        mean_vector=mean_vector,
+        covariance_matrix=covariance_matrix,
+        stabilized_covariance_matrix=stabilized_covariance_matrix,
+        precision_matrix=precision_matrix,
+        sorted_reference_distances=sorted_reference_distances,
+        cumulative_reference_area_fractions=cumulative_reference_area_fractions,
+        covariance_shrinkage=covariance_shrinkage,
+        reference_rows=int(np.count_nonzero(reference_rows)),
+        complete_reference_rows=len(complete_departures),
+        reference_area_m2=reference_area_m2,
+        complete_reference_area_m2=complete_reference_area_m2,
+        covariance_condition_number=float(np.linalg.cond(covariance_matrix)),
+        stabilized_covariance_condition_number=float(
+            np.linalg.cond(stabilized_covariance_matrix)
+        ),
+    )
+
+
 def write_inference_report(
     output_path: Path,
     metadata: dict[str, object],
@@ -327,6 +637,9 @@ def write_inference_report(
     coverage = metadata["coverage"]
     configuration = metadata["configuration"]
     aggregate_figure = metadata["aggregate_deviation_figure"]
+    calibration = metadata["reference_departure_calibration"]
+    departure_percentile = metadata["reference_departure_percentile"]
+    percentile_statistics = departure_percentile["statistics"]
     color_scale_upper_value = aggregate_figure["color_scale_upper_value"]
     lines = [
         f"# Reference-condition raster inference: {metadata['ecoregion_name']}",
@@ -354,6 +667,10 @@ def write_inference_report(
                 f"{configuration['maximum_predictor_missing_fraction']:.1%}"
             ),
             f"- Processing window: {configuration['window_size_pixels']} pixels",
+            (
+                "- Covariance diagonal shrinkage: "
+                f"{configuration['covariance_shrinkage']:.1%}"
+            ),
             "",
             "## Pixel coverage",
             "",
@@ -365,10 +682,59 @@ def write_inference_report(
                 f"{coverage['insufficient_predictor_pixels']:,}"
             ),
             f"- Predicted pixels using imputation: {coverage['imputed_pixels']:,}",
+            (
+                "- Complete non-reference percentile pixels: "
+                f"{coverage['departure_percentile_pixels']:,}"
+            ),
             "",
             "Status raster codes: 0 is outside the target, 1 has too many missing "
             "predictors, and 2 received model predictions. Its second band records "
             "the number of missing predictors before imputation.",
+            "",
+            "## Multivariate reference-departure percentile",
+            "",
+            (
+                "The calibration uses complete standardized out-of-fold residual "
+                f"vectors from {calibration['complete_reference_rows']:,} of "
+                f"{calibration['reference_rows']:,} reference rows, representing "
+                f"{calibration['complete_reference_area_percent']:.1f}% of sampled "
+                "reference area. The area-weighted reference mean and covariance "
+                "are calculated from those vectors."
+            ),
+            "",
+            (
+                "The covariance matrix is stabilized with "
+                f"{calibration['covariance_shrinkage']:.1%} diagonal shrinkage "
+                "before inversion. Its condition number changes from "
+                f"{calibration['covariance_condition_number']:.3g} to "
+                f"{calibration['stabilized_covariance_condition_number']:.3g}."
+            ),
+            "",
+            (
+                "For each complete non-reference pixel, `D_i` is the Mahalanobis "
+                "distance between its standardized-departure vector and the "
+                "reference mean. `P_i` is the represented-area fraction of "
+                "complete reference rows whose distance is less than or equal to "
+                "`D_i`. A value of 0.95 therefore means the pixel is farther from "
+                "the reference center than 95% of represented calibration area."
+            ),
+            "",
+            (
+                f"The percentile raster contains {percentile_statistics['pixels']:,} "
+                "non-reference pixels. Its mean is "
+                f"{percentile_statistics['mean']:.3f}, and "
+                f"{percentile_statistics['at_or_above_95_percent']:.1f}% of defined "
+                "pixels have `P_i >= 0.95`. Reference pixels and pixels missing any "
+                "fitted response are nodata."
+            ),
+            "",
+            (
+                "The percentile PNG uses a fixed 0–1 scale, with 0 in green and 1 "
+                "in red. Blue display cells contain reference sites and are "
+                "excluded from the colored surface. `P_i` measures multivariate "
+                "departure from the sampled reference distribution; it does not "
+                "prove degradation or constitute an ecological integrity score."
+            ),
             "",
             "## Aggregate standardized-deviation map",
             "",
@@ -437,9 +803,10 @@ def write_inference_report(
             "",
             (
                 "Positive standardized deviation means observed is above expected; it "
-                "does not automatically mean higher integrity. These response layers "
-                "have not been assigned ecological directions or combined into an "
-                "integrity score."
+                "does not automatically mean higher integrity. The multivariate "
+                "percentile combines covariance-aware distance, but it does not "
+                "assign ecological directions or convert departure into an integrity "
+                "score."
             ),
             "",
             "## Artifacts",
@@ -696,12 +1063,202 @@ def create_aggregate_deviation_figure(
     }
 
 
+def create_departure_percentile_figure(
+    percentile_sums: np.ndarray,
+    percentile_counts: np.ndarray,
+    reference_counts: np.ndarray,
+    raster_bounds: BoundingBox,
+    raster_crs: CRS | None,
+    response_count: int,
+    ecoregion_name: str,
+    grassland_mask_supplied: bool,
+    output_path: Path,
+) -> dict[str, object]:
+    """Map coarsened departure percentiles and reference-site locations.
+
+    Each colored display cell contains the mean ``P_i`` among complete-response,
+    non-reference source pixels. Display cells containing one or more reference
+    pixels are drawn in blue over the percentile surface.
+
+    Args:
+        percentile_sums: Sum of source-pixel percentiles per display cell.
+        percentile_counts: Contributing non-reference pixels per display cell.
+        reference_counts: Reference-site source pixels per display cell.
+        raster_bounds: Spatial bounds of the source raster.
+        raster_crs: Source raster coordinate reference system, when defined.
+        response_count: Number of responses in each multivariate distance.
+        ecoregion_name: Human-readable label included in the title.
+        grassland_mask_supplied: Whether inference used an external grassland
+            mask.
+        output_path: Destination path for the publication-resolution PNG.
+
+    Returns:
+        JSON-ready display dimensions, counts, aggregation, and color limits.
+
+    Raises:
+        RuntimeError: If no complete-response non-reference pixels are available.
+    """
+
+    display_values = np.full(percentile_sums.shape, np.nan, dtype=np.float64)
+    np.divide(
+        percentile_sums,
+        percentile_counts,
+        out=display_values,
+        where=percentile_counts > 0,
+    )
+    finite_values = display_values[np.isfinite(display_values)]
+    if len(finite_values) == 0:
+        raise RuntimeError(
+            "No non-reference pixels have complete standardized-departure "
+            "vectors; the departure-percentile figure cannot be created."
+        )
+
+    reference_display_mask = reference_counts > 0
+    extent = (
+        raster_bounds.left,
+        raster_bounds.right,
+        raster_bounds.bottom,
+        raster_bounds.top,
+    )
+    color_map = colormaps["RdYlGn_r"].copy()
+    color_map.set_bad("#ECEFF1")
+    reference_color_map = ListedColormap([REFERENCE_SITE_COLOR])
+    with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
+        figure = Figure(figsize=(10.0, 7.5), facecolor="white")
+        FigureCanvasAgg(figure)
+        axis = figure.subplots()
+        image = axis.imshow(
+            np.ma.masked_invalid(display_values),
+            cmap=color_map,
+            origin="upper",
+            extent=extent,
+            interpolation="nearest",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        if np.any(reference_display_mask):
+            axis.imshow(
+                np.ma.masked_where(
+                    ~reference_display_mask,
+                    np.ones(reference_display_mask.shape, dtype=np.uint8),
+                ),
+                cmap=reference_color_map,
+                origin="upper",
+                extent=extent,
+                interpolation="nearest",
+                vmin=0,
+                vmax=1,
+                zorder=3,
+            )
+
+        color_bar = figure.colorbar(
+            image,
+            ax=axis,
+            pad=0.025,
+            shrink=0.88,
+        )
+        color_bar.set_label(
+            r"Reference-condition departure percentile ($P_i$)",
+            rotation=90,
+            labelpad=12,
+        )
+        color_bar.set_ticks(PERCENTILE_COLOR_TICKS)
+        axis.set_aspect("equal", adjustable="box")
+        if raster_crs is not None and raster_crs.is_geographic:
+            axis.set_xlabel("Longitude")
+            axis.set_ylabel("Latitude")
+        else:
+            axis.set_xlabel("Raster x coordinate")
+            axis.set_ylabel("Raster y coordinate")
+        axis.set_title(
+            f"Multivariate departure from reference condition\n{ecoregion_name}",
+            fontsize=15,
+            weight="bold",
+            pad=34,
+            linespacing=1.25,
+        )
+        axis.text(
+            0.0,
+            1.015,
+            (
+                "Area-weighted reference percentile: 0 is green, 1 is red, "
+                "and blue cells contain reference sites"
+            ),
+            transform=axis.transAxes,
+            ha="left",
+            va="bottom",
+            color="#4B5459",
+        )
+        axis.legend(
+            handles=[
+                Patch(
+                    facecolor=REFERENCE_SITE_COLOR,
+                    edgecolor=REFERENCE_SITE_COLOR,
+                    label="Contains reference sites",
+                )
+            ],
+            loc="best",
+            frameon=True,
+            facecolor="white",
+            edgecolor="none",
+            framealpha=0.94,
+        )
+        warning = (
+            " No grassland mask was supplied, so the modeled surface includes "
+            "the usable ecoregion predictor footprint."
+            if not grassland_mask_supplied
+            else ""
+        )
+        figure.text(
+            0.5,
+            0.01,
+            (
+                f"Each display cell is the mean $P_i$ across complete non-reference "
+                f"pixels using {response_count} responses. Blue display cells "
+                "contain reference pixels, which are excluded from colored values. "
+                "This measures departure from reference, not ecological degradation "
+                f"by itself.{warning}"
+            ),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            color="#4B5459",
+            wrap=True,
+        )
+        axis.spines[["top", "right"]].set_visible(False)
+        figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
+
+    return {
+        "metric": "area-weighted empirical reference-distance percentile P_i",
+        "display_aggregation": (
+            "mean among complete-response non-reference source pixels"
+        ),
+        "display_width": int(display_values.shape[1]),
+        "display_height": int(display_values.shape[0]),
+        "colored_display_cells": int(len(finite_values)),
+        "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
+        "contributing_source_pixels": int(percentile_counts.sum()),
+        "reference_source_pixels": int(reference_counts.sum()),
+        "response_count": response_count,
+        "color_normalization": "linear over the fixed 0 to 1 range",
+        "color_scale_lower_value": 0.0,
+        "color_scale_upper_value": 1.0,
+        "reference_color": REFERENCE_SITE_COLOR,
+        "display_value_minimum": float(finite_values.min()),
+        "display_value_median": float(np.median(finite_values)),
+        "display_value_maximum": float(finite_values.max()),
+    }
+
+
 def run_reference_condition_inference(
     raster_stack_path: Path,
     model_run_directory: Path,
     output_directory: Path | None = None,
     grassland_mask_path: Path | None = None,
     window_size_pixels: int = DEFAULT_WINDOW_SIZE_PIXELS,
+    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
     show_progress: bool = True,
 ) -> InferenceRunSummary:
     """Apply final response models to aligned raster pixels in bounded windows.
@@ -715,6 +1272,8 @@ def run_reference_condition_inference(
         grassland_mask_path: Optional exactly aligned raster. Defined nonzero
             values in its first band identify target pixels.
         window_size_pixels: Width and height of each processing window.
+        covariance_shrinkage: Fraction of covariance shrunk toward its diagonal
+            before calculating multivariate reference distances.
         show_progress: Whether to display tqdm window progress.
 
     Returns:
@@ -738,6 +1297,11 @@ def run_reference_condition_inference(
     )
     run_metadata, response_models, maximum_missing_fraction = load_response_models(
         resolved_model_run_directory
+    )
+    reference_calibration = load_reference_departure_calibration(
+        resolved_model_run_directory,
+        response_models,
+        covariance_shrinkage,
     )
     ecoregion_name = str(run_metadata["ecoregion_name"])
     ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
@@ -764,12 +1328,20 @@ def run_reference_condition_inference(
         resolved_output_directory
         / f"{ecoregion_slug}_standardized_deviation.tif"
     )
+    departure_percentile_path = (
+        resolved_output_directory
+        / f"{ecoregion_slug}_reference_departure_percentile.tif"
+    )
     inference_status_path = (
         resolved_output_directory / f"{ecoregion_slug}_inference_status.tif"
     )
     aggregate_deviation_figure_path = (
         resolved_output_directory
         / f"{ecoregion_slug}_aggregate_standardized_deviation.png"
+    )
+    departure_percentile_figure_path = (
+        resolved_output_directory
+        / f"{ecoregion_slug}_reference_departure_percentile.png"
     )
     report_path = resolved_output_directory / f"{ecoregion_slug}_inference_report.md"
     metadata_path = (
@@ -782,6 +1354,7 @@ def run_reference_condition_inference(
     response_statistics = {
         model.response_band: ResponseStatistics() for model in response_models
     }
+    departure_percentile_statistics = DeparturePercentileStatistics()
     raster_pixels = 0
     target_pixels = 0
     predicted_pixels = 0
@@ -793,6 +1366,23 @@ def run_reference_condition_inference(
     print(f"Model run: {resolved_model_run_directory}")
     print(f"Ecoregion: {ecoregion_name}")
     print(f"Responses: {len(response_models)}")
+    print(
+        "Reference calibration: "
+        f"{reference_calibration.complete_reference_rows:,} complete rows "
+        f"of {reference_calibration.reference_rows:,} reference rows"
+    )
+    print(
+        "Reference calibration area: "
+        f"{reference_calibration.complete_reference_area_m2 / 1_000_000:.2f} km^2 "
+        f"of {reference_calibration.reference_area_m2 / 1_000_000:.2f} km^2 "
+        "represented reference area"
+    )
+    print(
+        "Covariance condition number: "
+        f"{reference_calibration.covariance_condition_number:.3g} before, "
+        f"{reference_calibration.stabilized_covariance_condition_number:.3g} "
+        f"after {covariance_shrinkage:.1%} diagonal shrinkage"
+    )
     print(f"Output directory: {resolved_output_directory}")
     if resolved_mask_path is None:
         print(
@@ -871,6 +1461,14 @@ def run_reference_condition_inference(
             (display_height, display_width),
             dtype=np.int64,
         )
+        percentile_value_sums = np.zeros(
+            (display_height, display_width),
+            dtype=np.float64,
+        )
+        percentile_value_counts = np.zeros(
+            (display_height, display_width),
+            dtype=np.int64,
+        )
         reference_pixel_counts = np.zeros(
             (display_height, display_width),
             dtype=np.int64,
@@ -904,6 +1502,8 @@ def run_reference_condition_inference(
             nodata=STATUS_NODATA,
             predictor=2,
         )
+        percentile_profile = float_profile.copy()
+        percentile_profile.update(count=1)
         expected_destination = stack.enter_context(
             rasterio.open(expected_reference_path, "w", **float_profile)
         )
@@ -912,6 +1512,9 @@ def run_reference_condition_inference(
         )
         standardized_destination = stack.enter_context(
             rasterio.open(standardized_deviation_path, "w", **float_profile)
+        )
+        percentile_destination = stack.enter_context(
+            rasterio.open(departure_percentile_path, "w", **percentile_profile)
         )
         status_destination = stack.enter_context(
             rasterio.open(inference_status_path, "w", **status_profile)
@@ -937,6 +1540,23 @@ def run_reference_condition_inference(
                 "observed minus expected divided by pooled out-of-fold reference RMSE"
             ),
             **common_tags,
+        )
+        percentile_destination.update_tags(
+            artifact_type="reference_condition_departure_percentile",
+            interpretation=(
+                "area-weighted empirical percentile of covariance-aware distance "
+                "among complete out-of-fold reference vectors"
+            ),
+            response_bands=",".join(reference_calibration.response_bands),
+            covariance_shrinkage=str(covariance_shrinkage),
+            value_minimum="0",
+            value_maximum="1",
+            reference_pixels="nodata",
+            **common_tags,
+        )
+        percentile_destination.set_band_description(
+            1,
+            "reference_departure_percentile",
         )
         status_destination.update_tags(
             artifact_type="reference_condition_inference_status",
@@ -1041,6 +1661,7 @@ def run_reference_condition_inference(
             )
             deviation_output = np.full_like(expected_output, FLOAT_NODATA)
             standardized_output = np.full_like(expected_output, FLOAT_NODATA)
+            percentile_output = np.full(window_shape, FLOAT_NODATA, dtype=np.float32)
             status_output = np.zeros(window_shape, dtype=np.uint8)
             status_output[target] = STATUS_INSUFFICIENT_PREDICTORS
             status_output[usable] = STATUS_PREDICTED
@@ -1100,6 +1721,19 @@ def run_reference_condition_inference(
                     )
 
             aggregate_validity = complete_response_validity & ~reference_pixels
+            standardized_vectors = standardized_output[
+                :, aggregate_validity
+            ].T.astype(np.float64)
+            departure_distances = reference_calibration.calculate_distances(
+                standardized_vectors
+            )
+            departure_percentiles = reference_calibration.calculate_percentiles(
+                departure_distances
+            )
+            percentile_output[aggregate_validity] = departure_percentiles.astype(
+                np.float32
+            )
+            departure_percentile_statistics.update(departure_percentiles)
             aggregate_values = np.sum(
                 np.abs(standardized_output.astype(np.float64)),
                 axis=0,
@@ -1135,6 +1769,16 @@ def run_reference_condition_inference(
                 1,
             )
             np.add.at(
+                percentile_value_sums.ravel(),
+                display_cell_indices[aggregate_validity],
+                departure_percentiles,
+            )
+            np.add.at(
+                percentile_value_counts.ravel(),
+                display_cell_indices[aggregate_validity],
+                1,
+            )
+            np.add.at(
                 reference_pixel_counts.ravel(),
                 display_cell_indices[reference_pixels],
                 1,
@@ -1143,6 +1787,7 @@ def run_reference_condition_inference(
             expected_destination.write(expected_output, window=window)
             deviation_destination.write(deviation_output, window=window)
             standardized_destination.write(standardized_output, window=window)
+            percentile_destination.write(percentile_output, 1, window=window)
             status_destination.write(
                 np.stack([status_output, imputation_output]),
                 window=window,
@@ -1159,7 +1804,38 @@ def run_reference_condition_inference(
         resolved_mask_path is not None,
         aggregate_deviation_figure_path,
     )
+    departure_percentile_figure_metadata = create_departure_percentile_figure(
+        percentile_value_sums,
+        percentile_value_counts,
+        reference_pixel_counts,
+        source_bounds,
+        source_crs,
+        len(response_models),
+        ecoregion_name,
+        resolved_mask_path is not None,
+        departure_percentile_figure_path,
+    )
     elapsed_seconds = time.perf_counter() - started
+    departure_percentile_summary = departure_percentile_statistics.summarize()
+    reference_distance_quantile_probabilities = np.array(
+        [0.50, 0.90, 0.95, 0.99],
+        dtype=np.float64,
+    )
+    reference_distance_quantile_offsets = np.searchsorted(
+        reference_calibration.cumulative_reference_area_fractions,
+        reference_distance_quantile_probabilities,
+        side="left",
+    )
+    reference_distance_quantiles = {
+        f"p{round(probability * 100):02d}": float(
+            reference_calibration.sorted_reference_distances[offset]
+        )
+        for probability, offset in zip(
+            reference_distance_quantile_probabilities,
+            reference_distance_quantile_offsets,
+            strict=True,
+        )
+    }
     response_summaries = []
     for output_band_index, model in enumerate(response_models, start=1):
         response_summaries.append(
@@ -1177,16 +1853,20 @@ def run_reference_condition_inference(
         "expected_reference": str(expected_reference_path),
         "observed_minus_expected": str(observed_minus_expected_path),
         "standardized_deviation": str(standardized_deviation_path),
+        "reference_departure_percentile": str(departure_percentile_path),
         "inference_status": str(inference_status_path),
         "aggregate_standardized_deviation_figure": str(
             aggregate_deviation_figure_path
+        ),
+        "reference_departure_percentile_figure": str(
+            departure_percentile_figure_path
         ),
         "report": str(report_path),
         "metadata": str(metadata_path),
     }
     inference_metadata: dict[str, object] = {
         "artifact_type": "grassland_reference_condition_raster_inference",
-        "format_version": 1,
+        "format_version": 2,
         "ecoregion_name": ecoregion_name,
         "input_raster": str(resolved_raster_path),
         "model_run_directory": str(resolved_model_run_directory),
@@ -1200,6 +1880,7 @@ def run_reference_condition_inference(
         "configuration": {
             "maximum_predictor_missing_fraction": maximum_missing_fraction,
             "window_size_pixels": window_size_pixels,
+            "covariance_shrinkage": covariance_shrinkage,
             "imputation": "final-reference-training values stored in each model",
         },
         "source_grid": {
@@ -1214,6 +1895,7 @@ def run_reference_condition_inference(
             "predicted_pixels": predicted_pixels,
             "insufficient_predictor_pixels": insufficient_predictor_pixels,
             "imputed_pixels": imputed_pixels,
+            "departure_percentile_pixels": departure_percentile_summary["pixels"],
         },
         "status_codes": {
             "0": "outside inference target",
@@ -1222,6 +1904,49 @@ def run_reference_condition_inference(
             "255": "nodata for imputed-predictor-count band",
         },
         "responses": response_summaries,
+        "reference_departure_calibration": {
+            "prediction_table": str(reference_calibration.prediction_table_path),
+            "response_bands": list(reference_calibration.response_bands),
+            "reference_rows": reference_calibration.reference_rows,
+            "complete_reference_rows": (
+                reference_calibration.complete_reference_rows
+            ),
+            "reference_area_m2": reference_calibration.reference_area_m2,
+            "complete_reference_area_m2": (
+                reference_calibration.complete_reference_area_m2
+            ),
+            "complete_reference_area_percent": (
+                100.0
+                * reference_calibration.complete_reference_area_m2
+                / reference_calibration.reference_area_m2
+            ),
+            "mean_vector": reference_calibration.mean_vector.tolist(),
+            "covariance_matrix": (
+                reference_calibration.covariance_matrix.tolist()
+            ),
+            "covariance_shrinkage": covariance_shrinkage,
+            "stabilized_covariance_matrix": (
+                reference_calibration.stabilized_covariance_matrix.tolist()
+            ),
+            "covariance_condition_number": (
+                reference_calibration.covariance_condition_number
+            ),
+            "stabilized_covariance_condition_number": (
+                reference_calibration.stabilized_covariance_condition_number
+            ),
+            "reference_distance_quantiles": reference_distance_quantiles,
+            "percentile_definition": (
+                "represented-area fraction of complete reference rows with "
+                "Mahalanobis distance less than or equal to the assessment "
+                "pixel distance"
+            ),
+        },
+        "reference_departure_percentile": {
+            "statistics": departure_percentile_summary,
+            "reference_pixels": "excluded and written as nodata",
+            "required_responses": "every fitted response",
+            "figure": departure_percentile_figure_metadata,
+        },
         "aggregate_deviation_figure": aggregate_figure_metadata,
         "artifacts": artifacts,
         "elapsed_seconds": elapsed_seconds,
@@ -1242,6 +1967,10 @@ def run_reference_condition_inference(
         f"{insufficient_predictor_pixels:,}"
     )
     print(f"  Predicted pixels using imputation: {imputed_pixels:,}")
+    print(
+        "  Complete non-reference percentile pixels: "
+        f"{departure_percentile_summary['pixels']:,}"
+    )
     print()
     print("Response standardized deviations")
     for response in response_summaries:
@@ -1253,9 +1982,19 @@ def run_reference_condition_inference(
             f"pixels={statistics['deviation_pixels']:>10,}  mean z={mean_text}"
         )
     print()
+    print("Reference-condition departure percentiles")
+    if departure_percentile_summary["pixels"]:
+        print(f"  Mean P_i: {departure_percentile_summary['mean']:.3f}")
+        print(
+            "  Pixels at or above P_i=0.95: "
+            f"{departure_percentile_summary['at_or_above_95_percent']:.1f}%"
+        )
+    print()
     print(f"Inference report: {report_path}")
     print(f"Metadata: {metadata_path}")
     print(f"Aggregate deviation figure: {aggregate_deviation_figure_path}")
+    print(f"Departure percentile raster: {departure_percentile_path}")
+    print(f"Departure percentile figure: {departure_percentile_figure_path}")
     print(f"Completed in {elapsed_seconds:.1f} seconds")
 
     return InferenceRunSummary(
@@ -1263,14 +2002,17 @@ def run_reference_condition_inference(
         expected_reference_path=expected_reference_path,
         observed_minus_expected_path=observed_minus_expected_path,
         standardized_deviation_path=standardized_deviation_path,
+        departure_percentile_path=departure_percentile_path,
         inference_status_path=inference_status_path,
         aggregate_deviation_figure_path=aggregate_deviation_figure_path,
+        departure_percentile_figure_path=departure_percentile_figure_path,
         report_path=report_path,
         metadata_path=metadata_path,
         response_count=len(response_models),
         raster_pixels=raster_pixels,
         target_pixels=target_pixels,
         predicted_pixels=predicted_pixels,
+        departure_percentile_pixels=int(departure_percentile_summary["pixels"]),
         insufficient_predictor_pixels=insufficient_predictor_pixels,
         imputed_pixels=imputed_pixels,
         elapsed_seconds=elapsed_seconds,
@@ -1291,6 +2033,7 @@ def main() -> None:
         output_directory=args.output_directory,
         grassland_mask_path=args.grassland_mask,
         window_size_pixels=args.window_size_pixels,
+        covariance_shrinkage=args.covariance_shrinkage,
         show_progress=not args.no_progress,
     )
 
