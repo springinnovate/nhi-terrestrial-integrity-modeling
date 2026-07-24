@@ -40,7 +40,9 @@ DISPLAY_COLOR_MAXIMUM = 10.0
 DISPLAY_YELLOW_GREEN_VALUE = 3.0
 DISPLAY_COLOR_TICKS = (0.0, 1.0, 3.0, 5.0, 7.0, 10.0)
 PERCENTILE_COLOR_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-REFERENCE_SITE_COLOR = "#1565C0"
+REFERENCE_SITE_COLOR = "#5E2B97"
+REFERENCE_SITE_OUTLINE_COLOR = "#FFFFFF"
+REFERENCE_SITE_OUTLINE_WIDTH = 0.4
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -730,7 +732,7 @@ def write_inference_report(
             "",
             (
                 "The percentile PNG uses a fixed 0–1 scale, with 0 in green and 1 "
-                "in red. Blue display cells contain reference sites and are "
+                "in red. Violet display cells contain reference sites and are "
                 "excluded from the colored surface. `P_i` measures multivariate "
                 "departure from the sampled reference distribution; it does not "
                 "prove degradation or constitute an ecological integrity score."
@@ -1078,7 +1080,8 @@ def create_departure_percentile_figure(
 
     Each colored display cell contains the mean ``P_i`` among complete-response,
     non-reference source pixels. Display cells containing one or more reference
-    pixels are drawn in blue over the percentile surface.
+    pixels are drawn in deep violet with a white boundary over the percentile
+    surface.
 
     Args:
         percentile_sums: Sum of source-pixel percentiles per display cell.
@@ -1150,6 +1153,32 @@ def create_departure_percentile_figure(
                 vmax=1,
                 zorder=3,
             )
+            x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
+                reference_display_mask[0]
+            )
+            y_cell_size = (raster_bounds.top - raster_bounds.bottom) / len(
+                reference_display_mask
+            )
+            padded_reference_mask = np.pad(reference_display_mask, 1)
+            x_centers = np.linspace(
+                raster_bounds.left - x_cell_size / 2.0,
+                raster_bounds.right + x_cell_size / 2.0,
+                padded_reference_mask.shape[1],
+            )
+            y_centers = np.linspace(
+                raster_bounds.top + y_cell_size / 2.0,
+                raster_bounds.bottom - y_cell_size / 2.0,
+                padded_reference_mask.shape[0],
+            )
+            axis.contour(
+                x_centers,
+                y_centers,
+                padded_reference_mask.astype(np.uint8),
+                levels=[0.5],
+                colors=[REFERENCE_SITE_OUTLINE_COLOR],
+                linewidths=REFERENCE_SITE_OUTLINE_WIDTH,
+                zorder=4,
+            )
 
         color_bar = figure.colorbar(
             image,
@@ -1182,7 +1211,7 @@ def create_departure_percentile_figure(
             1.015,
             (
                 "Area-weighted reference percentile: 0 is green, 1 is red, "
-                "and blue cells contain reference sites"
+                "and violet cells with white boundaries contain reference sites"
             ),
             transform=axis.transAxes,
             ha="left",
@@ -1193,7 +1222,8 @@ def create_departure_percentile_figure(
             handles=[
                 Patch(
                     facecolor=REFERENCE_SITE_COLOR,
-                    edgecolor=REFERENCE_SITE_COLOR,
+                    edgecolor=REFERENCE_SITE_OUTLINE_COLOR,
+                    linewidth=1.0,
                     label="Contains reference sites",
                 )
             ],
@@ -1214,7 +1244,7 @@ def create_departure_percentile_figure(
             0.01,
             (
                 f"Each display cell is the mean $P_i$ across complete non-reference "
-                f"pixels using {response_count} responses. Blue display cells "
+                f"pixels using {response_count} responses. Violet display cells "
                 "contain reference pixels, which are excluded from colored values. "
                 "This measures departure from reference, not ecological degradation "
                 f"by itself.{warning}"
@@ -1246,6 +1276,8 @@ def create_departure_percentile_figure(
         "color_scale_lower_value": 0.0,
         "color_scale_upper_value": 1.0,
         "reference_color": REFERENCE_SITE_COLOR,
+        "reference_outline_color": REFERENCE_SITE_OUTLINE_COLOR,
+        "reference_outline_width_points": REFERENCE_SITE_OUTLINE_WIDTH,
         "display_value_minimum": float(finite_values.min()),
         "display_value_median": float(np.median(finite_values)),
         "display_value_maximum": float(finite_values.max()),

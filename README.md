@@ -189,9 +189,10 @@ complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` mean
 pixel is farther from the reference center than 95% of represented calibration area.
 The aligned single-band GeoTIFF uses the fixed 0–1 scale. Reference pixels and pixels
 missing any fitted response are nodata. The corresponding PNG shows reference-site
-display cells in blue and mean non-reference `P_i` from green at 0 through red at 1.
-The report records complete-reference coverage, covariance conditioning, reference
-distance quantiles, raster coverage, and upper-percentile frequencies.
+display cells in deep violet with white boundaries and mean non-reference `P_i` from
+green at 0 through red at 1. The report records complete-reference coverage,
+covariance conditioning, reference distance quantiles, raster coverage, and
+upper-percentile frequencies.
 
 `P_i` is a multivariate reference-condition departure percentile, not proof of
 degradation or an ecological integrity score. Keep the individual standardized

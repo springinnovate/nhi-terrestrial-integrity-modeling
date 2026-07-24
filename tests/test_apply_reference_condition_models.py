@@ -404,9 +404,21 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            "#1565C0",
+            "#5E2B97",
             metadata["reference_departure_percentile"]["figure"][
                 "reference_color"
+            ],
+        )
+        self.assertEqual(
+            "#FFFFFF",
+            metadata["reference_departure_percentile"]["figure"][
+                "reference_outline_color"
+            ],
+        )
+        self.assertEqual(
+            0.4,
+            metadata["reference_departure_percentile"]["figure"][
+                "reference_outline_width_points"
             ],
         )
         self.assertEqual(
