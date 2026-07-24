@@ -23,7 +23,7 @@ from scripts.apply_reference_condition_models import (
     STATUS_NODATA,
     STATUS_OUTSIDE_TARGET,
     STATUS_PREDICTED,
-    load_reference_departure_calibration,
+    build_reference_departure_calibration,
     load_response_models,
     run_reference_condition_inference,
 )
@@ -225,27 +225,29 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         """Use only weighted reference rows for covariance and empirical CDF."""
 
         _, response_models, _ = load_response_models(self.model_run_directory)
-        calibration = load_reference_departure_calibration(
+        calibration = build_reference_departure_calibration(
             self.model_run_directory,
             response_models,
             covariance_shrinkage=0.10,
         )
 
-        np.testing.assert_allclose(calibration.mean_vector, [0.0, 0.0])
+        np.testing.assert_allclose(calibration.reference_mean_vector, [0.0, 0.0])
         np.testing.assert_allclose(
-            calibration.covariance_matrix,
+            calibration.reference_covariance_matrix,
             np.diag([2.0 / 3.0, 2.0 / 3.0]),
         )
-        distances = calibration.calculate_distances(
+        mahalanobis_distances = calibration.calculate_mahalanobis_distances(
             np.array([[0.5, -0.5]], dtype=np.float64)
         )
-        np.testing.assert_allclose(distances, [math.sqrt(0.75)])
+        np.testing.assert_allclose(mahalanobis_distances, [math.sqrt(0.75)])
         np.testing.assert_allclose(
-            calibration.calculate_percentiles(distances),
+            calibration.calculate_reference_departure_percentiles(
+                mahalanobis_distances
+            ),
             [1.0 / 3.0],
         )
-        self.assertEqual(5, calibration.reference_rows)
-        self.assertEqual(5, calibration.complete_reference_rows)
+        self.assertEqual(5, calibration.reference_row_count)
+        self.assertEqual(5, calibration.complete_reference_row_count)
         self.assertEqual(6_000.0, calibration.complete_reference_area_m2)
 
     def test_writes_aligned_response_stacks_and_streaming_report(self) -> None:

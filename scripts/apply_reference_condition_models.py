@@ -82,18 +82,23 @@ class ReferenceDepartureCalibration:
         prediction_table_path: Parquet table containing out-of-fold response
             predictions and standardized deviations.
         response_bands: Ordered response bands in every departure vector.
-        mean_vector: Area-weighted reference mean standardized-departure vector.
-        covariance_matrix: Area-weighted covariance before stabilization.
-        stabilized_covariance_matrix: Covariance after diagonal shrinkage.
-        precision_matrix: Inverse of the stabilized covariance matrix.
+        reference_mean_vector: Area-weighted reference mean standardized-
+            departure vector.
+        reference_covariance_matrix: Area-weighted reference covariance before
+            stabilization.
+        stabilized_reference_covariance_matrix: Reference covariance after
+            diagonal shrinkage.
+        reference_precision_matrix: Inverse of the stabilized reference
+            covariance matrix.
         sorted_reference_distances: Ascending Mahalanobis distances for complete
             reference rows.
         cumulative_reference_area_fractions: Cumulative represented-area
             fractions corresponding to the sorted distances.
         covariance_shrinkage: Fraction of covariance shrunk toward its diagonal.
-        reference_rows: Number of labeled reference rows before completeness
-            filtering.
-        complete_reference_rows: Number of reference rows defining the matrix.
+        reference_row_count: Number of labeled reference rows before
+            completeness filtering.
+        complete_reference_row_count: Number of reference rows defining the
+            matrix.
         reference_area_m2: Total represented reference area before filtering.
         complete_reference_area_m2: Represented area defining the matrix.
         covariance_condition_number: Condition number before stabilization.
@@ -103,21 +108,21 @@ class ReferenceDepartureCalibration:
 
     prediction_table_path: Path
     response_bands: tuple[str, ...]
-    mean_vector: np.ndarray
-    covariance_matrix: np.ndarray
-    stabilized_covariance_matrix: np.ndarray
-    precision_matrix: np.ndarray
+    reference_mean_vector: np.ndarray
+    reference_covariance_matrix: np.ndarray
+    stabilized_reference_covariance_matrix: np.ndarray
+    reference_precision_matrix: np.ndarray
     sorted_reference_distances: np.ndarray
     cumulative_reference_area_fractions: np.ndarray
     covariance_shrinkage: float
-    reference_rows: int
-    complete_reference_rows: int
+    reference_row_count: int
+    complete_reference_row_count: int
     reference_area_m2: float
     complete_reference_area_m2: float
     covariance_condition_number: float
     stabilized_covariance_condition_number: float
 
-    def calculate_distances(
+    def calculate_mahalanobis_distances(
         self,
         standardized_departures: np.ndarray,
     ) -> np.ndarray:
@@ -131,41 +136,51 @@ class ReferenceDepartureCalibration:
             Mahalanobis distance for every input row.
         """
 
-        centered = (
-            np.asarray(standardized_departures, dtype=np.float64) - self.mean_vector
+        centered_standardized_departures = (
+            np.asarray(standardized_departures, dtype=np.float64)
+            - self.reference_mean_vector
         )
         squared_distances = np.einsum(
             "ij,jk,ik->i",
-            centered,
-            self.precision_matrix,
-            centered,
+            centered_standardized_departures,
+            self.reference_precision_matrix,
+            centered_standardized_departures,
         )
         return np.sqrt(np.maximum(squared_distances, 0.0))
 
-    def calculate_percentiles(self, distances: np.ndarray) -> np.ndarray:
+    def calculate_reference_departure_percentiles(
+        self,
+        mahalanobis_distances: np.ndarray,
+    ) -> np.ndarray:
         """Evaluate distances against the area-weighted reference distribution.
 
         Args:
-            distances: Mahalanobis distances to transform.
+            mahalanobis_distances: Mahalanobis distances to transform.
 
         Returns:
             Area-weighted empirical reference percentiles on the 0–1 scale.
         """
 
-        values = np.asarray(distances, dtype=np.float64)
+        mahalanobis_distance_array = np.asarray(
+            mahalanobis_distances,
+            dtype=np.float64,
+        )
         insertion_offsets = np.searchsorted(
             self.sorted_reference_distances,
-            values,
+            mahalanobis_distance_array,
             side="right",
         )
-        percentiles = np.zeros(values.shape, dtype=np.float64)
+        reference_departure_percentiles = np.zeros(
+            mahalanobis_distance_array.shape,
+            dtype=np.float64,
+        )
         has_reference_at_or_below = insertion_offsets > 0
-        percentiles[has_reference_at_or_below] = (
+        reference_departure_percentiles[has_reference_at_or_below] = (
             self.cumulative_reference_area_fractions[
                 insertion_offsets[has_reference_at_or_below] - 1
             ]
         )
-        return percentiles
+        return reference_departure_percentiles
 
 
 @dataclass
@@ -276,68 +291,95 @@ class ResponseStatistics:
 
 @dataclass
 class DeparturePercentileStatistics:
-    """Streaming summaries for non-reference departure percentiles."""
+    """Accumulate non-reference departure-percentile summary statistics.
 
-    pixels: int = 0
-    value_sum: float = 0.0
-    value_sum_of_squares: float = 0.0
-    minimum: float = math.inf
-    maximum: float = -math.inf
-    at_or_above_90: int = 0
-    at_or_above_95: int = 0
-    at_or_above_99: int = 0
+    Attributes:
+        pixel_count: Number of contributing non-reference pixels.
+        percentile_sum: Sum of all contributing departure percentiles.
+        percentile_sum_of_squares: Sum of squared departure percentiles.
+        percentile_minimum: Smallest contributing departure percentile.
+        percentile_maximum: Largest contributing departure percentile.
+        pixels_at_or_above_90: Pixels at or above the 90th reference percentile.
+        pixels_at_or_above_95: Pixels at or above the 95th reference percentile.
+        pixels_at_or_above_99: Pixels at or above the 99th reference percentile.
+    """
 
-    def update(self, percentiles: np.ndarray) -> None:
+    pixel_count: int = 0
+    percentile_sum: float = 0.0
+    percentile_sum_of_squares: float = 0.0
+    percentile_minimum: float = math.inf
+    percentile_maximum: float = -math.inf
+    pixels_at_or_above_90: int = 0
+    pixels_at_or_above_95: int = 0
+    pixels_at_or_above_99: int = 0
+
+    def update(self, departure_percentiles: np.ndarray) -> None:
         """Accumulate one raster window of finite percentile values.
 
         Args:
-            percentiles: Reference-departure percentiles from one window.
+            departure_percentiles: Reference-departure percentiles from one
+                window.
 
         Returns:
             None: Statistics are accumulated on this object.
         """
 
-        values = np.asarray(percentiles, dtype=np.float64)
-        if len(values) == 0:
+        departure_percentile_array = np.asarray(
+            departure_percentiles,
+            dtype=np.float64,
+        )
+        if len(departure_percentile_array) == 0:
             return
-        self.pixels += len(values)
-        self.value_sum += float(values.sum())
-        self.value_sum_of_squares += float(np.square(values).sum())
-        self.minimum = min(self.minimum, float(values.min()))
-        self.maximum = max(self.maximum, float(values.max()))
-        self.at_or_above_90 += int(np.count_nonzero(values >= 0.90))
-        self.at_or_above_95 += int(np.count_nonzero(values >= 0.95))
-        self.at_or_above_99 += int(np.count_nonzero(values >= 0.99))
+        self.pixel_count += len(departure_percentile_array)
+        self.percentile_sum += float(departure_percentile_array.sum())
+        self.percentile_sum_of_squares += float(
+            np.square(departure_percentile_array).sum()
+        )
+        self.percentile_minimum = min(
+            self.percentile_minimum,
+            float(departure_percentile_array.min()),
+        )
+        self.percentile_maximum = max(
+            self.percentile_maximum,
+            float(departure_percentile_array.max()),
+        )
+        self.pixels_at_or_above_90 += int(
+            np.count_nonzero(departure_percentile_array >= 0.90)
+        )
+        self.pixels_at_or_above_95 += int(
+            np.count_nonzero(departure_percentile_array >= 0.95)
+        )
+        self.pixels_at_or_above_99 += int(
+            np.count_nonzero(departure_percentile_array >= 0.99)
+        )
 
-    def summarize(self) -> dict[str, float | int | None]:
+    def summarize(self) -> dict[str, float | int]:
         """Return JSON-ready coverage and distribution statistics.
 
         Returns:
             Pixel count, moments, range, and upper-percentile percentages.
         """
 
-        if self.pixels == 0:
-            return {
-                "pixels": 0,
-                "mean": None,
-                "standard_deviation": None,
-                "minimum": None,
-                "maximum": None,
-                "at_or_above_90_percent": None,
-                "at_or_above_95_percent": None,
-                "at_or_above_99_percent": None,
-            }
-        mean = self.value_sum / self.pixels
-        variance = max(self.value_sum_of_squares / self.pixels - mean**2, 0.0)
+        mean = self.percentile_sum / self.pixel_count
+        variance = max(
+            self.percentile_sum_of_squares / self.pixel_count - mean**2,
+            0.0,
+        )
         return {
-            "pixels": self.pixels,
+            "pixels": self.pixel_count,
             "mean": mean,
             "standard_deviation": math.sqrt(variance),
-            "minimum": self.minimum,
-            "maximum": self.maximum,
-            "at_or_above_90_percent": 100.0 * self.at_or_above_90 / self.pixels,
-            "at_or_above_95_percent": 100.0 * self.at_or_above_95 / self.pixels,
-            "at_or_above_99_percent": 100.0 * self.at_or_above_99 / self.pixels,
+            "minimum": self.percentile_minimum,
+            "maximum": self.percentile_maximum,
+            "at_or_above_90_percent": (
+                100.0 * self.pixels_at_or_above_90 / self.pixel_count
+            ),
+            "at_or_above_95_percent": (
+                100.0 * self.pixels_at_or_above_95 / self.pixel_count
+            ),
+            "at_or_above_99_percent": (
+                100.0 * self.pixels_at_or_above_99 / self.pixel_count
+            ),
         }
 
 
@@ -489,7 +531,7 @@ def load_response_models(
     return metadata, tuple(response_models), maximum_missing_fraction
 
 
-def load_reference_departure_calibration(
+def build_reference_departure_calibration(
     model_run_directory: Path,
     response_models: tuple[ResponseModel, ...],
     covariance_shrinkage: float,
@@ -506,8 +548,8 @@ def load_reference_departure_calibration(
         Complete reference calibration for distance and percentile inference.
 
     Raises:
-        ValueError: If shrinkage is invalid, required prediction columns are
-            missing, or too few complete reference vectors are available.
+        ValueError: If shrinkage is invalid, too few complete reference vectors
+            are available, or a fitted response has no reference variance.
     """
 
     if not 0.0 < covariance_shrinkage < 1.0:
@@ -517,64 +559,60 @@ def load_reference_departure_calibration(
     )
     prediction_table = pd.read_parquet(prediction_table_path)
     response_bands = tuple(model.response_band for model in response_models)
-    standardized_columns = [
+    standardized_deviation_columns = [
         f"{response_band}_standardized_deviation_oof"
         for response_band in response_bands
     ]
-    required_columns = ["reference_site", "area_weight_m2", *standardized_columns]
-    missing_columns = [
-        column for column in required_columns if column not in prediction_table.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            "Reference prediction table is missing columns: "
-            + ", ".join(missing_columns)
-        )
-
-    reference_rows = prediction_table["reference_site"].eq(1)
+    reference_row_mask = prediction_table["reference_site"].eq(1)
     area_weights = pd.to_numeric(
         prediction_table["area_weight_m2"], errors="coerce"
     )
-    reference_weights = area_weights.loc[reference_rows]
-    reference_area_m2 = float(reference_weights.sum())
-    standardized_departures = prediction_table[standardized_columns].apply(
+    reference_area_weights = area_weights.loc[reference_row_mask]
+    reference_area_m2 = float(reference_area_weights.sum())
+    standardized_departure_table = prediction_table[
+        standardized_deviation_columns
+    ].apply(
         pd.to_numeric,
         errors="coerce",
     )
-    complete_reference_rows = (
-        reference_rows
-        & standardized_departures.notna().all(axis=1)
-        & np.isfinite(standardized_departures).all(axis=1)
+    complete_reference_row_mask = (
+        reference_row_mask
+        & np.isfinite(standardized_departure_table).all(axis=1)
         & np.isfinite(area_weights)
         & area_weights.gt(0)
     )
-    complete_departures = standardized_departures.loc[
-        complete_reference_rows
+    complete_reference_departures = standardized_departure_table.loc[
+        complete_reference_row_mask
     ].to_numpy(dtype=np.float64)
-    complete_weights = area_weights.loc[complete_reference_rows].to_numpy(
-        dtype=np.float64
-    )
-    if len(complete_departures) <= len(response_models):
+    complete_reference_area_weights = area_weights.loc[
+        complete_reference_row_mask
+    ].to_numpy(dtype=np.float64)
+    if len(complete_reference_departures) <= len(response_models):
         raise ValueError(
             "Reference departure calibration requires more complete reference "
             "rows than fitted responses."
         )
 
-    complete_reference_area_m2 = float(complete_weights.sum())
-    mean_vector = np.average(
-        complete_departures,
+    complete_reference_area_m2 = float(complete_reference_area_weights.sum())
+    reference_mean_vector = np.average(
+        complete_reference_departures,
         axis=0,
-        weights=complete_weights,
+        weights=complete_reference_area_weights,
     )
-    centered_departures = complete_departures - mean_vector
-    covariance_matrix = (
-        (centered_departures * complete_weights[:, np.newaxis]).T
-        @ centered_departures
+    centered_reference_departures = (
+        complete_reference_departures - reference_mean_vector
+    )
+    reference_covariance_matrix = (
+        (
+            centered_reference_departures
+            * complete_reference_area_weights[:, np.newaxis]
+        ).T
+        @ centered_reference_departures
         / complete_reference_area_m2
     )
-    covariance_diagonal = np.diag(covariance_matrix)
-    if not np.isfinite(covariance_diagonal).all() or np.any(
-        covariance_diagonal <= 0
+    reference_variances = np.diag(reference_covariance_matrix)
+    if not np.isfinite(reference_variances).all() or np.any(
+        reference_variances <= 0
     ):
         raise ValueError(
             "Every fitted response must have positive finite reference variance."
@@ -582,42 +620,48 @@ def load_reference_departure_calibration(
 
     # Shrinking only off-diagonal covariance preserves each response's reference
     # variance while preventing near-duplicate responses from destabilizing inversion.
-    stabilized_covariance_matrix = (
-        (1.0 - covariance_shrinkage) * covariance_matrix
-        + covariance_shrinkage * np.diag(covariance_diagonal)
+    stabilized_reference_covariance_matrix = (
+        (1.0 - covariance_shrinkage) * reference_covariance_matrix
+        + covariance_shrinkage * np.diag(reference_variances)
     )
-    precision_matrix = np.linalg.inv(stabilized_covariance_matrix)
+    reference_precision_matrix = np.linalg.inv(
+        stabilized_reference_covariance_matrix
+    )
     squared_reference_distances = np.einsum(
         "ij,jk,ik->i",
-        centered_departures,
-        precision_matrix,
-        centered_departures,
+        centered_reference_departures,
+        reference_precision_matrix,
+        centered_reference_departures,
     )
     reference_distances = np.sqrt(np.maximum(squared_reference_distances, 0.0))
-    distance_order = np.argsort(reference_distances, kind="stable")
-    sorted_reference_distances = reference_distances[distance_order]
+    reference_distance_sort_order = np.argsort(reference_distances, kind="stable")
+    sorted_reference_distances = reference_distances[reference_distance_sort_order]
     cumulative_reference_area_fractions = np.cumsum(
-        complete_weights[distance_order]
+        complete_reference_area_weights[reference_distance_sort_order]
     ) / complete_reference_area_m2
     cumulative_reference_area_fractions[-1] = 1.0
 
     return ReferenceDepartureCalibration(
         prediction_table_path=prediction_table_path,
         response_bands=response_bands,
-        mean_vector=mean_vector,
-        covariance_matrix=covariance_matrix,
-        stabilized_covariance_matrix=stabilized_covariance_matrix,
-        precision_matrix=precision_matrix,
+        reference_mean_vector=reference_mean_vector,
+        reference_covariance_matrix=reference_covariance_matrix,
+        stabilized_reference_covariance_matrix=(
+            stabilized_reference_covariance_matrix
+        ),
+        reference_precision_matrix=reference_precision_matrix,
         sorted_reference_distances=sorted_reference_distances,
         cumulative_reference_area_fractions=cumulative_reference_area_fractions,
         covariance_shrinkage=covariance_shrinkage,
-        reference_rows=int(np.count_nonzero(reference_rows)),
-        complete_reference_rows=len(complete_departures),
+        reference_row_count=int(np.count_nonzero(reference_row_mask)),
+        complete_reference_row_count=len(complete_reference_departures),
         reference_area_m2=reference_area_m2,
         complete_reference_area_m2=complete_reference_area_m2,
-        covariance_condition_number=float(np.linalg.cond(covariance_matrix)),
+        covariance_condition_number=float(
+            np.linalg.cond(reference_covariance_matrix)
+        ),
         stabilized_covariance_condition_number=float(
-            np.linalg.cond(stabilized_covariance_matrix)
+            np.linalg.cond(stabilized_reference_covariance_matrix)
         ),
     )
 
@@ -1066,9 +1110,9 @@ def create_aggregate_deviation_figure(
 
 
 def create_departure_percentile_figure(
-    percentile_sums: np.ndarray,
-    percentile_counts: np.ndarray,
-    reference_counts: np.ndarray,
+    departure_percentile_sums: np.ndarray,
+    departure_percentile_counts: np.ndarray,
+    reference_pixel_counts: np.ndarray,
     raster_bounds: BoundingBox,
     raster_crs: CRS | None,
     response_count: int,
@@ -1084,9 +1128,11 @@ def create_departure_percentile_figure(
     surface.
 
     Args:
-        percentile_sums: Sum of source-pixel percentiles per display cell.
-        percentile_counts: Contributing non-reference pixels per display cell.
-        reference_counts: Reference-site source pixels per display cell.
+        departure_percentile_sums: Sum of source-pixel departure percentiles per
+            display cell.
+        departure_percentile_counts: Contributing non-reference pixels per
+            display cell.
+        reference_pixel_counts: Reference-site source pixels per display cell.
         raster_bounds: Spatial bounds of the source raster.
         raster_crs: Source raster coordinate reference system, when defined.
         response_count: Number of responses in each multivariate distance.
@@ -1102,39 +1148,45 @@ def create_departure_percentile_figure(
         RuntimeError: If no complete-response non-reference pixels are available.
     """
 
-    display_values = np.full(percentile_sums.shape, np.nan, dtype=np.float64)
-    np.divide(
-        percentile_sums,
-        percentile_counts,
-        out=display_values,
-        where=percentile_counts > 0,
+    mean_display_percentiles = np.full(
+        departure_percentile_sums.shape,
+        np.nan,
+        dtype=np.float64,
     )
-    finite_values = display_values[np.isfinite(display_values)]
-    if len(finite_values) == 0:
+    np.divide(
+        departure_percentile_sums,
+        departure_percentile_counts,
+        out=mean_display_percentiles,
+        where=departure_percentile_counts > 0,
+    )
+    displayed_percentiles = mean_display_percentiles[
+        np.isfinite(mean_display_percentiles)
+    ]
+    if len(displayed_percentiles) == 0:
         raise RuntimeError(
             "No non-reference pixels have complete standardized-departure "
             "vectors; the departure-percentile figure cannot be created."
         )
 
-    reference_display_mask = reference_counts > 0
-    extent = (
+    reference_display_mask = reference_pixel_counts > 0
+    raster_extent = (
         raster_bounds.left,
         raster_bounds.right,
         raster_bounds.bottom,
         raster_bounds.top,
     )
-    color_map = colormaps["RdYlGn_r"].copy()
-    color_map.set_bad("#ECEFF1")
+    departure_color_map = colormaps["RdYlGn_r"].copy()
+    departure_color_map.set_bad("#ECEFF1")
     reference_color_map = ListedColormap([REFERENCE_SITE_COLOR])
     with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
         figure = Figure(figsize=(10.0, 7.5), facecolor="white")
         FigureCanvasAgg(figure)
         axis = figure.subplots()
-        image = axis.imshow(
-            np.ma.masked_invalid(display_values),
-            cmap=color_map,
+        departure_percentile_image = axis.imshow(
+            np.ma.masked_invalid(mean_display_percentiles),
+            cmap=departure_color_map,
             origin="upper",
-            extent=extent,
+            extent=raster_extent,
             interpolation="nearest",
             vmin=0.0,
             vmax=1.0,
@@ -1147,7 +1199,7 @@ def create_departure_percentile_figure(
                 ),
                 cmap=reference_color_map,
                 origin="upper",
-                extent=extent,
+                extent=raster_extent,
                 interpolation="nearest",
                 vmin=0,
                 vmax=1,
@@ -1181,7 +1233,7 @@ def create_departure_percentile_figure(
             )
 
         color_bar = figure.colorbar(
-            image,
+            departure_percentile_image,
             ax=axis,
             pad=0.025,
             shrink=0.88,
@@ -1233,7 +1285,7 @@ def create_departure_percentile_figure(
             edgecolor="none",
             framealpha=0.94,
         )
-        warning = (
+        missing_grassland_mask_warning = (
             " No grassland mask was supplied, so the modeled surface includes "
             "the usable ecoregion predictor footprint."
             if not grassland_mask_supplied
@@ -1247,7 +1299,7 @@ def create_departure_percentile_figure(
                 f"pixels using {response_count} responses. Violet display cells "
                 "contain reference pixels, which are excluded from colored values. "
                 "This measures departure from reference, not ecological degradation "
-                f"by itself.{warning}"
+                f"by itself.{missing_grassland_mask_warning}"
             ),
             ha="center",
             va="bottom",
@@ -1265,12 +1317,12 @@ def create_departure_percentile_figure(
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
         ),
-        "display_width": int(display_values.shape[1]),
-        "display_height": int(display_values.shape[0]),
-        "colored_display_cells": int(len(finite_values)),
+        "display_width": int(mean_display_percentiles.shape[1]),
+        "display_height": int(mean_display_percentiles.shape[0]),
+        "colored_display_cells": int(len(displayed_percentiles)),
         "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
-        "contributing_source_pixels": int(percentile_counts.sum()),
-        "reference_source_pixels": int(reference_counts.sum()),
+        "contributing_source_pixels": int(departure_percentile_counts.sum()),
+        "reference_source_pixels": int(reference_pixel_counts.sum()),
         "response_count": response_count,
         "color_normalization": "linear over the fixed 0 to 1 range",
         "color_scale_lower_value": 0.0,
@@ -1278,9 +1330,9 @@ def create_departure_percentile_figure(
         "reference_color": REFERENCE_SITE_COLOR,
         "reference_outline_color": REFERENCE_SITE_OUTLINE_COLOR,
         "reference_outline_width_points": REFERENCE_SITE_OUTLINE_WIDTH,
-        "display_value_minimum": float(finite_values.min()),
-        "display_value_median": float(np.median(finite_values)),
-        "display_value_maximum": float(finite_values.max()),
+        "display_value_minimum": float(displayed_percentiles.min()),
+        "display_value_median": float(np.median(displayed_percentiles)),
+        "display_value_maximum": float(displayed_percentiles.max()),
     }
 
 
@@ -1330,7 +1382,7 @@ def run_reference_condition_inference(
     run_metadata, response_models, maximum_missing_fraction = load_response_models(
         resolved_model_run_directory
     )
-    reference_calibration = load_reference_departure_calibration(
+    reference_calibration = build_reference_departure_calibration(
         resolved_model_run_directory,
         response_models,
         covariance_shrinkage,
@@ -1400,8 +1452,8 @@ def run_reference_condition_inference(
     print(f"Responses: {len(response_models)}")
     print(
         "Reference calibration: "
-        f"{reference_calibration.complete_reference_rows:,} complete rows "
-        f"of {reference_calibration.reference_rows:,} reference rows"
+        f"{reference_calibration.complete_reference_row_count:,} complete rows "
+        f"of {reference_calibration.reference_row_count:,} reference rows"
     )
     print(
         "Reference calibration area: "
@@ -1752,21 +1804,27 @@ def run_reference_condition_inference(
                         standardized_values,
                     )
 
-            aggregate_validity = complete_response_validity & ~reference_pixels
-            standardized_vectors = standardized_output[
-                :, aggregate_validity
+            complete_non_reference_pixels = (
+                complete_response_validity & ~reference_pixels
+            )
+            standardized_departure_vectors = standardized_output[
+                :, complete_non_reference_pixels
             ].T.astype(np.float64)
-            departure_distances = reference_calibration.calculate_distances(
-                standardized_vectors
+            mahalanobis_distances = (
+                reference_calibration.calculate_mahalanobis_distances(
+                    standardized_departure_vectors
+                )
             )
-            departure_percentiles = reference_calibration.calculate_percentiles(
-                departure_distances
+            departure_percentiles = (
+                reference_calibration.calculate_reference_departure_percentiles(
+                    mahalanobis_distances
+                )
             )
-            percentile_output[aggregate_validity] = departure_percentiles.astype(
-                np.float32
+            percentile_output[complete_non_reference_pixels] = (
+                departure_percentiles.astype(np.float32)
             )
             departure_percentile_statistics.update(departure_percentiles)
-            aggregate_values = np.sum(
+            total_absolute_standardized_departures = np.sum(
                 np.abs(standardized_output.astype(np.float64)),
                 axis=0,
             )
@@ -1792,22 +1850,24 @@ def run_reference_condition_inference(
             )
             np.add.at(
                 aggregate_value_sums.ravel(),
-                display_cell_indices[aggregate_validity],
-                aggregate_values[aggregate_validity],
+                display_cell_indices[complete_non_reference_pixels],
+                total_absolute_standardized_departures[
+                    complete_non_reference_pixels
+                ],
             )
             np.add.at(
                 aggregate_value_counts.ravel(),
-                display_cell_indices[aggregate_validity],
+                display_cell_indices[complete_non_reference_pixels],
                 1,
             )
             np.add.at(
                 percentile_value_sums.ravel(),
-                display_cell_indices[aggregate_validity],
+                display_cell_indices[complete_non_reference_pixels],
                 departure_percentiles,
             )
             np.add.at(
                 percentile_value_counts.ravel(),
-                display_cell_indices[aggregate_validity],
+                display_cell_indices[complete_non_reference_pixels],
                 1,
             )
             np.add.at(
@@ -1939,9 +1999,9 @@ def run_reference_condition_inference(
         "reference_departure_calibration": {
             "prediction_table": str(reference_calibration.prediction_table_path),
             "response_bands": list(reference_calibration.response_bands),
-            "reference_rows": reference_calibration.reference_rows,
+            "reference_rows": reference_calibration.reference_row_count,
             "complete_reference_rows": (
-                reference_calibration.complete_reference_rows
+                reference_calibration.complete_reference_row_count
             ),
             "reference_area_m2": reference_calibration.reference_area_m2,
             "complete_reference_area_m2": (
@@ -1952,13 +2012,13 @@ def run_reference_condition_inference(
                 * reference_calibration.complete_reference_area_m2
                 / reference_calibration.reference_area_m2
             ),
-            "mean_vector": reference_calibration.mean_vector.tolist(),
+            "mean_vector": reference_calibration.reference_mean_vector.tolist(),
             "covariance_matrix": (
-                reference_calibration.covariance_matrix.tolist()
+                reference_calibration.reference_covariance_matrix.tolist()
             ),
             "covariance_shrinkage": covariance_shrinkage,
             "stabilized_covariance_matrix": (
-                reference_calibration.stabilized_covariance_matrix.tolist()
+                reference_calibration.stabilized_reference_covariance_matrix.tolist()
             ),
             "covariance_condition_number": (
                 reference_calibration.covariance_condition_number
@@ -2015,12 +2075,11 @@ def run_reference_condition_inference(
         )
     print()
     print("Reference-condition departure percentiles")
-    if departure_percentile_summary["pixels"]:
-        print(f"  Mean P_i: {departure_percentile_summary['mean']:.3f}")
-        print(
-            "  Pixels at or above P_i=0.95: "
-            f"{departure_percentile_summary['at_or_above_95_percent']:.1f}%"
-        )
+    print(f"  Mean P_i: {departure_percentile_summary['mean']:.3f}")
+    print(
+        "  Pixels at or above P_i=0.95: "
+        f"{departure_percentile_summary['at_or_above_95_percent']:.1f}%"
+    )
     print()
     print(f"Inference report: {report_path}")
     print(f"Metadata: {metadata_path}")
