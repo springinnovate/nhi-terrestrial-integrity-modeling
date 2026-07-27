@@ -103,7 +103,9 @@ class RasterToBinaryMaskTest(unittest.TestCase):
             show_progress=False,
         )
 
-        with rasterio.open(input_path) as source, rasterio.open(output_path) as mask:
+        with rasterio.open(input_path) as source, rasterio.open(
+            output_path
+        ) as mask:
             np.testing.assert_array_equal(
                 mask.read(1),
                 np.array([[0, 0, 1, 0], [1, 0, 0, 1]], dtype=np.uint8),
@@ -147,6 +149,35 @@ class RasterToBinaryMaskTest(unittest.TestCase):
             )
         self.assertEqual(2, summary.true_pixels)
         self.assertEqual(3, summary.invalid_source_pixels)
+
+    def test_respects_internal_mask_without_a_nodata_value(self) -> None:
+        """Keep masked reads when validity comes from a GDAL mask band."""
+
+        input_path = self.temporary_path / "internally_masked.tif"
+        output_path = self.temporary_path / "internally_masked_binary.tif"
+        self._write_raster(
+            input_path,
+            np.array([[10, 10], [10, 10]], dtype=np.uint8),
+        )
+        with rasterio.open(input_path, "r+") as source:
+            source.write_mask(
+                np.array([[255, 0], [255, 255]], dtype=np.uint8),
+            )
+
+        summary = convert_raster_to_binary_mask(
+            input_path,
+            output_path,
+            ">5",
+            show_progress=False,
+        )
+
+        with rasterio.open(input_path) as source, rasterio.open(output_path) as mask:
+            self.assertIsNone(source.nodata)
+            np.testing.assert_array_equal(
+                mask.read(1),
+                np.array([[1, 0], [1, 1]], dtype=np.uint8),
+            )
+        self.assertEqual(1, summary.invalid_source_pixels)
 
     def test_creates_zstd_cog_from_selected_band(self) -> None:
         """Use the requested source band and verify GDAL COG layout metadata."""

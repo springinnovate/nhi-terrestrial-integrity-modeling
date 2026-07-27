@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator
 
 import numpy as np
 import rasterio
+from rasterio.enums import MaskFlags
 from rasterio.shutil import copy as copy_raster
 from rasterio.windows import Window
 from tqdm.auto import tqdm
@@ -261,6 +262,15 @@ def _write_mask_metadata(
     destination.set_band_description(1, f"binary mask: {comparison.expression}")
 
 
+def _band_requires_masked_reads(
+    source: rasterio.DatasetReader,
+    source_band: int,
+) -> bool:
+    """Return whether a band has nodata, an internal mask, or an alpha mask."""
+
+    return MaskFlags.all_valid not in source.mask_flag_enums[source_band - 1]
+
+
 def _write_intermediate_mask(
     source: rasterio.DatasetReader,
     source_path: Path,
@@ -277,6 +287,7 @@ def _write_intermediate_mask(
     )
     true_pixels = 0
     invalid_source_pixels = 0
+    requires_masked_reads = _band_requires_masked_reads(source, source_band)
     windows = tqdm(
         iter_raster_windows(source.width, source.height, window_size_pixels),
         total=total_windows,
@@ -293,20 +304,37 @@ def _write_intermediate_mask(
             comparison,
         )
         for window in windows:
-            source_values = source.read(source_band, window=window, masked=True)
-            numeric_values = np.asarray(source_values.data)
-            valid_source = ~np.ma.getmaskarray(source_values)
+            source_values = source.read(
+                source_band,
+                window=window,
+                masked=requires_masked_reads,
+            )
+            numeric_values = np.asarray(
+                source_values.data if requires_masked_reads else source_values
+            )
+            valid_source = (
+                ~np.ma.getmaskarray(source_values)
+                if requires_masked_reads
+                else None
+            )
             if np.issubdtype(numeric_values.dtype, np.floating):
-                valid_source &= np.isfinite(numeric_values)
-            output_values = np.zeros(numeric_values.shape, dtype=np.uint8)
-            output_values[valid_source] = comparison.evaluate(
-                numeric_values[valid_source]
-            ).astype(np.uint8, copy=False)
+                finite_values = np.isfinite(numeric_values)
+                valid_source = (
+                    finite_values
+                    if valid_source is None
+                    else valid_source & finite_values
+                )
+            output_values = comparison.evaluate(numeric_values).astype(
+                np.uint8,
+                copy=False,
+            )
+            if valid_source is not None:
+                output_values[~valid_source] = 0
+                invalid_source_pixels += int(
+                    valid_source.size - np.count_nonzero(valid_source)
+                )
             output.write(output_values, 1, window=window)
             true_pixels += int(np.count_nonzero(output_values))
-            invalid_source_pixels += int(
-                valid_source.size - np.count_nonzero(valid_source)
-            )
     return true_pixels, invalid_source_pixels
 
 
