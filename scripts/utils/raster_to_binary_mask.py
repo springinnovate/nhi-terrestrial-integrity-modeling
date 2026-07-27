@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import math
 import operator
 import os
@@ -11,7 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 import rasterio
@@ -309,8 +310,8 @@ def _write_intermediate_mask(
     return true_pixels, invalid_source_pixels
 
 
-def _create_cog(intermediate_path: Path, cog_path: Path) -> None:
-    """Create a ZSTD Cloud Optimized GeoTIFF from the streamed mask."""
+def _copy_cog_with_rasterio(intermediate_path: Path, cog_path: Path) -> None:
+    """Create a COG through Rasterio's portable GDAL wrapper."""
 
     copy_raster(
         intermediate_path,
@@ -323,6 +324,124 @@ def _create_cog(intermediate_path: Path, cog_path: Path) -> None:
         OVERVIEW_RESAMPLING="NEAREST",
         NUM_THREADS="ALL_CPUS",
         NBITS=1,
+    )
+
+
+def _load_gdal() -> Any | None:
+    """Return GDAL's optional Python module when it is installed."""
+
+    try:
+        from osgeo import gdal
+    except ImportError:
+        return None
+    gdal.UseExceptions()
+    return gdal
+
+
+def _create_cog_with_gdal_progress(
+    gdal: Any,
+    intermediate_path: Path,
+    cog_path: Path,
+    show_progress: bool,
+) -> None:
+    """Create a COG with GDAL's genuine completion callback."""
+
+    progress = tqdm(
+        total=100.0,
+        desc="Creating COG",
+        unit="%",
+        disable=not show_progress,
+    )
+
+    def report_progress(
+        complete: float,
+        _message: str,
+        _callback_data: object,
+    ) -> int:
+        target = max(0.0, min(100.0, complete * 100.0))
+        progress.update(max(0.0, target - progress.n))
+        return 1
+
+    try:
+        options = gdal.TranslateOptions(
+            format="COG",
+            strict=True,
+            creationOptions=[
+                f"COMPRESS={COMPRESSION}",
+                f"BLOCKSIZE={OUTPUT_BLOCK_SIZE_PIXELS}",
+                "BIGTIFF=IF_SAFER",
+                "OVERVIEW_RESAMPLING=NEAREST",
+                "NUM_THREADS=ALL_CPUS",
+                "NBITS=1",
+            ],
+            callback=report_progress,
+        )
+        completed_dataset = gdal.Translate(
+            str(cog_path),
+            str(intermediate_path),
+            options=options,
+        )
+        if completed_dataset is None:
+            raise RuntimeError("GDAL did not create the Cloud Optimized GeoTIFF.")
+        completed_dataset.FlushCache()
+        completed_dataset = None
+        progress.update(max(0.0, 100.0 - progress.n))
+    finally:
+        progress.close()
+
+
+def _create_cog_with_rasterio_progress(
+    intermediate_path: Path,
+    cog_path: Path,
+    show_progress: bool,
+) -> None:
+    """Create a COG while reporting bytes written when callbacks are unavailable."""
+
+    if not show_progress:
+        _copy_cog_with_rasterio(intermediate_path, cog_path)
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        copy_future = executor.submit(
+            _copy_cog_with_rasterio,
+            intermediate_path,
+            cog_path,
+        )
+        with tqdm(
+            desc="Creating COG (bytes written)",
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as progress:
+            while not copy_future.done():
+                current_size = cog_path.stat().st_size if cog_path.exists() else 0
+                progress.update(max(0, current_size - progress.n))
+                time.sleep(0.25)
+            copy_future.result()
+            completed_size = cog_path.stat().st_size if cog_path.exists() else 0
+            progress.update(max(0, completed_size - progress.n))
+
+
+def _create_cog(
+    intermediate_path: Path,
+    cog_path: Path,
+    show_progress: bool,
+) -> None:
+    """Create a final ZSTD COG after full-resolution classification finishes."""
+
+    gdal = _load_gdal()
+    if gdal is not None:
+        _create_cog_with_gdal_progress(
+            gdal,
+            intermediate_path,
+            cog_path,
+            show_progress,
+        )
+        return
+    _create_cog_with_rasterio_progress(
+        intermediate_path,
+        cog_path,
+        show_progress,
     )
 
 
@@ -441,7 +560,7 @@ def convert_raster_to_binary_mask(
             completed_path = intermediate_path
             if cog:
                 completed_path = temporary_path / "binary_mask_cog.tif"
-                _create_cog(intermediate_path, completed_path)
+                _create_cog(intermediate_path, completed_path, show_progress)
             _validate_completed_mask(
                 completed_path,
                 source_width,

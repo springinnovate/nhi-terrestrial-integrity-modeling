@@ -79,8 +79,9 @@ compression, and BigTIFF when needed. Source nodata, masked, NaN, and infinite p
 become valid output zeros, so every output pixel is strictly `0` or `1`. Processing is
 windowed and does not load the complete raster into memory.
 
-Add `--cog` to copy the completed mask through GDAL's Cloud Optimized GeoTIFF driver,
-also using ZSTD compression and nearest-neighbor mask overviews:
+Add `--cog` to copy the completed mask through GDAL's Cloud Optimized GeoTIFF driver
+after classification finishes, also using ZSTD compression and nearest-neighbor mask
+overviews:
 
 ```powershell
 python scripts/utils/raster_to_binary_mask.py `
@@ -92,9 +93,11 @@ python scripts/utils/raster_to_binary_mask.py `
 
 COG creation uses a temporary tiled GeoTIFF in the output directory, so that volume
 must have room for the intermediate and final compressed files during conversion.
-Use `--band` for a band other than one, `--window-size-pixels` to tune memory and I/O,
+The `Creating COG` stage reports GDAL's completion percentage when its Python bindings
+are installed. The portable Rasterio fallback reports bytes written instead. Use
+`--band` for a band other than one, `--window-size-pixels` to tune memory and I/O,
 `--overwrite` to replace an existing output only after validation succeeds, and
-`--no-progress` to suppress progress output.
+`--no-progress` to suppress both progress stages.
 
 ## Fit ecological-response reference conditions
 

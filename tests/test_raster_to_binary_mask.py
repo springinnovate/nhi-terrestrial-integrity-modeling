@@ -15,6 +15,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from scripts.utils.raster_to_binary_mask import (
+    _create_cog_with_gdal_progress,
     convert_raster_to_binary_mask,
     main,
     parse_comparison_expression,
@@ -181,6 +182,50 @@ class RasterToBinaryMaskTest(unittest.TestCase):
                 "classification source", mask.tags(1)["ecological_role"]
             )
         self.assertTrue(summary.cog)
+
+    def test_gdal_cog_progress_reaches_one_hundred_percent(self) -> None:
+        """Forward GDAL's completion callback into a dedicated tqdm stage."""
+
+        class FakeDataset:
+            def FlushCache(self) -> None:
+                pass
+
+        class FakeGdal:
+            callback = None
+
+            @classmethod
+            def TranslateOptions(cls, **kwargs):
+                cls.callback = kwargs["callback"]
+                return kwargs
+
+            @classmethod
+            def Translate(cls, _destination, _source, *, options):
+                self.assertIs(options["callback"], cls.callback)
+                cls.callback(0.25, "", None)
+                cls.callback(0.75, "", None)
+                cls.callback(1.0, "", None)
+                return FakeDataset()
+
+        progress = unittest.mock.MagicMock()
+        progress.n = 0.0
+
+        def update_progress(amount: float) -> None:
+            progress.n += amount
+
+        progress.update.side_effect = update_progress
+        with patch(
+            "scripts.utils.raster_to_binary_mask.tqdm",
+            return_value=progress,
+        ):
+            _create_cog_with_gdal_progress(
+                FakeGdal,
+                self.temporary_path / "intermediate.tif",
+                self.temporary_path / "mask.tif",
+                True,
+            )
+
+        self.assertEqual(100.0, progress.n)
+        progress.close.assert_called_once_with()
 
     def test_cli_requires_overwrite_for_an_existing_output(self) -> None:
         """Exercise the command interface and protect an existing destination."""
