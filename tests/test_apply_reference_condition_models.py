@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,8 @@ from scripts.apply_reference_condition_models import (
     STATUS_NODATA,
     STATUS_OUTSIDE_TARGET,
     STATUS_PREDICTED,
+    build_reference_departure_calibration,
+    load_response_models,
     run_reference_condition_inference,
 )
 from scripts.fit_grassland_integrity_parameters import (
@@ -67,6 +70,23 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 }
             ),
             encoding="utf-8",
+        )
+        self._create_reference_prediction_table()
+
+    def _create_reference_prediction_table(self) -> None:
+        """Write a calibration table with an exact weighted reference CDF."""
+
+        pd.DataFrame(
+            {
+                "reference_site": [1, 1, 1, 1, 1, 0],
+                "area_weight_m2": [1_000, 1_000, 1_000, 1_000, 2_000, 1_000_000],
+                "d02_standardized_deviation_oof": [-1, -1, 1, 1, 0, 100],
+                "d11_standardized_deviation_oof": [-1, 1, -1, 1, 0, 100],
+            }
+        ).to_parquet(
+            self.model_run_directory / "ecological_response_predictions.parquet",
+            compression="zstd",
+            index=False,
         )
 
     def _create_models(self) -> dict[str, dict[str, object]]:
@@ -201,6 +221,35 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 destination.set_band_description(band_index, band_name)
         return source_values
 
+    def test_calibrates_weighted_reference_distance_and_percentile(self) -> None:
+        """Use only weighted reference rows for covariance and empirical CDF."""
+
+        _, response_models, _ = load_response_models(self.model_run_directory)
+        calibration = build_reference_departure_calibration(
+            self.model_run_directory,
+            response_models,
+            covariance_shrinkage=0.10,
+        )
+
+        np.testing.assert_allclose(calibration.reference_mean_vector, [0.0, 0.0])
+        np.testing.assert_allclose(
+            calibration.reference_covariance_matrix,
+            np.diag([2.0 / 3.0, 2.0 / 3.0]),
+        )
+        mahalanobis_distances = calibration.calculate_mahalanobis_distances(
+            np.array([[0.5, -0.5]], dtype=np.float64)
+        )
+        np.testing.assert_allclose(mahalanobis_distances, [math.sqrt(0.75)])
+        np.testing.assert_allclose(
+            calibration.calculate_reference_departure_percentiles(
+                mahalanobis_distances
+            ),
+            [1.0 / 3.0],
+        )
+        self.assertEqual(5, calibration.reference_row_count)
+        self.assertEqual(5, calibration.complete_reference_row_count)
+        self.assertEqual(6_000.0, calibration.complete_reference_area_m2)
+
     def test_writes_aligned_response_stacks_and_streaming_report(self) -> None:
         """Calculate expected, raw, and standardized values in raster windows."""
 
@@ -241,6 +290,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             summary.standardized_deviation_path.name,
         )
         self.assertEqual(
+            "synthetic_prairie_reference_departure_percentile.tif",
+            summary.departure_percentile_path.name,
+        )
+        self.assertEqual(
             "synthetic_prairie_inference_status.tif",
             summary.inference_status_path.name,
         )
@@ -248,8 +301,16 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "synthetic_prairie_aggregate_standardized_deviation.png",
             summary.aggregate_deviation_figure_path.name,
         )
+        self.assertEqual(
+            "synthetic_prairie_reference_departure_percentile.png",
+            summary.departure_percentile_figure_path.name,
+        )
         self.assertGreater(
             summary.aggregate_deviation_figure_path.stat().st_size,
+            1_000,
+        )
+        self.assertGreater(
+            summary.departure_percentile_figure_path.stat().st_size,
             1_000,
         )
         with rasterio.open(summary.expected_reference_path) as expected_source:
@@ -265,6 +326,17 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             deviations = deviation_source.read(masked=True)
         with rasterio.open(summary.standardized_deviation_path) as standardized_source:
             standardized = standardized_source.read(masked=True)
+        with rasterio.open(summary.departure_percentile_path) as percentile_source:
+            percentiles = percentile_source.read(1, masked=True)
+            self.assertEqual(self.transform, percentile_source.transform)
+            self.assertEqual(
+                "reference_departure_percentile",
+                percentile_source.descriptions[0],
+            )
+            self.assertEqual(
+                "reference_condition_departure_percentile",
+                percentile_source.tags()["artifact_type"],
+            )
         with rasterio.open(summary.inference_status_path) as status_source:
             status = status_source.read()
 
@@ -289,6 +361,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertAlmostEqual(0.5, float(standardized[0, row, column]), places=5)
         self.assertAlmostEqual(-2.0, float(deviations[1, row, column]), places=5)
         self.assertAlmostEqual(-0.5, float(standardized[1, row, column]), places=5)
+        self.assertAlmostEqual(1.0 / 3.0, float(percentiles[row, column]), places=5)
+        self.assertTrue(bool(percentiles.mask[1, 1]))
+        self.assertTrue(bool(percentiles.mask[2, 2]))
+        self.assertTrue(bool(percentiles.mask[0, 2]))
 
         self.assertEqual(STATUS_INSUFFICIENT_PREDICTORS, status[0, 0, 0])
         self.assertEqual(4, status[1, 0, 0])
@@ -303,8 +379,50 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertIn("Synthetic Prairie", report)
         self.assertIn("mean pixel-level `sum(abs(z_j))`", report)
         self.assertIn("fixed linear scale", report)
+        self.assertIn("Multivariate reference-departure percentile", report)
+        self.assertIn("farther from the reference center than 95%", report)
         self.assertIsNone(metadata["grassland_mask"])
         self.assertEqual(18, metadata["responses"][0]["statistics"]["deviation_pixels"])
+        self.assertEqual(16, summary.departure_percentile_pixels)
+        self.assertEqual(16, metadata["coverage"]["departure_percentile_pixels"])
+        self.assertEqual(
+            ["d02", "d11"],
+            metadata["reference_departure_calibration"]["response_bands"],
+        )
+        self.assertEqual(
+            5,
+            metadata["reference_departure_calibration"][
+                "complete_reference_rows"
+            ],
+        )
+        self.assertEqual(
+            1.0 / 3.0,
+            metadata["reference_departure_percentile"]["statistics"]["mean"],
+        )
+        self.assertEqual(
+            1.0,
+            metadata["reference_departure_percentile"]["figure"][
+                "color_scale_upper_value"
+            ],
+        )
+        self.assertEqual(
+            "#5E2B97",
+            metadata["reference_departure_percentile"]["figure"][
+                "reference_color"
+            ],
+        )
+        self.assertEqual(
+            "#FFFFFF",
+            metadata["reference_departure_percentile"]["figure"][
+                "reference_outline_color"
+            ],
+        )
+        self.assertEqual(
+            0.4,
+            metadata["reference_departure_percentile"]["figure"][
+                "reference_outline_width_points"
+            ],
+        )
         self.assertEqual(
             16,
             metadata["aggregate_deviation_figure"]["contributing_source_pixels"],
@@ -377,7 +495,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             expected = expected_source.read(masked=True)
         with rasterio.open(summary.inference_status_path) as status_source:
             status = status_source.read()
+        with rasterio.open(summary.departure_percentile_path) as percentile_source:
+            percentiles = percentile_source.read(1, masked=True)
         self.assertTrue(bool(expected.mask[0, 2, 3]))
+        self.assertTrue(bool(percentiles.mask[2, 3]))
         self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 2, 3])
         self.assertEqual(STATUS_NODATA, status[1, 2, 3])
         self.assertNotIn(
