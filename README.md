@@ -55,6 +55,47 @@ python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
 
 Use `--no-location-figure` when only the in-memory data and text report are needed.
 
+## Convert a numeric raster to a binary mask
+
+Convert one byte, integer, or floating-point raster band into a single-band 0/1
+GeoTIFF with the same width, height, CRS, transform, and pixel alignment as the
+source:
+
+```powershell
+python scripts/utils/raster_to_binary_mask.py `
+  data\continuous_value.tif `
+  outputs\masks\value_at_least_80.tif `
+  ">=80"
+```
+
+The comparison is required and must use one of `>`, `<`, `>=`, `<=`, or `==`
+followed by a number. Signed values, decimals, and scientific notation are accepted,
+for example `">-2.5"`, `"<=0.25"`, and `">=1e-3"`. Quote the expression so the
+shell does not interpret `<` or `>` as redirection. Equality is exact, including for
+floating-point inputs.
+
+The output uses `uint8` values with one-bit storage, 512-pixel tiles, ZSTD
+compression, and BigTIFF when needed. Source nodata, masked, NaN, and infinite pixels
+become valid output zeros, so every output pixel is strictly `0` or `1`. Processing is
+windowed and does not load the complete raster into memory.
+
+Add `--cog` to copy the completed mask through GDAL's Cloud Optimized GeoTIFF driver,
+also using ZSTD compression and nearest-neighbor mask overviews:
+
+```powershell
+python scripts/utils/raster_to_binary_mask.py `
+  D:\eolab_data\nat_semi_grassland_p\nat_semi_grassland_p_2018.tif `
+  outputs\masks\nat_semi_grassland_p_2018_80.tif `
+  ">=80" `
+  --cog
+```
+
+COG creation uses a temporary tiled GeoTIFF in the output directory, so that volume
+must have room for the intermediate and final compressed files during conversion.
+Use `--band` for a band other than one, `--window-size-pixels` to tune memory and I/O,
+`--overwrite` to replace an existing output only after validation succeeds, and
+`--no-progress` to suppress progress output.
+
 ## Fit ecological-response reference conditions
 
 Fit separate additive models for the ecological responses in bands d02-d19. The
