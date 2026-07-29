@@ -2,6 +2,47 @@
 
 First-pass local analysis scripts for raster stacks exported from Google Earth Engine.
 
+## Cache Earth Engine raster tiles for an AOI
+
+Fetch the 39-band raster stack directly from Earth Engine for a WGS84 GeoJSON AOI
+without retaining a complete ecoregion export. Authenticate the Earth Engine Python
+client once, then supply the Cloud project registered for Earth Engine use:
+
+```powershell
+earthengine authenticate
+
+python scripts/fetch_gee_raster_tiles.py `
+  data\aoi\montana_valley_and_foothill.geojson `
+  2018 `
+  --project ecoshard-202922
+```
+
+The script constructs the same `d01-d39` layers as
+`gee_apps/nhi_raster_export_app.js`. It covers the AOI with globally aligned 128 by
+128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area projection
+(`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth Engine's
+`computePixels` endpoint computes only missing tiles, and overlapping AOI requests
+reuse the same cache files. The complete stack is available for 2015 through 2019;
+the current reference-condition model expects 2018 band names.
+
+Cached GeoTIFFs are stored by year and reference-threshold configuration under
+`data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
+grid, source datasets, data year, exact band schema, thresholds, tile bounds and
+transform, pixel size, fetch timestamp, file size, SHA-256 checksum, and AOI request
+history. A tile is entered into the manifest only after its temporary download has
+passed CRS, alignment, dimensions, band-name, and checksum validation.
+
+Repeating a request validates and reuses existing files. Use `--refresh` to replace
+every intersecting tile. The reference-site defaults match the Earth Engine app and
+can be changed with `--grassland-probability-threshold`, `--hmi-threshold`, and
+`--hii-threshold`; each distinct configuration receives a separate cache namespace.
+The namespace also includes a stack-definition version so later changes to a source
+or layer calculation cannot silently reuse tiles produced by an older definition.
+The command reports AOI area, requested tiles, cache hits, downloads, transferred
+bytes, failures, and manifest location. A cache-validation progress bar first checks
+every intersecting grid. A second tqdm bar then reports processed, cached,
+downloaded, and failed grid counts while Earth Engine requests run.
+
 ## Load one ecoregion GeoTIFF
 
 Load every band and pixel from one multiband ecoregion export into memory and print
