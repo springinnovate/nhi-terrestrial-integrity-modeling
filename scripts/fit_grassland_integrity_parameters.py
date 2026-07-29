@@ -21,10 +21,13 @@ from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
 if __package__:
+    from .raster_stack_config import (
+        DEFAULT_RASTER_STACK_CONFIG_PATH,
+        RasterStackConfiguration,
+        load_raster_stack_configuration,
+    )
     from .reference_condition_utils import (
-        ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
-        PREDICTOR_DISPLAY_NAMES,
         SPATIAL_FOLD_COLORS,
         ReferenceConditionConfiguration,
         calculate_imputation_values,
@@ -34,10 +37,13 @@ if __package__:
         weighted_quantiles,
     )
 else:
+    from raster_stack_config import (
+        DEFAULT_RASTER_STACK_CONFIG_PATH,
+        RasterStackConfiguration,
+        load_raster_stack_configuration,
+    )
     from reference_condition_utils import (
-        ENVIRONMENTAL_BAND_PATTERN,
         FIGURE_DPI,
-        PREDICTOR_DISPLAY_NAMES,
         SPATIAL_FOLD_COLORS,
         ReferenceConditionConfiguration,
         calculate_imputation_values,
@@ -50,27 +56,6 @@ else:
 
 DEFAULT_MINIMUM_RESPONSE_COVERAGE = 0.50
 DEFAULT_RIDGE_ALPHA = 1.0
-RESPONSE_BAND_PATTERN = re.compile(r"^y2018_d(0[2-9]|1[0-9])_")
-RESPONSE_DISPLAY_NAMES = {
-    2: "NDVI 95th percentile",
-    3: "NDVI median",
-    4: "Growing-season length 1",
-    5: "Growing-season length 2",
-    6: "Green-up timing 1",
-    7: "Green-up timing 2",
-    8: "Short vegetation height",
-    9: "Tree cover",
-    10: "Non-tree vegetation cover",
-    11: "Bare ground",
-    12: "Maximum leaf area index",
-    13: "Leaf area index variability",
-    14: "Mean FPAR",
-    15: "FPAR variability",
-    16: "Maximum FPAR variability",
-    17: "Number of growing seasons",
-    18: "Net primary productivity",
-    19: "Gross primary productivity",
-}
 REGRESSION_METRIC_NAMES = (
     "weighted_r2",
     "weighted_rmse",
@@ -125,6 +110,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("sample_parquet", type=Path, help="Spatial sample Parquet.")
     parser.add_argument(
+        "--stack-configuration",
+        type=Path,
+        default=DEFAULT_RASTER_STACK_CONFIG_PATH,
+        help=(
+            "TOML raster-stack definition used to select responses and predictors. "
+            f"Default: {DEFAULT_RASTER_STACK_CONFIG_PATH}."
+        ),
+    )
+    parser.add_argument(
         "--output-directory",
         type=Path,
         help=(
@@ -136,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help=(
             "Response bands to fit, such as d02 d11 d18, or full column names. "
-            "Defaults to every 2018 response band d02-d19."
+            "Defaults to every available band assigned the response role in TOML."
         ),
     )
     parser.add_argument(
@@ -156,29 +150,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _response_columns_by_band(columns: Sequence[str]) -> dict[int, str]:
-    """Map every available 2018 ecological-response band to its column.
-
-    Args:
-        columns (Sequence[str]): Column names from the ecoregion sample table.
-
-    Returns:
-        dict[int, str]: Response column name keyed by its d02-d19 band number.
-    """
-
-    response_columns: dict[int, str] = {}
-    for column_name in columns:
-        match = RESPONSE_BAND_PATTERN.match(column_name)
-        if not match:
-            continue
-        band_number = int(match.group(1))
-        response_columns[band_number] = column_name
-    return response_columns
-
-
 def resolve_response_names(
     columns: Sequence[str],
     requested_responses: Sequence[str] | None,
+    stack_configuration: RasterStackConfiguration,
 ) -> tuple[str, ...]:
     """Resolve dNN aliases or full names to ordered response columns.
 
@@ -186,18 +161,19 @@ def resolve_response_names(
         columns (Sequence[str]): Column names from the ecoregion sample table.
         requested_responses (Sequence[str] | None): Requested dNN aliases or
             complete response column names. ``None`` selects every response.
+        stack_configuration (RasterStackConfiguration): Band-role contract.
 
     Returns:
         tuple[str, ...]: Unique response column names in requested order.
 
     Raises:
-        ValueError: If any requested response is not a d02-d19 alias or known
+        ValueError: If any requested response is not a configured dNN alias or known
             response column.
     """
 
-    response_columns = _response_columns_by_band(columns)
+    response_columns = stack_configuration.columns_with_role(columns, "response")
     if not requested_responses:
-        return tuple(response_columns[band] for band in sorted(response_columns))
+        return tuple(response_columns.values())
 
     column_lookup = {name.lower(): name for name in response_columns.values()}
     resolved_names = []
@@ -206,13 +182,19 @@ def resolve_response_names(
         if normalized in column_lookup:
             response_name = column_lookup[normalized]
         else:
-            band_match = re.fullmatch(r"d?(0?[2-9]|1[0-9])", normalized)
+            band_match = re.fullmatch(r"d?(\d+)", normalized)
             if not band_match:
                 raise ValueError(
-                    f"Unknown response '{requested_response}'. Use d02-d19 or a "
-                    "full 2018 response column name."
+                    f"Unknown response '{requested_response}'. Use a configured "
+                    "dNN alias or complete response column name."
                 )
-            response_name = response_columns[int(band_match.group(1))]
+            response_identifier = f"d{int(band_match.group(1)):02d}"
+            if response_identifier not in response_columns:
+                raise ValueError(
+                    f"Response '{requested_response}' is not available in the "
+                    "configured sample columns."
+                )
+            response_name = response_columns[response_identifier]
         if response_name not in resolved_names:
             resolved_names.append(response_name)
     return tuple(resolved_names)
@@ -357,17 +339,19 @@ def summarize_response_coverage(
     response_names: Sequence[str],
     selected_response_names: Sequence[str],
     configuration: IntegrityConfiguration,
+    stack_configuration: RasterStackConfiguration,
 ) -> pd.DataFrame:
     """Determine which response bands can support every spatial fold.
 
     Args:
         prepared_table (pandas.DataFrame): Spatially folded sample with
             reference labels, area weights, and response columns.
-        response_names (Sequence[str]): All d02-d19 response columns to assess.
+        response_names (Sequence[str]): Configured response columns to assess.
         selected_response_names (Sequence[str]): Response columns requested for
             model fitting.
         configuration (IntegrityConfiguration): Coverage, spline, and fold
             requirements used to screen responses.
+        stack_configuration (RasterStackConfiguration): Response metadata.
 
     Returns:
         pandas.DataFrame: One screening record per response, including coverage,
@@ -384,8 +368,7 @@ def summarize_response_coverage(
     minimum_training_rows = max(2, configuration.spline_knot_count)
     records = []
     for response_name in response_names:
-        response_match = RESPONSE_BAND_PATTERN.match(response_name)
-        band_number = int(response_match.group(1))
+        response_definition = stack_configuration.band_for_column(response_name)
         finite_response = np.isfinite(
             pd.to_numeric(prepared_table[response_name], errors="coerce")
         )
@@ -443,8 +426,8 @@ def summarize_response_coverage(
         records.append(
             {
                 "response": response_name,
-                "response_band": f"d{band_number:02d}",
-                "display_name": RESPONSE_DISPLAY_NAMES[band_number],
+                "response_band": response_definition.identifier,
+                "display_name": response_definition.display_name,
                 "selected": response_name in selected_names,
                 "status": status,
                 "defined_reference_rows": int(np.count_nonzero(defined_reference)),
@@ -468,13 +451,14 @@ def fit_response_gam(
     categorical_predictor_name: str,
     imputation_values: dict[str, float],
     configuration: IntegrityConfiguration,
+    stack_configuration: RasterStackConfiguration,
 ) -> dict[str, object]:
     """Fit one regularized additive reference-condition regression.
 
     Args:
         training_table (pandas.DataFrame): Reference rows used to fit the
             response model, including predictors, response, and area weights.
-        response_name (str): Full 2018 ecological-response column name.
+        response_name (str): Full ecological-response column name.
         continuous_predictor_names (tuple[str, ...]): Environmental predictors
             represented by independent cubic spline terms.
         categorical_predictor_name (str): Landform predictor represented by
@@ -482,6 +466,8 @@ def fit_response_gam(
         imputation_values (dict[str, float]): Training-derived replacement value
             for each predictor.
         configuration (IntegrityConfiguration): Spline and ridge settings.
+        stack_configuration (RasterStackConfiguration): Response and predictor
+            display metadata.
 
     Returns:
         dict[str, object]: Portable model bundle containing response metadata,
@@ -526,14 +512,25 @@ def fit_response_gam(
         training_table[response_name].to_numpy(dtype=np.float64),
         sample_weight=fitting_weights,
     )
-    response_match = RESPONSE_BAND_PATTERN.match(response_name)
-    band_number = int(response_match.group(1))
+    response_definition = stack_configuration.band_for_column(response_name)
+    predictor_display_names = {
+        predictor_name: stack_configuration.band_for_column(
+            predictor_name
+        ).display_name
+        for predictor_name in predictor_names
+    }
     return {
         "artifact_type": "grassland_reference_condition_additive_model",
         "format_version": 1,
         "response": response_name,
-        "response_band": f"d{band_number:02d}",
-        "display_name": RESPONSE_DISPLAY_NAMES[band_number],
+        "response_band": response_definition.identifier,
+        "display_name": response_definition.display_name,
+        "predictor_display_names": predictor_display_names,
+        "raster_stack_name": stack_configuration.name,
+        "raster_stack_version": stack_configuration.version,
+        "raster_stack_configuration_sha256": (
+            stack_configuration.configuration_sha256
+        ),
         "continuous_predictor_names": continuous_predictor_names,
         "categorical_predictor_name": categorical_predictor_name,
         "imputation_values": imputation_values,
@@ -1126,8 +1123,7 @@ def create_partial_response_figure(
         squeeze=False,
     )
     for axis, predictor_name in zip(axes.flat, predictor_names, strict=False):
-        band_match = ENVIRONMENTAL_BAND_PATTERN.match(predictor_name)
-        display_name = PREDICTOR_DISPLAY_NAMES[int(band_match.group(1))]
+        display_name = fitted_model["predictor_display_names"][predictor_name]
         if predictor_name == categorical_name:
             values = np.sort(reference_training_table[predictor_name].dropna().unique())
             response_table = pd.DataFrame(
@@ -1236,7 +1232,7 @@ def write_model_selection_report(
         "",
         (
             "Each fitted GAM learns the expected ecological response at supplied "
-            "reference sites from 2018 environmental predictors d20-d39. The models "
+            "reference sites from the configured environmental predictors. The models "
             "are trained only on reference rows. Out-of-fold expectations are then "
             "generated for every assessment row whose environmental predictors are "
             "usable."
@@ -1332,8 +1328,8 @@ def write_model_selection_report(
             (
                 "HMI and HII are not model predictors in this workflow. They may have "
                 "contributed to how the supplied reference sites were defined, but the "
-                "response GAMs themselves use only the retained d20-d39 environmental "
-                "bands."
+                "response GAMs themselves use only predictors assigned that role in "
+                "the raster-stack TOML configuration."
             ),
             "",
             "## Figures",
@@ -1353,6 +1349,7 @@ def run_integrity_parameter_gams(
     sample_path: Path,
     output_directory: Path,
     configuration: IntegrityConfiguration,
+    stack_configuration: RasterStackConfiguration,
     requested_responses: Sequence[str] | None = None,
     show_progress: bool = True,
     ecoregion_name: str | None = None,
@@ -1367,6 +1364,8 @@ def run_integrity_parameter_gams(
             models, reports, and figures.
         configuration (IntegrityConfiguration): Predictor screening, spatial
             validation, response screening, spline, and ridge settings.
+        stack_configuration (RasterStackConfiguration): Configured response and
+            predictor roles and display metadata.
         requested_responses (Sequence[str] | None): Optional dNN aliases or
             complete response column names. ``None`` fits every response that
             passes screening.
@@ -1397,21 +1396,32 @@ def run_integrity_parameter_gams(
     print(f"Input sample: {resolved_sample_path}")
     print(f"Output directory: {resolved_output_directory}")
     print(f"Ecoregion: {resolved_ecoregion_name}")
+    print(f"Raster stack: {stack_configuration.path}")
     sample_table = pd.read_parquet(resolved_sample_path)
     print(
         f"Loaded {len(sample_table):,} sampled rows x {sample_table.shape[1]:,} columns"
     )
 
-    all_response_columns = _response_columns_by_band(sample_table.columns)
-    selected_response_names = resolve_response_names(
-        sample_table.columns, requested_responses
+    all_response_columns = stack_configuration.columns_with_role(
+        sample_table.columns,
+        "response",
     )
-    prepared = prepare_reference_condition_data(sample_table, configuration)
+    selected_response_names = resolve_response_names(
+        sample_table.columns,
+        requested_responses,
+        stack_configuration,
+    )
+    prepared = prepare_reference_condition_data(
+        sample_table,
+        configuration,
+        stack_configuration,
+    )
     response_coverage = summarize_response_coverage(
         prepared.table,
-        tuple(all_response_columns[band] for band in sorted(all_response_columns)),
+        tuple(all_response_columns.values()),
         selected_response_names,
         configuration,
+        stack_configuration,
     )
     fitted_response_names = tuple(
         response_coverage.loc[response_coverage["status"].eq("fit"), "response"]
@@ -1465,9 +1475,8 @@ def run_integrity_parameter_gams(
         disable=not show_progress,
     )
     for response_name in fitted_response_names:
-        response_match = RESPONSE_BAND_PATTERN.match(response_name)
-        band_number = int(response_match.group(1))
-        response_band = f"d{band_number:02d}"
+        response_definition = stack_configuration.band_for_column(response_name)
+        response_band = response_definition.identifier
         finite_response = np.isfinite(
             pd.to_numeric(prepared.table[response_name], errors="coerce")
         )
@@ -1501,6 +1510,7 @@ def run_integrity_parameter_gams(
                 prepared.categorical_predictor_name,
                 imputation_values,
                 configuration,
+                stack_configuration,
             )
             fold_expected = predict_expected_response(
                 fitted_model, prepared.table.loc[assessment_rows]
@@ -1517,7 +1527,7 @@ def run_integrity_parameter_gams(
                 {
                     "response": response_name,
                     "response_band": response_band,
-                    "display_name": RESPONSE_DISPLAY_NAMES[band_number],
+                    "display_name": response_definition.display_name,
                     "spatial_fold": spatial_fold,
                     "training_reference_rows": int(np.count_nonzero(training_rows)),
                     "validation_reference_rows": int(
@@ -1570,7 +1580,7 @@ def run_integrity_parameter_gams(
         metric_record: dict[str, object] = {
             "response": response_name,
             "response_band": response_band,
-            "display_name": RESPONSE_DISPLAY_NAMES[band_number],
+            "display_name": response_definition.display_name,
             "reference_area_coverage": float(coverage_row["reference_area_coverage"]),
             "validation_reference_rows": int(np.count_nonzero(reference_validation)),
             "validation_reference_area_m2": float(
@@ -1609,6 +1619,7 @@ def run_integrity_parameter_gams(
             prepared.categorical_predictor_name,
             final_imputation_values,
             configuration,
+            stack_configuration,
         )
         final_model["reference_residual_rmse_oof"] = residual_scale
         final_model["standardized_deviation_interpretation"] = (
@@ -1733,13 +1744,21 @@ def run_integrity_parameter_gams(
         "input_sample": str(resolved_sample_path),
         "ecoregion_name": resolved_ecoregion_name,
         "configuration": asdict(configuration),
+        "raster_stack_configuration": {
+            "path": str(stack_configuration.path),
+            "name": stack_configuration.name,
+            "version": stack_configuration.version,
+            "sha256": stack_configuration.configuration_sha256,
+            "datasets": dict(stack_configuration.datasets),
+            "bands": [asdict(band) for band in stack_configuration.bands],
+        },
         "model": {
             "family": "one regularized additive ridge regression per response",
             "training_population": "usable supplied reference-site rows only",
             "continuous_terms": "independent cubic spline bases",
             "categorical_terms": "one-hot landform indicators",
             "interactions": False,
-            "predictor_bands": "2018 d20-d39 environmental bands",
+            "predictor_bands": "bands assigned the predictor role in TOML",
             "human_impact_predictors": False,
             "output_interpretation": (
                 "expected reference condition and signed observed-minus-expected "
@@ -1817,6 +1836,9 @@ def main() -> None:
 
     args = parse_args()
     configuration = IntegrityConfiguration()
+    stack_configuration = load_raster_stack_configuration(
+        args.stack_configuration
+    )
     output_directory = args.output_directory or (
         Path("outputs") / "integrity_parameters" / args.sample_parquet.stem
     )
@@ -1824,6 +1846,7 @@ def main() -> None:
         args.sample_parquet,
         output_directory,
         configuration,
+        stack_configuration,
         requested_responses=args.responses,
         show_progress=not args.no_progress,
         ecoregion_name=args.ecoregion_name,

@@ -32,6 +32,7 @@ from scripts.fit_grassland_integrity_parameters import (
     fit_response_gam,
     predict_expected_response,
 )
+from scripts.raster_stack_config import load_raster_stack_configuration
 
 
 class ApplyReferenceConditionModelsTest(unittest.TestCase):
@@ -58,6 +59,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "y2018_d11_response",
         )
         self.response_rmse = {"d02": 2.0, "d11": 4.0}
+        self.stack_configuration = load_raster_stack_configuration()
         self.models = self._create_models()
         self.raster_path = self.temporary_path / "synthetic_ecoregion.tif"
         self.transform = from_origin(-110.0, 45.0, 0.01, 0.01)
@@ -134,6 +136,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     for predictor_name in self.predictor_names
                 },
                 configuration,
+                self.stack_configuration,
             )
             model["reference_residual_rmse_oof"] = self.response_rmse[response_band]
             model["standardized_deviation_interpretation"] = (

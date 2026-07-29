@@ -4,7 +4,7 @@ First-pass local analysis scripts for raster stacks exported from Google Earth E
 
 ## Cache Earth Engine raster tiles for an AOI
 
-Fetch the 39-band raster stack directly from Earth Engine for a WGS84 GeoJSON AOI
+Fetch the configured raster stack directly from Earth Engine for a WGS84 GeoJSON AOI
 without retaining a complete ecoregion export. Authenticate the Earth Engine Python
 client once, then supply the Cloud project registered for Earth Engine use:
 
@@ -17,27 +17,47 @@ python scripts/fetch_gee_raster_tiles.py `
   --project ecoshard-202922
 ```
 
-The script constructs the same `d01-d39` layers as
-`gee_apps/nhi_raster_export_app.js`. It covers the AOI with globally aligned 128 by
-128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area projection
-(`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth Engine's
-`computePixels` endpoint computes only missing tiles, and overlapping AOI requests
-reuse the same cache files. The complete stack is available for 2015 through 2019;
-the current reference-condition model expects 2018 band names.
+The default `config/reference_condition_raster_stack.toml` constructs the same
+`d01-d39` layers as `gee_apps/nhi_raster_export_app.js`. It covers the AOI with
+globally aligned 128 by 128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area
+projection (`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth
+Engine's `computePixels` endpoint computes only missing tiles, and overlapping AOI
+requests reuse the same cache files. The default complete stack is available for 2015
+through 2019.
+
+TOML is a configuration format similar in purpose to YAML, with explicit sections,
+key-value pairs, and repeated `[[bands]]` tables. The stack file controls its name and
+version, supported years, cache grid, reference defaults, Earth Engine dataset IDs,
+and ordered bands. Each band declares a stable ID, Python computation key, output
+suffix, display name, pipeline role (`reference`, `response`, or `predictor`), data
+type, and source aliases. Python still implements calculations such as phenology and
+growing-season aggregation. TOML selects and orders those implementations.
+
+Use another definition throughout fetching, sampling, and fitting with the same
+option:
+
+```powershell
+python scripts/fetch_gee_raster_tiles.py `
+  data\aoi\montana_valley_and_foothill.geojson `
+  2018 `
+  --project ecoshard-202922 `
+  --stack-configuration config\reference_condition_raster_stack.toml
+```
 
 Cached GeoTIFFs are stored by year and reference-threshold configuration under
 `data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
 grid, source datasets, data year, exact band schema, thresholds, tile bounds and
 transform, pixel size, fetch timestamp, file size, SHA-256 checksum, and AOI request
-history. A tile is entered into the manifest only after its temporary download has
-passed CRS, alignment, dimensions, band-name, and checksum validation.
+history, configuration path, and normalized configuration SHA-256. A tile is entered
+into the manifest only after its temporary download has passed CRS, alignment,
+dimensions, band-name, and checksum validation.
 
 Repeating a request validates and reuses existing files. Use `--refresh` to replace
 every intersecting tile. The reference-site defaults match the Earth Engine app and
 can be changed with `--grassland-probability-threshold`, `--hmi-threshold`, and
 `--hii-threshold`; each distinct configuration receives a separate cache namespace.
-The namespace also includes a stack-definition version so later changes to a source
-or layer calculation cannot silently reuse tiles produced by an older definition.
+The namespace includes the stack version and effective configuration hash so changing
+a source, grid, role, label, or band order cannot silently reuse older tiles.
 The command reports AOI area, requested tiles, cache hits, downloads, transferred
 bytes, failures, and manifest location. A cache-validation progress bar first checks
 every intersecting grid. A second tqdm bar then reports processed, cached,
@@ -54,6 +74,9 @@ sample in `outputs/samples` and a 300 DPI world locator map in `outputs/figures`
 python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif
 ```
 
+Pass the same `--stack-configuration` used for fetching when using a non-default
+definition.
+
 The importable `RasterPixelData` object retains a value cube and a separate per-band
 validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
 `pixel_validity()` methods expose pixel-by-band views for later stratification without
@@ -61,14 +84,14 @@ copying the arrays. Use `--no-band-report` for only the dataset-level summary or
 `--no-progress` to suppress tqdm output. The first map run may download Cartopy's
 Natural Earth 1:110 million land geometry.
 
-The spatial sample uses the first Grassland Reference Sites band as a binary class,
-with `1` representing a reference site and `0` representing a non-reference site.
-Duplicate reference bands are excluded from the predictor table. Eligible pixels are
-assigned to 25 km square blocks in an equal-area coordinate system, then up to 100
-pixels of each reference-site class are selected independently from every block. The table
-records source coordinates, block IDs, pixel area, sampling probabilities, sampling
-weights, area weights, and every non-reference raster band. Missing predictor values
-remain missing.
+The spatial sample uses the first band assigned the TOML `reference` role as a binary
+class, with `1` representing a reference site and `0` representing a non-reference
+site. Copies of that reference band from additional years are excluded from the
+predictor table. Eligible pixels are assigned to 25 km square blocks in an equal-area
+coordinate system, then up to 100 pixels of each reference-site class are selected
+independently from every block. The table records source coordinates, block IDs,
+pixel area, sampling probabilities, sampling weights, area weights, and every
+non-reference raster band. Missing predictor values remain missing.
 
 Sampling is reproducible with random seed 42. Override the defaults or output path as
 needed:
@@ -142,18 +165,23 @@ are installed. The portable Rasterio fallback reports bytes written instead. Use
 
 ## Fit ecological-response reference conditions
 
-Fit separate additive models for the ecological responses in bands d02-d19. The
-workflow trains only on supplied reference rows. Each model estimates the response
-expected at a reference site with the pixel's d20-d39 environmental conditions. HMI
-and HII are not fitted predictors.
+Fit separate additive models for bands assigned the TOML `response` role. The workflow
+trains only on supplied reference rows. Each model estimates the response expected at
+a reference site using bands assigned the `predictor` role. HMI and HII are not fitted
+predictors.
 
 ```powershell
 python scripts/fit_grassland_integrity_parameters.py `
   outputs\samples\example_spatial_sample.parquet
 ```
 
-The default run screens all 2018 response bands. Bands with no reference observations,
-too little represented-area coverage, no reference-site variation, or inadequate
+Pass the same `--stack-configuration` used for fetching and sampling. The model-run
+metadata and each serialized model record the stack name, version, and configuration
+hash.
+
+The default run screens all configured response bands, using the earliest available
+year when a sample contains repeated years. Bands with no reference observations, too
+little represented-area coverage, no reference-site variation, or inadequate
 spatial-fold support are listed with a reason and skipped. Fit a smaller candidate set
 with response-band aliases:
 
@@ -164,12 +192,12 @@ python scripts/fit_grassland_integrity_parameters.py `
 ```
 
 Each continuous response receives its own regularized additive ridge regression.
-Continuous environmental predictors enter as independent cubic splines, landform is
-categorical, and no interactions are included. The validation design combines each 4
-by 4 group of 25 km sampling blocks into a 100 km validation block. Whole validation
-blocks are assigned to one of five folds. Each model is trained on reference rows
-outside one grouped block fold, then predicts expected reference condition for every
-usable row inside that fold.
+Configured continuous predictors enter as independent cubic splines, the configured
+categorical predictor enters as one-hot categories, and no interactions are included.
+The validation design combines each 4 by 4 group of 25 km sampling blocks into a 100
+km validation block. Whole validation blocks are assigned to one of five folds. Each
+model is trained on reference rows outside one grouped block fold, then predicts
+expected reference condition for every usable row inside that fold.
 
 Predictors covering less than 80% of represented sample area are removed. Rows missing
 more than 20% of retained predictors are flagged and excluded from fitting. For every

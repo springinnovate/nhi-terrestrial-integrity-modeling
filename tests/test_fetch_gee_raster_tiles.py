@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,13 +20,12 @@ from shapely.ops import transform
 
 from scripts import fetch_gee_raster_tiles
 from scripts.fetch_gee_raster_tiles import (
-    BAND_DEFINITIONS,
     CacheGrid,
     CacheTile,
+    DEFAULT_STACK_CONFIGURATION,
     ReferenceThresholds,
     build_stack_identifier,
     cache_aoi_tiles,
-    expected_band_names,
     fetch_tile_bytes,
     select_intersecting_tiles,
 )
@@ -128,9 +128,9 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
     def test_band_schema_has_stable_d01_through_d39_names(self) -> None:
         """Expose one unique, ordered export name for every modeled band."""
 
-        band_names = expected_band_names(2018)
+        band_names = DEFAULT_STACK_CONFIGURATION.band_names(2018)
 
-        self.assertEqual(39, len(BAND_DEFINITIONS))
+        self.assertEqual(39, len(DEFAULT_STACK_CONFIGURATION.bands))
         self.assertEqual(39, len(band_names))
         self.assertEqual(39, len(set(band_names)))
         self.assertEqual(
@@ -256,6 +256,62 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.assertEqual(64, len(tile_record["sha256"]))
         self.assertEqual(2, len(manifest["requests"]))
         self.assertEqual(39, len(manifest["stacks"][stack_identifier]["bands"]))
+        self.assertEqual(
+            DEFAULT_STACK_CONFIGURATION.configuration_sha256,
+            manifest["stacks"][stack_identifier]["configuration_sha256"],
+        )
+        self.assertEqual(
+            DEFAULT_STACK_CONFIGURATION.datasets["landsat_ndvi"],
+            manifest["stacks"][stack_identifier]["datasets"]["landsat_ndvi"],
+        )
+
+    def test_writes_reduced_bands_in_configured_order(self) -> None:
+        """Use TOML-derived inclusion and ordering for downloaded GeoTIFFs."""
+
+        self.write_projected_aoi(box(100, 100, 3_900, 3_900))
+        bands_by_identifier = {
+            band.identifier: band for band in DEFAULT_STACK_CONFIGURATION.bands
+        }
+        reduced_configuration = replace(
+            DEFAULT_STACK_CONFIGURATION,
+            configuration_sha256="1" * 64,
+            bands=tuple(
+                bands_by_identifier[identifier]
+                for identifier in ("d01", "d35", "d02", "d24")
+            ),
+        )
+        self.assertNotEqual(
+            build_stack_identifier(2018, ReferenceThresholds()),
+            build_stack_identifier(
+                2018,
+                ReferenceThresholds(),
+                reduced_configuration,
+            ),
+        )
+        with patch.object(
+            fetch_gee_raster_tiles,
+            "CacheGrid",
+            return_value=self.test_grid,
+        ):
+            cache_aoi_tiles(
+                self.aoi_path,
+                2018,
+                "offline-test-project",
+                self.cache_directory,
+                ReferenceThresholds(),
+                refresh=False,
+                show_progress=False,
+                stack_configuration=reduced_configuration,
+                compute_tile=self.create_tile_bytes,
+            )
+
+        cached_tile_path = next((self.cache_directory / "tiles").rglob("*.tif"))
+        with fetch_gee_raster_tiles.rasterio.open(cached_tile_path) as source:
+            self.assertEqual(4, source.count)
+            self.assertEqual(
+                reduced_configuration.band_names(2018),
+                source.descriptions,
+            )
 
     def test_progress_reports_cache_and_processing_counts(self) -> None:
         """Display both tqdm stages and every requested live grid counter."""

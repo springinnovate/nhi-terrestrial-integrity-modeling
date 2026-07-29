@@ -29,12 +29,24 @@ from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
 if __package__:
+    from .raster_stack_config import (
+        BAND_COLUMN_PATTERN,
+        DEFAULT_RASTER_STACK_CONFIG_PATH,
+        RasterStackConfiguration,
+        load_raster_stack_configuration,
+    )
     from .reference_condition_utils import (
         DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
         EQUAL_AREA_CRS,
         infer_ecoregion_name,
     )
 else:
+    from raster_stack_config import (
+        BAND_COLUMN_PATTERN,
+        DEFAULT_RASTER_STACK_CONFIG_PATH,
+        RasterStackConfiguration,
+        load_raster_stack_configuration,
+    )
     from reference_condition_utils import (
         DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
         EQUAL_AREA_CRS,
@@ -374,6 +386,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("geotiff", type=Path, help="Multiband GeoTIFF to load.")
     parser.add_argument(
+        "--stack-configuration",
+        type=Path,
+        default=DEFAULT_RASTER_STACK_CONFIG_PATH,
+        help=(
+            "TOML raster-stack definition used to identify reference bands. "
+            f"Default: {DEFAULT_RASTER_STACK_CONFIG_PATH}."
+        ),
+    )
+    parser.add_argument(
         "--no-band-report",
         action="store_true",
         help="Skip the per-band coverage and value table.",
@@ -677,13 +698,15 @@ def create_spatial_sample(
     samples_per_class_per_block: int,
     random_seed: int,
     show_progress: bool,
+    stack_configuration: RasterStackConfiguration,
 ) -> SpatialSample:
     """Create a deterministic spatially balanced sample of raster pixels.
 
     Earth Engine masks zeroes from the exported reference-site bands. Within
     the usable predictor footprint, a defined reference value of one becomes
-    the reference class and every other pixel becomes the non-reference class. Reference and
-    non-reference pixels are sampled separately inside each equal-area block.
+    the reference class and every other pixel becomes the non-reference class.
+    Reference and non-reference pixels are sampled separately inside each
+    equal-area block.
 
     Args:
         raster: Fully loaded ecoregion raster.
@@ -692,6 +715,7 @@ def create_spatial_sample(
             reference-site class within each block.
         random_seed: Seed for reproducible sampling without replacement.
         show_progress: Whether to display tqdm progress bars.
+        stack_configuration: Configured band-role contract.
 
     Returns:
         Sample table and diagnostics describing its source population.
@@ -706,11 +730,16 @@ def create_spatial_sample(
 
     # The export repeats the same reference surface for each year. Use the
     # first copy as the response and exclude every copy from predictor columns.
+    reference_band_identifiers = {
+        band.identifier
+        for band in stack_configuration.bands
+        if band.role == "reference"
+    }
     reference_band_offsets = tuple(
         band_offset
         for band_offset, band_name in enumerate(raster.band_names)
-        if band_name.lower() == "reference_sites"
-        or band_name.lower().endswith("_grassland_reference_sites")
+        if (match := BAND_COLUMN_PATTERN.match(band_name))
+        and match.group("band_id") in reference_band_identifiers
     )
     reference_band_offset = reference_band_offsets[0]
     predictor_band_offsets = tuple(
@@ -1598,7 +1627,8 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
     )
     print(
         "Sampling cap: "
-        f"{sample.samples_per_class_per_block:,} pixels per reference-site class per block"
+        f"{sample.samples_per_class_per_block:,} pixels per reference-site class "
+        "per block"
     )
     print(f"Random seed: {sample.random_seed}")
     print(f"Eligible source pixels: {total_available:,}")
@@ -1826,6 +1856,9 @@ def main() -> None:
     """Load, report, sample, serialize, and map one ecoregion GeoTIFF."""
 
     args = parse_args()
+    stack_configuration = load_raster_stack_configuration(
+        args.stack_configuration
+    )
     raster = load_raster_pixels(
         args.geotiff,
         show_progress=not args.no_progress,
@@ -1846,6 +1879,7 @@ def main() -> None:
             args.samples_per_class_per_block,
             args.random_seed,
             not args.no_progress,
+            stack_configuration,
         )
         print_spatial_sampling_report(sample)
         table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())

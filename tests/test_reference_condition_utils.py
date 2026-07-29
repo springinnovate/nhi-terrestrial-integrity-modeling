@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from scripts.raster_stack_config import load_raster_stack_configuration
 from scripts.reference_condition_utils import (
     ReferenceConditionConfiguration,
     _equal_area_sample_coordinates,
@@ -33,6 +34,7 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
             maximum_row_missing_fraction=0.20,
             spline_knot_count=4,
         )
+        self.stack_configuration = load_raster_stack_configuration()
 
     def _create_sample_table(self) -> pd.DataFrame:
         """Create ten spatial blocks with every environmental predictor.
@@ -152,6 +154,7 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
         prepared = prepare_reference_condition_data(
             self._create_sample_table(),
             self.configuration,
+            self.stack_configuration,
         )
 
         self.assertEqual(19, len(prepared.retained_predictor_names))

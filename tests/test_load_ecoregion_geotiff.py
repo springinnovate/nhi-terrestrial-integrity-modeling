@@ -33,6 +33,7 @@ from scripts.load_ecoregion_geotiff import (
     summarize_coverage,
     write_spatial_sample_parquet,
 )
+from scripts.raster_stack_config import load_raster_stack_configuration
 
 
 class LoadEcoregionGeoTiffTest(unittest.TestCase):
@@ -44,6 +45,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.raster_path = Path(self.temporary_directory.name) / "ecoregion.tif"
+        self.stack_configuration = load_raster_stack_configuration()
 
         first_band = np.array(
             [[1.0, -9999.0, 3.0], [4.0, 5.0, 6.0]],
@@ -239,6 +241,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             samples_per_class_per_block=2,
             random_seed=7,
             show_progress=False,
+            stack_configuration=self.stack_configuration,
         )
         second_sample = create_spatial_sample(
             raster,
@@ -246,6 +249,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             samples_per_class_per_block=2,
             random_seed=7,
             show_progress=False,
+            stack_configuration=self.stack_configuration,
         )
 
         self.assertEqual(4, len(first_sample.table))
@@ -294,6 +298,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             samples_per_class_per_block=100,
             random_seed=42,
             show_progress=False,
+            stack_configuration=self.stack_configuration,
         )
         output_path = Path(self.temporary_directory.name) / "sample.parquet"
         write_summary = write_spatial_sample_parquet(
@@ -325,6 +330,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             samples_per_class_per_block=2,
             random_seed=42,
             show_progress=False,
+            stack_configuration=self.stack_configuration,
         )
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

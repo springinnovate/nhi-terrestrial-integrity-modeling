@@ -24,6 +24,7 @@ from scripts.fit_grassland_integrity_parameters import (
     run_integrity_parameter_gams,
     summarize_response_coverage,
 )
+from scripts.raster_stack_config import load_raster_stack_configuration
 from scripts.reference_condition_utils import (
     SPATIAL_FOLD_COLORS,
     prepare_reference_condition_data,
@@ -49,6 +50,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             spline_knot_count=4,
             ridge_alpha=1.0,
         )
+        self.stack_configuration = load_raster_stack_configuration()
 
     def _create_sample_table(self) -> pd.DataFrame:
         """Create ten spatial blocks with reference and background responses.
@@ -123,6 +125,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         resolved = resolve_response_names(
             sample_table.columns,
             ["d02", "11", "y2018_d18_response", "d02"],
+            self.stack_configuration,
         )
 
         self.assertEqual(
@@ -151,7 +154,11 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         """Explain why unusable response bands are skipped."""
 
         sample_table = self._create_sample_table()
-        prepared = prepare_reference_condition_data(sample_table, self.configuration)
+        prepared = prepare_reference_condition_data(
+            sample_table,
+            self.configuration,
+            self.stack_configuration,
+        )
         response_names = tuple(
             f"y2018_d{band_number:02d}_response" for band_number in range(2, 20)
         )
@@ -161,6 +168,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             response_names,
             response_names,
             self.configuration,
+            self.stack_configuration,
         ).set_index("response_band")
 
         self.assertEqual("no_reference_values", coverage.loc["d05", "status"])
@@ -254,6 +262,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
                 sample_path,
                 output_directory,
                 self.configuration,
+                self.stack_configuration,
                 requested_responses=("d02", "d11", "d17"),
                 show_progress=False,
                 create_partial_figures=True,
@@ -314,6 +323,14 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         self.assertEqual(
             "one regularized additive ridge regression per response",
             metadata["model"]["family"],
+        )
+        self.assertEqual(
+            self.stack_configuration.configuration_sha256,
+            metadata["raster_stack_configuration"]["sha256"],
+        )
+        self.assertEqual(
+            self.stack_configuration.configuration_sha256,
+            fitted_model["raster_stack_configuration_sha256"],
         )
         self.assertFalse(metadata["model"]["human_impact_predictors"])
         self.assertIn("Grassland ecological-response GAM validation", report.getvalue())

@@ -14,6 +14,11 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Patch, Rectangle
 from pyproj import Transformer
 
+if __package__:
+    from .raster_stack_config import RasterStackConfiguration
+else:
+    from raster_stack_config import RasterStackConfiguration
+
 
 DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000
 DEFAULT_VALIDATION_BLOCK_SIZE_METERS = 100_000
@@ -24,30 +29,6 @@ DEFAULT_SPLINE_KNOT_COUNT = 6
 FIGURE_DPI = 300
 EQUAL_AREA_CRS = "EPSG:8857"
 SPATIAL_FOLD_COLORS = tuple(plt.get_cmap("Set2").colors)
-ENVIRONMENTAL_BAND_PATTERN = re.compile(r"^y2018_d(2[0-9]|3[0-9])_")
-LANDFORM_BAND_NUMBER = 35
-PREDICTOR_DISPLAY_NAMES = {
-    20: "Maximum annual temperature (C)",
-    21: "Mean annual temperature (C)",
-    22: "Median annual temperature (C)",
-    23: "Minimum annual temperature (C)",
-    24: "Annual precipitation (mm)",
-    25: "Growing-season average temperature (C)",
-    26: "Growing-season average precipitation (mm/day)",
-    27: "Interannual rainfall variability (CV%, 10-year)",
-    28: "Drought mean (SPI 30-day)",
-    29: "Drought 5th percentile (SPI 30-day)",
-    30: "Fire frequency (burned months)",
-    31: "Annual variation in water presence",
-    32: "Distance to streams (m)",
-    33: "Soil organic carbon (10 cm, g/kg)",
-    34: "Soil moisture annual mean (GLDAS 10-40 cm)",
-    35: "Landform type (SRTM)",
-    36: "Topographic diversity (ALOS)",
-    37: "Annual evapotranspiration (MODIS ET, mm)",
-    38: "Average snow depth when present (GLDAS, m)",
-    39: "Average snow depth when present (SMAP, m)",
-}
 
 
 @dataclass(frozen=True)
@@ -294,6 +275,7 @@ def assign_spatial_folds(
 def prepare_reference_condition_data(
     sample_table: pd.DataFrame,
     configuration: ReferenceConditionConfiguration,
+    stack_configuration: RasterStackConfiguration,
 ) -> PreparedReferenceConditionData:
     """Select environmental predictors and prepare spatial validation rows.
 
@@ -305,6 +287,7 @@ def prepare_reference_condition_data(
     Args:
         sample_table: Table produced by ``load_ecoregion_geotiff.py``.
         configuration: Coverage, missingness, and spatial-fold settings.
+        stack_configuration: Configured predictor roles and data types.
 
     Returns:
         Prepared rows, folds, coverage diagnostics, and predictor names.
@@ -314,19 +297,28 @@ def prepare_reference_condition_data(
             predictor coverage threshold.
     """
 
-    predictor_band_numbers: dict[str, int] = {}
-    for column_name in sample_table.columns:
-        match = ENVIRONMENTAL_BAND_PATTERN.match(column_name)
-        if match:
-            predictor_band_numbers[column_name] = int(match.group(1))
-    ordered_predictor_names = tuple(
-        sorted(predictor_band_numbers, key=predictor_band_numbers.get)
+    predictor_columns = stack_configuration.columns_with_role(
+        sample_table.columns,
+        "predictor",
     )
-    categorical_predictor_name = next(
-        name
-        for name, band_number in predictor_band_numbers.items()
-        if band_number == LANDFORM_BAND_NUMBER
+    predictor_definitions = {
+        band.identifier: band
+        for band in stack_configuration.bands
+        if band.role == "predictor"
+    }
+    ordered_predictor_names = tuple(predictor_columns.values())
+    categorical_predictor_identifier = next(
+        band.identifier
+        for band in predictor_definitions.values()
+        if band.data_type == "categorical"
     )
+    categorical_predictor_name = predictor_columns[
+        categorical_predictor_identifier
+    ]
+    predictor_band_numbers = {
+        column_name: int(identifier[1:])
+        for identifier, column_name in predictor_columns.items()
+    }
 
     total_represented_area = float(sample_table["area_weight_m2"].sum())
     coverage_records = []

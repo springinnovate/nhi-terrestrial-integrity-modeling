@@ -1,0 +1,402 @@
+[stack]
+name = "nhi_reference_condition"
+version = 1
+minimum_year = 2015
+maximum_year = 2019
+reference_start_year = 2001
+reference_end_year = 2020
+era5_start_year = 1979
+interannual_rainfall_window_years = 10
+stream_upstream_area_threshold_km2 = 25
+
+[grid]
+crs = "EPSG:6933"
+pixel_size_meters = 500
+tile_size_pixels = 128
+origin_x = 0
+origin_y = 0
+
+[reference_defaults]
+grassland_probability = 80
+human_modification = 0.1
+human_influence = 0.08
+
+[datasets]
+maybe_grassland_ecoregions = "projects/ecoshard-202922/assets/nhi_assets/maybe_grassland_ecoregions_simplified_100m"
+grassland_probability = "projects/global-pasture-watch/assets/ggc-30m/v1/nat-semi-grassland_p"
+human_modification = "projects/hm-30x30/assets/output/v20240801/HMv20240801_2022s_AA_300"
+human_influence = "projects/HII/v1/hii"
+landsat_ndvi = "LANDSAT/COMPOSITES/C02/T1_L2_8DAY_NDVI"
+modis_phenology = "MODIS/061/MCD12Q2"
+short_vegetation_height = "projects/global-pasture-watch/assets/gsvh-30m/v1/short-veg-height_m"
+modis_vegetation_cover = "MODIS/061/MOD44B"
+modis_lai_fpar = "MODIS/061/MOD15A2H"
+modis_productivity = "MODIS/061/MOD17A3HGF"
+era5_daily = "ECMWF/ERA5/DAILY"
+era5_monthly = "ECMWF/ERA5/MONTHLY"
+gridmet_drought = "GRIDMET/DROUGHT"
+viirs_burned_area = "NASA/VIIRS/002/VNP64A1"
+jrc_monthly_water = "JRC/GSW1_4/MonthlyHistory"
+merit_hydro = "MERIT/Hydro/v1_0_1"
+isric_soil_organic_carbon = "projects/soilgrids-isric/soc_mean"
+gldas = "NASA/GLDAS/V021/NOAH/G025/T3H"
+smap = "NASA/SMAP/SPL4SMGP/008"
+modis_evapotranspiration = "MODIS/061/MOD16A2GF"
+srtm_landforms = "CSP/ERGo/1_0/Global/SRTM_landforms"
+alos_topographic_diversity = "CSP/ERGo/1_0/Global/ALOS_topoDiversity"
+
+[[bands]]
+id = "d01"
+computation = "grassland_reference_sites"
+suffix = "grassland_reference_sites"
+display_name = "Grassland reference sites"
+role = "reference"
+data_type = "binary"
+sources = [
+  "grassland_probability",
+  "human_modification",
+  "human_influence",
+  "maybe_grassland_ecoregions",
+]
+
+[[bands]]
+id = "d02"
+computation = "ndvi_95th_percentile"
+suffix = "ndvi_95th_percentile_across"
+display_name = "NDVI 95th percentile"
+role = "response"
+data_type = "continuous"
+sources = ["landsat_ndvi"]
+
+[[bands]]
+id = "d03"
+computation = "ndvi_median"
+suffix = "ndvi_50th_percentile_across"
+display_name = "NDVI median"
+role = "response"
+data_type = "continuous"
+sources = ["landsat_ndvi"]
+
+[[bands]]
+id = "d04"
+computation = "growing_season_length_1"
+suffix = "length_of_growing_season_1"
+display_name = "Growing-season length 1"
+role = "response"
+data_type = "continuous"
+sources = ["modis_phenology"]
+
+[[bands]]
+id = "d05"
+computation = "growing_season_length_2"
+suffix = "length_of_growing_season_2"
+display_name = "Growing-season length 2"
+role = "response"
+data_type = "continuous"
+sources = ["modis_phenology"]
+
+[[bands]]
+id = "d06"
+computation = "greenup_timing_1"
+suffix = "timing_of_green_up_1"
+display_name = "Green-up timing 1"
+role = "response"
+data_type = "continuous"
+sources = ["modis_phenology"]
+
+[[bands]]
+id = "d07"
+computation = "greenup_timing_2"
+suffix = "timing_of_green_up_2"
+display_name = "Green-up timing 2"
+role = "response"
+data_type = "continuous"
+sources = ["modis_phenology"]
+
+[[bands]]
+id = "d08"
+computation = "short_vegetation_height"
+suffix = "short_vegetation_height"
+display_name = "Short vegetation height"
+role = "response"
+data_type = "continuous"
+sources = ["short_vegetation_height"]
+
+[[bands]]
+id = "d09"
+computation = "tree_cover"
+suffix = "percent_tree_cover"
+display_name = "Tree cover"
+role = "response"
+data_type = "continuous"
+sources = ["modis_vegetation_cover"]
+
+[[bands]]
+id = "d10"
+computation = "non_tree_vegetation_cover"
+suffix = "percent_veg_but_not_tree_cov"
+display_name = "Non-tree vegetation cover"
+role = "response"
+data_type = "continuous"
+sources = ["modis_vegetation_cover"]
+
+[[bands]]
+id = "d11"
+computation = "bare_ground"
+suffix = "percent_bare"
+display_name = "Bare ground"
+role = "response"
+data_type = "continuous"
+sources = ["modis_vegetation_cover"]
+
+[[bands]]
+id = "d12"
+computation = "maximum_lai"
+suffix = "leaf_area_index_lai_annual_m"
+display_name = "Maximum leaf area index"
+role = "response"
+data_type = "continuous"
+sources = ["modis_lai_fpar"]
+
+[[bands]]
+id = "d13"
+computation = "lai_variability"
+suffix = "leaf_area_index_lai_annual_s"
+display_name = "Leaf area index variability"
+role = "response"
+data_type = "continuous"
+sources = ["modis_lai_fpar"]
+
+[[bands]]
+id = "d14"
+computation = "mean_fpar"
+suffix = "fraction_of_photosynthetical"
+display_name = "Mean FPAR"
+role = "response"
+data_type = "continuous"
+sources = ["modis_lai_fpar"]
+
+[[bands]]
+id = "d15"
+computation = "fpar_variability"
+suffix = "fraction_of_photosynthetical"
+display_name = "FPAR variability"
+role = "response"
+data_type = "continuous"
+sources = ["modis_lai_fpar"]
+
+[[bands]]
+id = "d16"
+computation = "maximum_fpar_variability"
+suffix = "fpar_variability_max"
+display_name = "Maximum FPAR variability"
+role = "response"
+data_type = "continuous"
+sources = ["modis_lai_fpar"]
+
+[[bands]]
+id = "d17"
+computation = "growing_season_count"
+suffix = "number_of_growing_seasons"
+display_name = "Number of growing seasons"
+role = "response"
+data_type = "continuous"
+sources = ["modis_phenology"]
+
+[[bands]]
+id = "d18"
+computation = "npp"
+suffix = "npp"
+display_name = "Net primary productivity"
+role = "response"
+data_type = "continuous"
+sources = ["modis_productivity"]
+
+[[bands]]
+id = "d19"
+computation = "gpp"
+suffix = "gpp"
+display_name = "Gross primary productivity"
+role = "response"
+data_type = "continuous"
+sources = ["modis_productivity"]
+
+[[bands]]
+id = "d20"
+computation = "maximum_annual_temperature"
+suffix = "maximum_annual_temperature_c"
+display_name = "Maximum annual temperature (C)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily"]
+
+[[bands]]
+id = "d21"
+computation = "mean_annual_temperature"
+suffix = "mean_annual_temperature_c"
+display_name = "Mean annual temperature (C)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_monthly"]
+
+[[bands]]
+id = "d22"
+computation = "median_annual_temperature"
+suffix = "median_annual_temperature_c"
+display_name = "Median annual temperature (C)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_monthly"]
+
+[[bands]]
+id = "d23"
+computation = "minimum_annual_temperature"
+suffix = "minimum_annual_temperature_c"
+display_name = "Minimum annual temperature (C)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily"]
+
+[[bands]]
+id = "d24"
+computation = "annual_precipitation"
+suffix = "annual_precipitation_mm"
+display_name = "Annual precipitation (mm)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily"]
+
+[[bands]]
+id = "d25"
+computation = "growing_season_temperature"
+suffix = "growing_season_avg_temp_c"
+display_name = "Growing-season average temperature (C)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily", "modis_phenology"]
+
+[[bands]]
+id = "d26"
+computation = "growing_season_precipitation"
+suffix = "growing_season_avg_precipita"
+display_name = "Growing-season average precipitation (mm/day)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily", "modis_phenology"]
+
+[[bands]]
+id = "d27"
+computation = "interannual_rainfall_variability"
+suffix = "interannual_rainfall_variabi"
+display_name = "Interannual rainfall variability (CV%, 10-year)"
+role = "predictor"
+data_type = "continuous"
+sources = ["era5_daily"]
+
+[[bands]]
+id = "d28"
+computation = "mean_drought"
+suffix = "drought_mean_spi_30_day"
+display_name = "Drought mean (SPI 30-day)"
+role = "predictor"
+data_type = "continuous"
+sources = ["gridmet_drought"]
+
+[[bands]]
+id = "d29"
+computation = "drought_fifth_percentile"
+suffix = "drought_5th_percentile_spi_3"
+display_name = "Drought 5th percentile (SPI 30-day)"
+role = "predictor"
+data_type = "continuous"
+sources = ["gridmet_drought"]
+
+[[bands]]
+id = "d30"
+computation = "burned_month_count"
+suffix = "fire_frequency_burned_months"
+display_name = "Fire frequency (burned months)"
+role = "predictor"
+data_type = "continuous"
+sources = ["viirs_burned_area"]
+
+[[bands]]
+id = "d31"
+computation = "water_presence_variation"
+suffix = "annual_variation_in_water_pr"
+display_name = "Annual variation in water presence"
+role = "predictor"
+data_type = "continuous"
+sources = ["jrc_monthly_water"]
+
+[[bands]]
+id = "d32"
+computation = "distance_to_streams"
+suffix = "distance_to_streams_m"
+display_name = "Distance to streams (m)"
+role = "predictor"
+data_type = "continuous"
+sources = ["merit_hydro"]
+
+[[bands]]
+id = "d33"
+computation = "soil_organic_carbon"
+suffix = "soil_organic_carbon_10_cm_g"
+display_name = "Soil organic carbon (10 cm, g/kg)"
+role = "predictor"
+data_type = "continuous"
+sources = ["isric_soil_organic_carbon"]
+
+[[bands]]
+id = "d34"
+computation = "soil_moisture"
+suffix = "soil_moisture_annual_mean_gl"
+display_name = "Soil moisture annual mean (GLDAS 10-40 cm)"
+role = "predictor"
+data_type = "continuous"
+sources = ["gldas"]
+
+[[bands]]
+id = "d35"
+computation = "landform_type"
+suffix = "landform_type_srtm"
+display_name = "Landform type (SRTM)"
+role = "predictor"
+data_type = "categorical"
+sources = ["srtm_landforms"]
+
+[[bands]]
+id = "d36"
+computation = "topographic_diversity"
+suffix = "topographic_diversity_alos"
+display_name = "Topographic diversity (ALOS)"
+role = "predictor"
+data_type = "continuous"
+sources = ["alos_topographic_diversity"]
+
+[[bands]]
+id = "d37"
+computation = "annual_evapotranspiration"
+suffix = "annual_evapotranspiration_mo"
+display_name = "Annual evapotranspiration (MODIS ET, mm)"
+role = "predictor"
+data_type = "continuous"
+sources = ["modis_evapotranspiration"]
+
+[[bands]]
+id = "d38"
+computation = "gldas_snow_depth"
+suffix = "average_snow_depth_when_pres"
+display_name = "Average snow depth when present (GLDAS, m)"
+role = "predictor"
+data_type = "continuous"
+sources = ["gldas"]
+
+[[bands]]
+id = "d39"
+computation = "smap_snow_depth"
+suffix = "average_snow_depth_when_pres"
+display_name = "Average snow depth when present (SMAP, m)"
+role = "predictor"
+data_type = "continuous"
+sources = ["smap"]
