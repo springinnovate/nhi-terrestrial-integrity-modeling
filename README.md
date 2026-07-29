@@ -39,8 +39,9 @@ can be changed with `--grassland-probability-threshold`, `--hmi-threshold`, and
 The namespace also includes a stack-definition version so later changes to a source
 or layer calculation cannot silently reuse tiles produced by an older definition.
 The command reports AOI area, requested tiles, cache hits, downloads, transferred
-bytes, failures, and manifest location, with tqdm progress during Earth Engine
-requests.
+bytes, failures, and manifest location. A cache-validation progress bar first checks
+every intersecting grid. A second tqdm bar then reports processed, cached,
+downloaded, and failed grid counts while Earth Engine requests run.
 
 ## Load one ecoregion GeoTIFF
 

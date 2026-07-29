@@ -1142,27 +1142,51 @@ def cache_aoi_tiles(
     valid_cached_tiles: set[str] = set()
     tiles_requiring_download = []
     tile_directory = resolved_cache_directory / "tiles" / stack_identifier
-    for tile in requested_tiles:
-        tile_record_key = f"{stack_identifier}/{tile.tile_id}"
-        tile_record = manifest["tiles"].get(tile_record_key)
-        tile_path = tile_directory / f"{tile.tile_id}.tif"
-        if not refresh and tile_record is not None and tile_path.exists():
-            try:
-                validate_cached_tile(
-                    tile_path,
-                    tile,
-                    cache_grid,
-                    band_names,
-                    expected_checksum=tile_record["sha256"],
-                    expected_file_size=tile_record["file_size_bytes"],
-                )
-                valid_cached_tiles.add(tile.tile_id)
-                continue
-            except (OSError, ValueError, rasterio.errors.RasterioError):
-                pass
-        manifest["tiles"].pop(tile_record_key, None)
-        tiles_requiring_download.append(tile)
+    with tqdm(
+        requested_tiles,
+        total=len(requested_tiles),
+        desc="Checking cached grids",
+        unit="grid",
+        dynamic_ncols=True,
+        disable=not show_progress,
+    ) as cache_progress:
+        for tile in cache_progress:
+            tile_record_key = f"{stack_identifier}/{tile.tile_id}"
+            tile_record = manifest["tiles"].get(tile_record_key)
+            tile_path = tile_directory / f"{tile.tile_id}.tif"
+            if not refresh and tile_record is not None and tile_path.exists():
+                try:
+                    validate_cached_tile(
+                        tile_path,
+                        tile,
+                        cache_grid,
+                        band_names,
+                        expected_checksum=tile_record["sha256"],
+                        expected_file_size=tile_record["file_size_bytes"],
+                    )
+                    valid_cached_tiles.add(tile.tile_id)
+                    cache_progress.set_postfix(
+                        cached=len(valid_cached_tiles),
+                        download=len(tiles_requiring_download),
+                        refresh=refresh,
+                    )
+                    continue
+                except (OSError, ValueError, rasterio.errors.RasterioError):
+                    pass
+            manifest["tiles"].pop(tile_record_key, None)
+            tiles_requiring_download.append(tile)
+            cache_progress.set_postfix(
+                cached=len(valid_cached_tiles),
+                download=len(tiles_requiring_download),
+                refresh=refresh,
+            )
     write_cache_manifest(manifest_path, manifest)
+
+    print()
+    print("Earth Engine grid plan")
+    print(f"  Intersecting grids: {len(requested_tiles):,}")
+    print(f"  Valid cached grids: {len(valid_cached_tiles):,}")
+    print(f"  Grids to download: {len(tiles_requiring_download):,}")
 
     raster_stack = None
     tile_fetcher = compute_tile or fetch_tile_bytes
@@ -1180,73 +1204,90 @@ def cache_aoi_tiles(
     downloaded_byte_count = 0
     failed_tile_ids = []
     tile_directory.mkdir(parents=True, exist_ok=True)
-    progress = (
-        tqdm(
-            tiles_requiring_download,
-            desc="Fetching Earth Engine tiles",
-            unit="tile",
-            disable=not show_progress,
+    with tqdm(
+        total=len(requested_tiles),
+        initial=len(valid_cached_tiles),
+        desc="Processing grids",
+        unit="grid",
+        dynamic_ncols=True,
+        disable=not show_progress,
+    ) as processing_progress:
+        processing_progress.set_postfix(
+            processed=len(valid_cached_tiles),
+            cached=len(valid_cached_tiles),
+            downloaded=downloaded_tile_count,
+            failed=len(failed_tile_ids),
         )
-        if tiles_requiring_download
-        else ()
-    )
-    for tile in progress:
-        destination_path = tile_directory / f"{tile.tile_id}.tif"
-        temporary_path = destination_path.with_suffix(".tif.partial")
-        try:
-            tile_bytes = tile_fetcher(
-                raster_stack,
-                tile,
-                cache_grid,
-                band_names,
-            )
-            temporary_path.write_bytes(tile_bytes)
-            # computePixels preserves band order but does not populate GeoTIFF
-            # descriptions. Add the stable schema before validation and hashing.
-            with rasterio.open(temporary_path, "r+") as temporary_raster:
-                for band_index, band_name in enumerate(band_names, start=1):
-                    temporary_raster.set_band_description(band_index, band_name)
-            file_size, checksum = validate_cached_tile(
-                temporary_path,
-                tile,
-                cache_grid,
-                band_names,
-            )
-            os.replace(temporary_path, destination_path)
-            tile_record_key = f"{stack_identifier}/{tile.tile_id}"
-            manifest["tiles"][tile_record_key] = {
-                "tile_id": tile.tile_id,
-                "stack_id": stack_identifier,
-                "year": year,
-                "column": tile.column,
-                "row": tile.row,
-                "bounds": [tile.left, tile.bottom, tile.right, tile.top],
-                "crs": cache_grid.crs,
-                "pixel_size_meters": cache_grid.pixel_size_meters,
-                "width_pixels": cache_grid.tile_size_pixels,
-                "height_pixels": cache_grid.tile_size_pixels,
-                "transform": [
-                    cache_grid.pixel_size_meters,
-                    0,
-                    tile.left,
-                    0,
-                    -cache_grid.pixel_size_meters,
-                    tile.top,
-                ],
-                "relative_path": destination_path.relative_to(
-                    resolved_cache_directory
-                ).as_posix(),
-                "fetched_at_utc": datetime.now(UTC).isoformat(),
-                "file_size_bytes": file_size,
-                "sha256": checksum,
-            }
-            write_cache_manifest(manifest_path, manifest)
-            downloaded_tile_count += 1
-            downloaded_byte_count += file_size
-        except Exception as error:
-            temporary_path.unlink(missing_ok=True)
-            failed_tile_ids.append(tile.tile_id)
-            tqdm.write(f"Failed {tile.tile_id}: {error}")
+        for tile in tiles_requiring_download:
+            destination_path = tile_directory / f"{tile.tile_id}.tif"
+            temporary_path = destination_path.with_suffix(".tif.partial")
+            try:
+                tile_bytes = tile_fetcher(
+                    raster_stack,
+                    tile,
+                    cache_grid,
+                    band_names,
+                )
+                temporary_path.write_bytes(tile_bytes)
+                # computePixels preserves band order but does not populate GeoTIFF
+                # descriptions. Add the stable schema before validation and hashing.
+                with rasterio.open(temporary_path, "r+") as temporary_raster:
+                    for band_index, band_name in enumerate(band_names, start=1):
+                        temporary_raster.set_band_description(band_index, band_name)
+                file_size, checksum = validate_cached_tile(
+                    temporary_path,
+                    tile,
+                    cache_grid,
+                    band_names,
+                )
+                os.replace(temporary_path, destination_path)
+                tile_record_key = f"{stack_identifier}/{tile.tile_id}"
+                manifest["tiles"][tile_record_key] = {
+                    "tile_id": tile.tile_id,
+                    "stack_id": stack_identifier,
+                    "year": year,
+                    "column": tile.column,
+                    "row": tile.row,
+                    "bounds": [tile.left, tile.bottom, tile.right, tile.top],
+                    "crs": cache_grid.crs,
+                    "pixel_size_meters": cache_grid.pixel_size_meters,
+                    "width_pixels": cache_grid.tile_size_pixels,
+                    "height_pixels": cache_grid.tile_size_pixels,
+                    "transform": [
+                        cache_grid.pixel_size_meters,
+                        0,
+                        tile.left,
+                        0,
+                        -cache_grid.pixel_size_meters,
+                        tile.top,
+                    ],
+                    "relative_path": destination_path.relative_to(
+                        resolved_cache_directory
+                    ).as_posix(),
+                    "fetched_at_utc": datetime.now(UTC).isoformat(),
+                    "file_size_bytes": file_size,
+                    "sha256": checksum,
+                }
+                write_cache_manifest(manifest_path, manifest)
+                downloaded_tile_count += 1
+                downloaded_byte_count += file_size
+            except Exception as error:
+                temporary_path.unlink(missing_ok=True)
+                failed_tile_ids.append(tile.tile_id)
+                processing_progress.write(f"Failed {tile.tile_id}: {error}")
+            finally:
+                processed_tile_count = (
+                    len(valid_cached_tiles)
+                    + downloaded_tile_count
+                    + len(failed_tile_ids)
+                )
+                processing_progress.update(1)
+                processing_progress.set_postfix(
+                    processed=processed_tile_count,
+                    cached=len(valid_cached_tiles),
+                    downloaded=downloaded_tile_count,
+                    failed=len(failed_tile_ids),
+                )
 
     request_timestamp = datetime.now(UTC).isoformat()
     request_identifier = hashlib.sha256(

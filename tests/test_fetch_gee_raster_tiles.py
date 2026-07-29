@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -254,6 +256,40 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.assertEqual(64, len(tile_record["sha256"]))
         self.assertEqual(2, len(manifest["requests"]))
         self.assertEqual(39, len(manifest["stacks"][stack_identifier]["bands"]))
+
+    def test_progress_reports_cache_and_processing_counts(self) -> None:
+        """Display both tqdm stages and every requested live grid counter."""
+
+        self.write_projected_aoi(box(100, 100, 3_900, 3_900))
+        progress_output = io.StringIO()
+        report_output = io.StringIO()
+        with (
+            patch.object(
+                fetch_gee_raster_tiles,
+                "CacheGrid",
+                return_value=self.test_grid,
+            ),
+            redirect_stderr(progress_output),
+            redirect_stdout(report_output),
+        ):
+            cache_aoi_tiles(
+                self.aoi_path,
+                2018,
+                "offline-test-project",
+                self.cache_directory,
+                ReferenceThresholds(),
+                refresh=False,
+                show_progress=True,
+                compute_tile=self.create_tile_bytes,
+            )
+
+        rendered_progress = progress_output.getvalue()
+        self.assertIn("Checking cached grids", rendered_progress)
+        self.assertIn("Processing grids", rendered_progress)
+        self.assertIn("processed=1", rendered_progress)
+        self.assertIn("cached=0", rendered_progress)
+        self.assertIn("downloaded=1", rendered_progress)
+        self.assertIn("failed=0", rendered_progress)
 
     def test_corrupt_cached_tile_is_replaced(self) -> None:
         """Reject a cached file whose checksum no longer matches the manifest."""
