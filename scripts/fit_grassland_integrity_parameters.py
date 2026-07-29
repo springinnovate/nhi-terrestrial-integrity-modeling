@@ -21,10 +21,9 @@ from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
 if __package__:
-    from .raster_stack_config import (
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+    from .analysis_config import (
+        AnalysisConfiguration,
+        load_analysis_configuration,
     )
     from .reference_condition_utils import (
         FIGURE_DPI,
@@ -32,15 +31,13 @@ if __package__:
         ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
-        infer_ecoregion_name,
         prepare_reference_condition_data,
         weighted_quantiles,
     )
 else:
-    from raster_stack_config import (
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+    from analysis_config import (
+        AnalysisConfiguration,
+        load_analysis_configuration,
     )
     from reference_condition_utils import (
         FIGURE_DPI,
@@ -48,14 +45,11 @@ else:
         ReferenceConditionConfiguration,
         calculate_imputation_values,
         create_fold_map,
-        infer_ecoregion_name,
         prepare_reference_condition_data,
         weighted_quantiles,
     )
 
 
-DEFAULT_MINIMUM_RESPONSE_COVERAGE = 0.50
-DEFAULT_RIDGE_ALPHA = 1.0
 REGRESSION_METRIC_NAMES = (
     "weighted_r2",
     "weighted_rmse",
@@ -75,8 +69,8 @@ class IntegrityConfiguration(ReferenceConditionConfiguration):
         ridge_alpha: L2 regularization strength used by each response model.
     """
 
-    minimum_response_coverage: float = DEFAULT_MINIMUM_RESPONSE_COVERAGE
-    ridge_alpha: float = DEFAULT_RIDGE_ALPHA
+    minimum_response_coverage: float
+    ridge_alpha: float
 
 
 @dataclass(frozen=True)
@@ -108,34 +102,21 @@ def parse_args() -> argparse.Namespace:
             "ecological response in an ecoregion sample."
         )
     )
-    parser.add_argument("sample_parquet", type=Path, help="Spatial sample Parquet.")
     parser.add_argument(
-        "--stack-configuration",
+        "analysis_configuration",
         type=Path,
-        default=DEFAULT_RASTER_STACK_CONFIG_PATH,
         help=(
-            "TOML raster-stack definition used to select responses and predictors. "
-            f"Default: {DEFAULT_RASTER_STACK_CONFIG_PATH}."
+            "Complete TOML analysis definition containing model settings, "
+            "selected responses, and the raster-band contract."
         ),
     )
+    parser.add_argument("sample_parquet", type=Path, help="Spatial sample Parquet.")
     parser.add_argument(
         "--output-directory",
         type=Path,
         help=(
             "Output directory. Defaults to outputs/integrity_parameters/<sample stem>."
         ),
-    )
-    parser.add_argument(
-        "--responses",
-        nargs="+",
-        help=(
-            "Response bands to fit, such as d02 d11 d18, or full column names. "
-            "Defaults to every available band assigned the response role in TOML."
-        ),
-    )
-    parser.add_argument(
-        "--ecoregion-name",
-        help="Figure label. Defaults to a name inferred from the sample filename.",
     )
     parser.add_argument(
         "--no-partial-response-figures",
@@ -153,7 +134,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_response_names(
     columns: Sequence[str],
     requested_responses: Sequence[str] | None,
-    stack_configuration: RasterStackConfiguration,
+    stack_configuration: AnalysisConfiguration,
 ) -> tuple[str, ...]:
     """Resolve dNN aliases or full names to ordered response columns.
 
@@ -161,7 +142,7 @@ def resolve_response_names(
         columns (Sequence[str]): Column names from the ecoregion sample table.
         requested_responses (Sequence[str] | None): Requested dNN aliases or
             complete response column names. ``None`` selects every response.
-        stack_configuration (RasterStackConfiguration): Band-role contract.
+        stack_configuration (AnalysisConfiguration): Analysis band-role contract.
 
     Returns:
         tuple[str, ...]: Unique response column names in requested order.
@@ -339,7 +320,7 @@ def summarize_response_coverage(
     response_names: Sequence[str],
     selected_response_names: Sequence[str],
     configuration: IntegrityConfiguration,
-    stack_configuration: RasterStackConfiguration,
+    stack_configuration: AnalysisConfiguration,
 ) -> pd.DataFrame:
     """Determine which response bands can support every spatial fold.
 
@@ -351,7 +332,7 @@ def summarize_response_coverage(
             model fitting.
         configuration (IntegrityConfiguration): Coverage, spline, and fold
             requirements used to screen responses.
-        stack_configuration (RasterStackConfiguration): Response metadata.
+        stack_configuration (AnalysisConfiguration): Response metadata.
 
     Returns:
         pandas.DataFrame: One screening record per response, including coverage,
@@ -451,7 +432,7 @@ def fit_response_gam(
     categorical_predictor_name: str,
     imputation_values: dict[str, float],
     configuration: IntegrityConfiguration,
-    stack_configuration: RasterStackConfiguration,
+    stack_configuration: AnalysisConfiguration,
 ) -> dict[str, object]:
     """Fit one regularized additive reference-condition regression.
 
@@ -466,7 +447,7 @@ def fit_response_gam(
         imputation_values (dict[str, float]): Training-derived replacement value
             for each predictor.
         configuration (IntegrityConfiguration): Spline and ridge settings.
-        stack_configuration (RasterStackConfiguration): Response and predictor
+        stack_configuration (AnalysisConfiguration): Response and predictor
             display metadata.
 
     Returns:
@@ -526,9 +507,9 @@ def fit_response_gam(
         "response_band": response_definition.identifier,
         "display_name": response_definition.display_name,
         "predictor_display_names": predictor_display_names,
-        "raster_stack_name": stack_configuration.name,
-        "raster_stack_version": stack_configuration.version,
-        "raster_stack_configuration_sha256": (
+        "raster_stack_name": stack_configuration.stack_name,
+        "raster_stack_version": stack_configuration.stack_version,
+        "analysis_configuration_sha256": (
             stack_configuration.configuration_sha256
         ),
         "continuous_predictor_names": continuous_predictor_names,
@@ -1349,10 +1330,9 @@ def run_integrity_parameter_gams(
     sample_path: Path,
     output_directory: Path,
     configuration: IntegrityConfiguration,
-    stack_configuration: RasterStackConfiguration,
+    stack_configuration: AnalysisConfiguration,
     requested_responses: Sequence[str] | None = None,
     show_progress: bool = True,
-    ecoregion_name: str | None = None,
     create_partial_figures: bool = True,
 ) -> IntegrityRunSummary:
     """Fit, spatially validate, report, and serialize response GAMs.
@@ -1364,15 +1344,13 @@ def run_integrity_parameter_gams(
             models, reports, and figures.
         configuration (IntegrityConfiguration): Predictor screening, spatial
             validation, response screening, spline, and ridge settings.
-        stack_configuration (RasterStackConfiguration): Configured response and
+        stack_configuration (AnalysisConfiguration): Configured response and
             predictor roles and display metadata.
         requested_responses (Sequence[str] | None): Optional dNN aliases or
             complete response column names. ``None`` fits every response that
             passes screening.
         show_progress (bool): Whether to display tqdm fitting and figure
             progress bars.
-        ecoregion_name (str | None): Optional report and figure label. ``None``
-            infers the label from ``sample_path``.
         create_partial_figures (bool): Whether to draw one partial-response
             figure for each fitted response.
 
@@ -1389,9 +1367,7 @@ def run_integrity_parameter_gams(
     started = time.perf_counter()
     resolved_sample_path = sample_path.expanduser().resolve()
     resolved_output_directory = output_directory.expanduser().resolve()
-    resolved_ecoregion_name = ecoregion_name or infer_ecoregion_name(
-        resolved_sample_path
-    )
+    resolved_ecoregion_name = stack_configuration.display_name
     print("Grassland ecological-response GAM validation")
     print(f"Input sample: {resolved_sample_path}")
     print(f"Output directory: {resolved_output_directory}")
@@ -1744,10 +1720,14 @@ def run_integrity_parameter_gams(
         "input_sample": str(resolved_sample_path),
         "ecoregion_name": resolved_ecoregion_name,
         "configuration": asdict(configuration),
-        "raster_stack_configuration": {
+        "analysis_configuration": {
             "path": str(stack_configuration.path),
-            "name": stack_configuration.name,
-            "version": stack_configuration.version,
+            "analysis_name": stack_configuration.analysis_name,
+            "display_name": stack_configuration.display_name,
+            "aoi_path": str(stack_configuration.aoi_path),
+            "year": stack_configuration.year,
+            "stack_name": stack_configuration.stack_name,
+            "stack_version": stack_configuration.stack_version,
             "sha256": stack_configuration.configuration_sha256,
             "datasets": dict(stack_configuration.datasets),
             "bands": [asdict(band) for band in stack_configuration.bands],
@@ -1835,9 +1815,28 @@ def main() -> None:
     """Run the command-line ecological-response GAM workflow."""
 
     args = parse_args()
-    configuration = IntegrityConfiguration()
-    stack_configuration = load_raster_stack_configuration(
-        args.stack_configuration
+    analysis_configuration = load_analysis_configuration(
+        args.analysis_configuration
+    )
+    configuration = IntegrityConfiguration(
+        fold_count=analysis_configuration.model.fold_count,
+        sampling_block_size_meters=(
+            analysis_configuration.sampling.block_size_meters
+        ),
+        validation_block_size_meters=(
+            analysis_configuration.model.validation_block_size_meters
+        ),
+        minimum_predictor_coverage=(
+            analysis_configuration.model.minimum_predictor_coverage
+        ),
+        maximum_row_missing_fraction=(
+            analysis_configuration.model.maximum_row_missing_fraction
+        ),
+        spline_knot_count=analysis_configuration.model.spline_knot_count,
+        minimum_response_coverage=(
+            analysis_configuration.model.minimum_response_coverage
+        ),
+        ridge_alpha=analysis_configuration.model.ridge_alpha,
     )
     output_directory = args.output_directory or (
         Path("outputs") / "integrity_parameters" / args.sample_parquet.stem
@@ -1846,10 +1845,9 @@ def main() -> None:
         args.sample_parquet,
         output_directory,
         configuration,
-        stack_configuration,
-        requested_responses=args.responses,
+        analysis_configuration,
+        requested_responses=analysis_configuration.model.responses or None,
         show_progress=not args.no_progress,
-        ecoregion_name=args.ecoregion_name,
         create_partial_figures=not args.no_partial_response_figures,
     )
 

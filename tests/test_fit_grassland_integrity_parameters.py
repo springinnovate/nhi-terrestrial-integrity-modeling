@@ -7,6 +7,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -24,7 +25,7 @@ from scripts.fit_grassland_integrity_parameters import (
     run_integrity_parameter_gams,
     summarize_response_coverage,
 )
-from scripts.raster_stack_config import load_raster_stack_configuration
+from scripts.analysis_config import load_analysis_configuration
 from scripts.reference_condition_utils import (
     SPATIAL_FOLD_COLORS,
     prepare_reference_condition_data,
@@ -50,7 +51,10 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             spline_knot_count=4,
             ridge_alpha=1.0,
         )
-        self.stack_configuration = load_raster_stack_configuration()
+        self.stack_configuration = replace(
+            load_analysis_configuration(),
+            display_name="Example",
+        )
 
     def _create_sample_table(self) -> pd.DataFrame:
         """Create ten spatial blocks with reference and background responses.
@@ -326,11 +330,11 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         )
         self.assertEqual(
             self.stack_configuration.configuration_sha256,
-            metadata["raster_stack_configuration"]["sha256"],
+            metadata["analysis_configuration"]["sha256"],
         )
         self.assertEqual(
             self.stack_configuration.configuration_sha256,
-            fitted_model["raster_stack_configuration_sha256"],
+            fitted_model["analysis_configuration_sha256"],
         )
         self.assertFalse(metadata["model"]["human_impact_predictors"])
         self.assertIn("Grassland ecological-response GAM validation", report.getvalue())

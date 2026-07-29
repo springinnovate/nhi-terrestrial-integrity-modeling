@@ -23,46 +23,22 @@ from shapely.ops import transform, unary_union
 from tqdm.auto import tqdm
 
 if __package__:
-    from .raster_stack_config import (
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
+    from .analysis_config import (
+        DEFAULT_ANALYSIS_CONFIG_PATH,
+        AnalysisConfiguration,
         RasterCacheGrid as CacheGrid,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+        load_analysis_configuration,
     )
 else:
-    from raster_stack_config import (
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
+    from analysis_config import (
+        DEFAULT_ANALYSIS_CONFIG_PATH,
+        AnalysisConfiguration,
         RasterCacheGrid as CacheGrid,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+        load_analysis_configuration,
     )
 
 
 MANIFEST_SCHEMA_VERSION = 1
-DEFAULT_CACHE_DIRECTORY = Path("data/gee_raster_cache")
-DEFAULT_STACK_CONFIGURATION = load_raster_stack_configuration()
-DEFAULT_GRASSLAND_PROBABILITY_THRESHOLD = (
-    DEFAULT_STACK_CONFIGURATION.reference_defaults.grassland_probability
-)
-DEFAULT_HMI_THRESHOLD = (
-    DEFAULT_STACK_CONFIGURATION.reference_defaults.human_modification
-)
-DEFAULT_HII_THRESHOLD = DEFAULT_STACK_CONFIGURATION.reference_defaults.human_influence
-
-
-@dataclass(frozen=True)
-class ReferenceThresholds:
-    """Thresholds used to identify grassland reference sites.
-
-    Attributes:
-        grassland_probability: Minimum annual grassland probability percentage.
-        human_modification: Maximum human-modification index.
-        human_influence: Maximum scaled human-influence index.
-    """
-
-    grassland_probability: int = DEFAULT_GRASSLAND_PROBABILITY_THRESHOLD
-    human_modification: float = DEFAULT_HMI_THRESHOLD
-    human_influence: float = DEFAULT_HII_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -111,65 +87,23 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
     Returns:
-        AOI, year, Earth Engine project, cache, threshold, and refresh settings.
+        Analysis definition and operational refresh and progress settings.
     """
 
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch a configured Earth Engine raster stack into deterministic "
-            "cache tiles intersecting a GeoJSON AOI."
+            "Fetch an analysis-defined Earth Engine raster stack into "
+            "deterministic cache tiles intersecting its AOI."
         )
     )
     parser.add_argument(
-        "aoi",
+        "analysis_configuration",
         type=Path,
-        help="GeoJSON Polygon, MultiPolygon, Feature, or FeatureCollection in WGS84.",
-    )
-    parser.add_argument(
-        "year",
-        type=int,
-        help="Data year for the configured raster stack.",
-    )
-    parser.add_argument(
-        "--stack-configuration",
-        type=Path,
-        default=DEFAULT_RASTER_STACK_CONFIG_PATH,
         help=(
-            "TOML raster-stack definition. Default: "
-            f"{DEFAULT_RASTER_STACK_CONFIG_PATH}."
+            "Complete TOML analysis definition containing the AOI, year, "
+            "Earth Engine project, cache, reference thresholds, and stack. "
+            f"Example: {DEFAULT_ANALYSIS_CONFIG_PATH}."
         ),
-    )
-    parser.add_argument(
-        "--project",
-        required=True,
-        help="Google Cloud project registered for Earth Engine use.",
-    )
-    parser.add_argument(
-        "--cache-directory",
-        type=Path,
-        default=DEFAULT_CACHE_DIRECTORY,
-        help=f"Tile cache directory. Default: {DEFAULT_CACHE_DIRECTORY}.",
-    )
-    parser.add_argument(
-        "--grassland-probability-threshold",
-        type=int,
-        default=None,
-        help=(
-            "Minimum reference-site grassland probability percentage. "
-            "Defaults to the stack configuration."
-        ),
-    )
-    parser.add_argument(
-        "--hmi-threshold",
-        type=float,
-        default=None,
-        help="Maximum reference-site HMI. Defaults to the stack configuration.",
-    )
-    parser.add_argument(
-        "--hii-threshold",
-        type=float,
-        default=None,
-        help="Maximum reference-site HII. Defaults to the stack configuration.",
     )
     parser.add_argument(
         "--refresh",
@@ -276,29 +210,28 @@ def select_intersecting_tiles(
 
 
 def build_stack_identifier(
-    year: int,
-    thresholds: ReferenceThresholds,
-    stack_configuration: RasterStackConfiguration = DEFAULT_STACK_CONFIGURATION,
+    analysis_configuration: AnalysisConfiguration,
 ) -> str:
     """Build a stable cache identifier for one source configuration.
 
     Args:
-        year: Four-digit source-data year.
-        thresholds: Reference-site thresholds affecting d01.
-        stack_configuration: Raster-stack name, version, and effective hash.
+        analysis_configuration: Complete analysis and raster-stack definition.
 
     Returns:
         File-safe stack identifier.
     """
 
-    human_modification_text = format(thresholds.human_modification, "g").replace(
+    reference = analysis_configuration.reference
+    human_modification_text = format(reference.human_modification, "g").replace(
         ".", "p"
     )
-    human_influence_text = format(thresholds.human_influence, "g").replace(".", "p")
+    human_influence_text = format(reference.human_influence, "g").replace(".", "p")
     return (
-        f"{stack_configuration.name}_v{stack_configuration.version}_"
-        f"{stack_configuration.configuration_sha256[:12]}_year_{year}_"
-        f"gp_{thresholds.grassland_probability}_"
+        f"{analysis_configuration.stack_name}_v"
+        f"{analysis_configuration.stack_version}_"
+        f"{analysis_configuration.raster_configuration_sha256[:12]}_"
+        f"year_{analysis_configuration.year}_"
+        f"gp_{reference.grassland_probability}_"
         f"hmi_{human_modification_text}_hii_{human_influence_text}"
     )
 
@@ -437,22 +370,21 @@ def validate_cached_tile(
 
 
 def build_earth_engine_stack(
-    year: int,
-    thresholds: ReferenceThresholds,
-    stack_configuration: RasterStackConfiguration = DEFAULT_STACK_CONFIGURATION,
+    analysis_configuration: AnalysisConfiguration,
 ) -> ee.Image:
     """Build the Earth Engine image declared by the stack configuration.
 
     Args:
-        year: Source-data year for annual response and environmental variables.
-        thresholds: Reference-site grassland, HMI, and HII thresholds.
-        stack_configuration: Dataset aliases, algorithms, and ordered bands.
+        analysis_configuration: Dataset aliases, algorithms, year, thresholds,
+            and ordered bands for the analysis.
 
     Returns:
         Computed Earth Engine image with configured stable export names.
     """
 
-    datasets = stack_configuration.datasets
+    year = analysis_configuration.year
+    reference = analysis_configuration.reference
+    datasets = analysis_configuration.datasets
 
     def annual_collection(dataset: str, selected_year: Any) -> ee.ImageCollection:
         start_date = ee.Date.fromYMD(ee.Number(selected_year).toInt(), 1, 1)
@@ -465,8 +397,8 @@ def build_earth_engine_stack(
         annual_binary_builder: Callable[[Any], ee.Image],
     ) -> ee.Image:
         reference_years = ee.List.sequence(
-            stack_configuration.reference_start_year,
-            stack_configuration.reference_end_year,
+            analysis_configuration.reference_start_year,
+            analysis_configuration.reference_end_year,
         )
         annual_binary_images = ee.ImageCollection.fromImages(
             reference_years.map(
@@ -503,8 +435,8 @@ def build_earth_engine_stack(
     human_influence_collection = ee.ImageCollection(
         datasets["human_influence"]
     ).filterDate(
-        f"{stack_configuration.reference_start_year}-01-01",
-        f"{stack_configuration.reference_end_year + 1}-01-01",
+        f"{analysis_configuration.reference_start_year}-01-01",
+        f"{analysis_configuration.reference_end_year + 1}-01-01",
     )
     grassland_probability_integrity = no_two_consecutive_zeros(
         lambda reference_year: ee.Image(
@@ -514,7 +446,7 @@ def build_earth_engine_stack(
             ).first()
         )
         .select(0)
-        .gte(thresholds.grassland_probability)
+        .gte(reference.grassland_probability)
     )
     human_influence_integrity = no_two_consecutive_zeros(
         lambda reference_year: human_influence_collection.filterDate(
@@ -523,13 +455,13 @@ def build_earth_engine_stack(
         )
         .mean()
         .divide(7000)
-        .lt(thresholds.human_influence)
+        .lt(reference.human_influence)
     )
     reference_sites = (
         grassland_probability_integrity.And(human_influence_integrity)
         .And(
             ee.Image(datasets["human_modification"]).lte(
-                thresholds.human_modification
+                reference.human_modification
             )
         )
         .And(maybe_grassland_mask)
@@ -626,8 +558,8 @@ def build_earth_engine_stack(
 
     growing_season_daily = era5_daily.map(apply_growing_season_mask)
     rainfall_start_year = max(
-        year - stack_configuration.interannual_rainfall_window_years + 1,
-        stack_configuration.era5_start_year,
+        year - analysis_configuration.interannual_rainfall_window_years + 1,
+        analysis_configuration.era5_start_year,
     )
     annual_rainfall_totals = ee.ImageCollection.fromImages(
         ee.List.sequence(rainfall_start_year, year).map(
@@ -665,7 +597,7 @@ def build_earth_engine_stack(
     streams = (
         ee.Image(datasets["merit_hydro"])
         .select("upa")
-        .gte(stack_configuration.stream_upstream_area_threshold_km2)
+        .gte(analysis_configuration.stream_upstream_area_threshold_km2)
         .unmask(0)
     )
     distance_to_streams = (
@@ -770,13 +702,13 @@ def build_earth_engine_stack(
     )
 
     configured_images = [
-        computed_images[band.computation] for band in stack_configuration.bands
+        computed_images[band.computation] for band in analysis_configuration.bands
     ]
     renamed_layers = [
         ee.Image(layer_image).rename(band_name)
         for layer_image, band_name in zip(
             configured_images,
-            stack_configuration.band_names(year),
+            analysis_configuration.band_names(),
             strict=True,
         )
     ]
@@ -833,14 +765,9 @@ def fetch_tile_bytes(
 
 
 def cache_aoi_tiles(
-    aoi_path: Path,
-    year: int,
-    earth_engine_project: str,
-    cache_directory: Path,
-    thresholds: ReferenceThresholds,
+    analysis_configuration: AnalysisConfiguration,
     refresh: bool,
     show_progress: bool,
-    stack_configuration: RasterStackConfiguration = DEFAULT_STACK_CONFIGURATION,
     compute_tile: (
         Callable[[ee.Image | None, CacheTile, CacheGrid, Sequence[str]], bytes]
         | None
@@ -849,14 +776,10 @@ def cache_aoi_tiles(
     """Populate reusable Earth Engine cache tiles intersecting one AOI.
 
     Args:
-        aoi_path: WGS84 GeoJSON AOI.
-        year: Complete-stack source-data year.
-        earth_engine_project: Cloud project registered for Earth Engine.
-        cache_directory: Root directory for tiles and manifest metadata.
-        thresholds: Reference-site thresholds used to construct d01.
+        analysis_configuration: Authoritative AOI, year, Earth Engine, cache,
+            reference threshold, grid, and raster-stack settings.
         refresh: Whether valid existing tiles should be replaced.
         show_progress: Whether to display tqdm progress.
-        stack_configuration: Raster sources, grid, and ordered band contract.
         compute_tile: Optional tile-fetch implementation used by offline tests.
 
     Returns:
@@ -866,42 +789,41 @@ def cache_aoi_tiles(
         RuntimeError: If Earth Engine initialization fails or any tile fetch fails.
     """
 
-    resolved_cache_directory = cache_directory.expanduser().resolve()
+    resolved_cache_directory = analysis_configuration.earth_engine.cache_directory
     resolved_cache_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = resolved_cache_directory / "manifest.json"
-    if not stack_configuration.minimum_year <= year <= stack_configuration.maximum_year:
-        raise ValueError(
-            f"Stack '{stack_configuration.name}' supports years "
-            f"{stack_configuration.minimum_year}-{stack_configuration.maximum_year}."
-        )
-    cache_grid = CacheGrid(**asdict(stack_configuration.grid))
-    wgs84_aoi = load_wgs84_aoi(aoi_path)
+    cache_grid = CacheGrid(**asdict(analysis_configuration.grid))
+    wgs84_aoi = load_wgs84_aoi(analysis_configuration.aoi_path)
     projected_aoi, requested_tiles = select_intersecting_tiles(
         wgs84_aoi,
         cache_grid,
     )
-    band_names = stack_configuration.band_names(year)
-    stack_identifier = build_stack_identifier(
-        year,
-        thresholds,
-        stack_configuration,
-    )
+    band_names = analysis_configuration.band_names()
+    stack_identifier = build_stack_identifier(analysis_configuration)
     manifest = load_cache_manifest(manifest_path, cache_grid)
     manifest["stacks"][stack_identifier] = {
-        "name": stack_configuration.name,
-        "definition_version": stack_configuration.version,
-        "configuration_path": str(stack_configuration.path),
-        "configuration_sha256": stack_configuration.configuration_sha256,
-        "datasets": dict(stack_configuration.datasets),
-        "year": year,
-        "reference_thresholds": asdict(thresholds),
+        "analysis_name": analysis_configuration.analysis_name,
+        "display_name": analysis_configuration.display_name,
+        "aoi_path": str(analysis_configuration.aoi_path),
+        "name": analysis_configuration.stack_name,
+        "definition_version": analysis_configuration.stack_version,
+        "configuration_path": str(analysis_configuration.path),
+        "analysis_configuration_sha256": (
+            analysis_configuration.configuration_sha256
+        ),
+        "raster_configuration_sha256": (
+            analysis_configuration.raster_configuration_sha256
+        ),
+        "datasets": dict(analysis_configuration.datasets),
+        "year": analysis_configuration.year,
+        "reference_thresholds": asdict(analysis_configuration.reference),
         "bands": [
             {
                 **asdict(definition),
                 "name": band_name,
             }
             for definition, band_name in zip(
-                stack_configuration.bands,
+                analysis_configuration.bands,
                 band_names,
                 strict=True,
             )
@@ -962,17 +884,14 @@ def cache_aoi_tiles(
     tile_fetcher = compute_tile or fetch_tile_bytes
     if tiles_requiring_download and compute_tile is None:
         try:
-            ee.Initialize(project=earth_engine_project)
+            ee.Initialize(project=analysis_configuration.earth_engine.project)
         except Exception as error:
             raise RuntimeError(
                 "Could not initialize Earth Engine. Authenticate with "
-                "`earthengine authenticate` and verify --project."
+                "`earthengine authenticate` and verify earth_engine.project "
+                "in the analysis TOML."
             ) from error
-        raster_stack = build_earth_engine_stack(
-            year,
-            thresholds,
-            stack_configuration,
-        )
+        raster_stack = build_earth_engine_stack(analysis_configuration)
 
     downloaded_tile_count = 0
     downloaded_byte_count = 0
@@ -1019,7 +938,7 @@ def cache_aoi_tiles(
                 manifest["tiles"][tile_record_key] = {
                     "tile_id": tile.tile_id,
                     "stack_id": stack_identifier,
-                    "year": year,
+                    "year": analysis_configuration.year,
                     "column": tile.column,
                     "row": tile.row,
                     "bounds": [tile.left, tile.bottom, tile.right, tile.top],
@@ -1066,7 +985,7 @@ def cache_aoi_tiles(
     request_timestamp = datetime.now(UTC).isoformat()
     request_identifier = hashlib.sha256(
         (
-            f"{request_timestamp}|{aoi_path.expanduser().resolve()}|"
+            f"{request_timestamp}|{analysis_configuration.aoi_path}|"
             f"{stack_identifier}"
         ).encode("utf-8")
     ).hexdigest()[:16]
@@ -1074,7 +993,8 @@ def cache_aoi_tiles(
         {
             "request_id": request_identifier,
             "requested_at_utc": request_timestamp,
-            "aoi_path": str(aoi_path.expanduser().resolve()),
+            "analysis_name": analysis_configuration.analysis_name,
+            "aoi_path": str(analysis_configuration.aoi_path),
             "aoi_bounds_wgs84": list(wgs84_aoi.bounds),
             "aoi_area_m2": projected_aoi.area,
             "stack_id": stack_identifier,
@@ -1095,11 +1015,12 @@ def cache_aoi_tiles(
     )
     print()
     print("Earth Engine raster tile cache")
-    print(f"  AOI: {aoi_path.expanduser().resolve()}")
+    print(f"  Analysis: {analysis_configuration.analysis_name}")
+    print(f"  AOI: {analysis_configuration.aoi_path}")
     print(f"  AOI area: {projected_aoi.area / 1_000_000:,.2f} km2")
-    print(f"  Data year: {year}")
+    print(f"  Data year: {analysis_configuration.year}")
     print(f"  Stack: {stack_identifier}")
-    print(f"  Configuration: {stack_configuration.path}")
+    print(f"  Configuration: {analysis_configuration.path}")
     print(
         "  Grid: "
         f"{cache_grid.crs}, {cache_grid.pixel_size_meters} m pixels, "
@@ -1128,35 +1049,13 @@ def main() -> None:
     """
 
     args = parse_args()
-    stack_configuration = load_raster_stack_configuration(
-        args.stack_configuration
+    analysis_configuration = load_analysis_configuration(
+        args.analysis_configuration
     )
-    reference_defaults = stack_configuration.reference_defaults
     cache_aoi_tiles(
-        args.aoi,
-        args.year,
-        args.project,
-        args.cache_directory,
-        ReferenceThresholds(
-            grassland_probability=(
-                args.grassland_probability_threshold
-                if args.grassland_probability_threshold is not None
-                else reference_defaults.grassland_probability
-            ),
-            human_modification=(
-                args.hmi_threshold
-                if args.hmi_threshold is not None
-                else reference_defaults.human_modification
-            ),
-            human_influence=(
-                args.hii_threshold
-                if args.hii_threshold is not None
-                else reference_defaults.human_influence
-            ),
-        ),
+        analysis_configuration,
         refresh=args.refresh,
         show_progress=not args.no_progress,
-        stack_configuration=stack_configuration,
     )
 
 

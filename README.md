@@ -4,21 +4,19 @@ First-pass local analysis scripts for raster stacks exported from Google Earth E
 
 ## Cache Earth Engine raster tiles for an AOI
 
-Fetch the configured raster stack directly from Earth Engine for a WGS84 GeoJSON AOI
-without retaining a complete ecoregion export. Authenticate the Earth Engine Python
-client once, then supply the Cloud project registered for Earth Engine use:
+Fetch an analysis-defined raster stack directly from Earth Engine without retaining a
+complete ecoregion export. Authenticate the Earth Engine Python client once, then
+pass the complete analysis definition:
 
 ```powershell
 earthengine authenticate
 
 python scripts/fetch_gee_raster_tiles.py `
-  data\aoi\montana_valley_and_foothill.geojson `
-  2018 `
-  --project ecoshard-202922
+  config\south_africa_reference_condition_analysis.toml
 ```
 
-The default `config/reference_condition_raster_stack.toml` constructs the same
-`d01-d39` layers as `gee_apps/nhi_raster_export_app.js`. It covers the AOI with
+`config/south_africa_reference_condition_analysis.toml` constructs the same `d01-d39`
+layers as `gee_apps/nhi_raster_export_app.js`. It covers the configured AOI with
 globally aligned 128 by 128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area
 projection (`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth
 Engine's `computePixels` endpoint computes only missing tiles, and overlapping AOI
@@ -26,38 +24,31 @@ requests reuse the same cache files. The default complete stack is available for
 through 2019.
 
 TOML is a configuration format similar in purpose to YAML, with explicit sections,
-key-value pairs, and repeated `[[bands]]` tables. The stack file controls its name and
-version, supported years, cache grid, reference defaults, Earth Engine dataset IDs,
-and ordered bands. Each band declares a stable ID, Python computation key, output
+key-value pairs, and repeated `[[bands]]` tables. One analysis file controls its
+identity and display name, local AOI, year, Earth Engine project and cache, cache grid,
+reference thresholds, sampling design, model settings and selected responses,
+inference settings, Earth Engine datasets, and ordered bands. Local paths are resolved
+relative to the TOML. Each band declares a stable ID, Python computation key, output
 suffix, display name, pipeline role (`reference`, `response`, or `predictor`), data
 type, and source aliases. Python still implements calculations such as phenology and
-growing-season aggregation. TOML selects and orders those implementations.
-
-Use another definition throughout fetching, sampling, and fitting with the same
-option:
-
-```powershell
-python scripts/fetch_gee_raster_tiles.py `
-  data\aoi\montana_valley_and_foothill.geojson `
-  2018 `
-  --project ecoshard-202922 `
-  --stack-configuration config\reference_condition_raster_stack.toml
-```
+growing-season aggregation; TOML selects and orders those implementations.
 
 Cached GeoTIFFs are stored by year and reference-threshold configuration under
 `data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
 grid, source datasets, data year, exact band schema, thresholds, tile bounds and
 transform, pixel size, fetch timestamp, file size, SHA-256 checksum, and AOI request
-history, configuration path, and normalized configuration SHA-256. A tile is entered
-into the manifest only after its temporary download has passed CRS, alignment,
+history, configuration path, full analysis SHA-256, and raster-effective SHA-256. A
+tile is entered into the manifest only after its temporary download has passed CRS,
+alignment,
 dimensions, band-name, and checksum validation.
 
 Repeating a request validates and reuses existing files. Use `--refresh` to replace
-every intersecting tile. The reference-site defaults match the Earth Engine app and
-can be changed with `--grassland-probability-threshold`, `--hmi-threshold`, and
-`--hii-threshold`; each distinct configuration receives a separate cache namespace.
-The namespace includes the stack version and effective configuration hash so changing
-a source, grid, role, label, or band order cannot silently reuse older tiles.
+every intersecting tile. Reference thresholds are changed in the analysis TOML; each
+distinct configuration receives a separate cache namespace.
+The namespace includes the stack version and raster-effective hash, so changing a
+source, grid, role, label, year, threshold, or band order cannot silently reuse older
+tiles. Sampling, model, and inference changes update the full analysis hash without
+redownloading identical source pixels.
 The command reports AOI area, requested tiles, cache hits, downloads, transferred
 bytes, failures, and manifest location. A cache-validation progress bar first checks
 every intersecting grid. A second tqdm bar then reports processed, cached,
@@ -71,11 +62,10 @@ per-band descriptive statistics. The same run creates a spatially balanced Parqu
 sample in `outputs/samples` and a 300 DPI world locator map in `outputs/figures`:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif
+python scripts/load_ecoregion_geotiff.py `
+  config\south_africa_reference_condition_analysis.toml `
+  data\raster_stacks\example.tif
 ```
-
-Pass the same `--stack-configuration` used for fetching when using a non-default
-definition.
 
 The importable `RasterPixelData` object retains a value cube and a separate per-band
 validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
@@ -87,20 +77,20 @@ Natural Earth 1:110 million land geometry.
 The spatial sample uses the first band assigned the TOML `reference` role as a binary
 class, with `1` representing a reference site and `0` representing a non-reference
 site. Copies of that reference band from additional years are excluded from the
-predictor table. Eligible pixels are assigned to 25 km square blocks in an equal-area
-coordinate system, then up to 100 pixels of each reference-site class are selected
-independently from every block. The table records source coordinates, block IDs,
+predictor table. Eligible pixels are assigned to analysis-defined square blocks in an
+equal-area coordinate system, then the configured maximum number of pixels from each
+reference-site class are selected independently from every block. The table records
+source coordinates, block IDs,
 pixel area, sampling probabilities, sampling weights, area weights, and every
 non-reference raster band. Missing predictor values remain missing.
 
-Sampling is reproducible with random seed 42. Override the defaults or output path as
-needed:
+Sampling is reproducible with the seed in the analysis TOML. The Parquet destination
+remains an operational command-line option:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
-  --sampling-block-size-m 25000 `
-  --samples-per-class-per-block 100 `
-  --random-seed 42 `
+python scripts/load_ecoregion_geotiff.py `
+  config\south_africa_reference_condition_analysis.toml `
+  data\raster_stacks\example.tif `
   --sample-output outputs\samples\example.parquet
 ```
 
@@ -109,11 +99,13 @@ retention rates, weight reconstruction checks, predictor missingness, and verifi
 Parquet metadata. Use `--no-sampling` when only the raster report and location figure
 are needed.
 
-The map label is inferred from the GeoTIFF filename. Supply an explicit PNG, PDF, or
-SVG path when vector output or a different destination is needed:
+The map label comes from `analysis.display_name`. Supply an explicit PNG, PDF, or SVG
+path when vector output or a different destination is needed:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py data\raster_stacks\example.tif `
+python scripts/load_ecoregion_geotiff.py `
+  config\south_africa_reference_condition_analysis.toml `
+  data\raster_stacks\example.tif `
   --location-figure outputs\figures\northern_shortgrass_prairie.svg
 ```
 
@@ -172,24 +164,19 @@ predictors.
 
 ```powershell
 python scripts/fit_grassland_integrity_parameters.py `
+  config\south_africa_reference_condition_analysis.toml `
   outputs\samples\example_spatial_sample.parquet
 ```
 
-Pass the same `--stack-configuration` used for fetching and sampling. The model-run
-metadata and each serialized model record the stack name, version, and configuration
-hash.
+The model-run metadata and each serialized model record the analysis identity, year,
+stack name and version, and configuration hash.
 
 The default run screens all configured response bands, using the earliest available
 year when a sample contains repeated years. Bands with no reference observations, too
 little represented-area coverage, no reference-site variation, or inadequate
-spatial-fold support are listed with a reason and skipped. Fit a smaller candidate set
-with response-band aliases:
-
-```powershell
-python scripts/fit_grassland_integrity_parameters.py `
-  outputs\samples\example_spatial_sample.parquet `
-  --responses d02 d03 d11 d12 d18 d19
-```
+spatial-fold support are listed with a reason and skipped. Set `model.responses` to
+response-band aliases such as `["d02", "d03", "d11"]` to fit a smaller candidate
+set; an empty list selects every configured response.
 
 Each continuous response receives its own regularized additive ridge regression.
 Configured continuous predictors enter as independent cubic splines, the configured
@@ -229,8 +216,8 @@ productivity need explicit ecological direction and weighting before combination
 sampled zero class is background rather than a verified current-grassland mask, so use
 a defensible current-grassland layer before interpreting deviations as present-day
 grassland condition. Use `--no-partial-response-figures` for a faster screening run and
-`--help` for response selection, output, labeling, and progress controls. Model-tuning
-defaults live in `IntegrityConfiguration` rather than being repeated as CLI options.
+`--help` for output and progress controls. Model tuning, response selection, and the
+display name live only in the analysis TOML rather than being repeated as CLI options.
 
 Shared reference-condition preparation lives in
 `scripts/reference_condition_utils.py`. It is an imported library module rather than a
@@ -245,6 +232,7 @@ ecoregion raster stack:
 
 ```powershell
 python scripts/apply_reference_condition_models.py `
+  config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
   outputs\integrity_parameters\example_spatial_sample
 ```
@@ -283,7 +271,7 @@ display cells along the longest raster dimension by taking the mean among
 non-reference pixels in each display cell. Green indicates lower total standardized
 departure and red indicates larger departure. A fixed linear scale maps 0 to green,
 3 to yellow-green, and values of 10 or more to red. Black outlines show display
-cells containing pixels from the raster stack's 2018 reference-site band. Reference
+cells containing pixels from the analysis-year reference-site band. Reference
 pixels do not contribute to the colored values. This aggregate is a diagnostic, not
 an integrity score, and responses with similar ecological information can be counted
 more than once.
@@ -291,16 +279,16 @@ more than once.
 The reference-departure percentile uses only complete reference rows from
 `ecological_response_predictions.parquet`. It calculates their area-weighted mean
 standardized-departure vector and covariance matrix from out-of-fold predictions,
-then shrinks 10% of the covariance toward its diagonal before inversion. The
-shrinkage retains each response's variance while reducing instability from strongly
-correlated responses such as NPP and GPP. Use `--covariance-shrinkage` to change the
-fraction.
+then shrinks the configured fraction of covariance toward its diagonal before
+inversion. The shrinkage retains each response's variance while reducing instability
+from strongly correlated responses such as NPP and GPP. Change
+`inference.covariance_shrinkage` in the analysis TOML to change the fraction.
 
 For every complete non-reference raster pixel, the script calculates a Mahalanobis
 distance from the reference center and writes `P_i`: the represented-area fraction of
 complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` means the
 pixel is farther from the reference center than 95% of represented calibration area.
-The aligned single-band GeoTIFF uses the fixed 0–1 scale. Reference pixels and pixels
+The aligned single-band GeoTIFF uses the fixed 0 to 1 scale. Reference pixels and pixels
 missing any fitted response are nodata. The corresponding PNG shows reference-site
 display cells in deep violet with white boundaries and mean non-reference `P_i` from
 green at 0 through red at 1. The report records complete-reference coverage,
@@ -312,18 +300,18 @@ degradation or an ecological integrity score. Keep the individual standardized
 response rasters to identify the variables and directions responsible for a large
 departure.
 
-Supply an exactly aligned mask whose defined nonzero first-band pixels identify the
-target when a current-grassland layer is available:
+Set `inference.grassland_mask_path` to an exactly aligned raster whose defined nonzero
+first-band pixels identify the target when a current-grassland layer is available:
 
 ```powershell
 python scripts/apply_reference_condition_models.py `
+  config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
-  outputs\integrity_parameters\example_spatial_sample `
-  --grassland-mask data\masks\example_current_grassland.tif
+  outputs\integrity_parameters\example_spatial_sample
 ```
 
-Without `--grassland-mask`, the script infers across the usable ecoregion predictor
-footprint and marks the report accordingly. Unmasked outputs are diagnostic
+Without `inference.grassland_mask_path`, the script infers across the usable ecoregion
+predictor footprint and marks the report accordingly. Unmasked outputs are diagnostic
 reference-condition deviations, not grassland integrity maps. Positive standardized
 deviation means observed is above expected. The percentile combines multivariate
 departure without assigning ecological direction, so integrity interpretation remains

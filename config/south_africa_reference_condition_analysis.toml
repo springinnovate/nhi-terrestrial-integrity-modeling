@@ -1,3 +1,13 @@
+[analysis]
+name = "south_africa_reference_condition_2018"
+display_name = "South Africa"
+aoi_path = "aoi/south_africa.geojson"
+year = 2018
+
+[earth_engine]
+project = "ecoshard-202922"
+cache_directory = "../data/gee_raster_cache"
+
 [stack]
 name = "nhi_reference_condition"
 version = 1
@@ -16,10 +26,30 @@ tile_size_pixels = 128
 origin_x = 0
 origin_y = 0
 
-[reference_defaults]
+[reference]
 grassland_probability = 80
 human_modification = 0.1
 human_influence = 0.08
+
+[sampling]
+block_size_meters = 25000
+samples_per_class_per_block = 100
+random_seed = 42
+
+[model]
+fold_count = 5
+validation_block_size_meters = 100000
+minimum_predictor_coverage = 0.80
+maximum_row_missing_fraction = 0.20
+spline_knot_count = 6
+minimum_response_coverage = 0.50
+ridge_alpha = 1.0
+responses = []
+
+[inference]
+# grassland_mask_path = "../data/masks/south_africa_current_grassland.tif"
+window_size_pixels = 256
+covariance_shrinkage = 0.10
 
 [datasets]
 maybe_grassland_ecoregions = "projects/ecoshard-202922/assets/nhi_assets/maybe_grassland_ecoregions_simplified_100m"

@@ -29,28 +29,22 @@ from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
 if __package__:
-    from .raster_stack_config import (
+    from .analysis_config import (
+        AnalysisConfiguration,
         BAND_COLUMN_PATTERN,
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+        load_analysis_configuration,
     )
     from .reference_condition_utils import (
-        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
         EQUAL_AREA_CRS,
-        infer_ecoregion_name,
     )
 else:
-    from raster_stack_config import (
+    from analysis_config import (
+        AnalysisConfiguration,
         BAND_COLUMN_PATTERN,
-        DEFAULT_RASTER_STACK_CONFIG_PATH,
-        RasterStackConfiguration,
-        load_raster_stack_configuration,
+        load_analysis_configuration,
     )
     from reference_condition_utils import (
-        DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
         EQUAL_AREA_CRS,
-        infer_ecoregion_name,
     )
 
 
@@ -59,8 +53,6 @@ MEBIBYTE = 1024**2
 MAX_FOOTPRINT_DIMENSION = 600
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
-DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK = 100
-DEFAULT_RANDOM_SEED = 42
 
 
 @dataclass(frozen=True)
@@ -384,16 +376,15 @@ def parse_args() -> argparse.Namespace:
             "and print coverage diagnostics."
         )
     )
-    parser.add_argument("geotiff", type=Path, help="Multiband GeoTIFF to load.")
     parser.add_argument(
-        "--stack-configuration",
+        "analysis_configuration",
         type=Path,
-        default=DEFAULT_RASTER_STACK_CONFIG_PATH,
         help=(
-            "TOML raster-stack definition used to identify reference bands. "
-            f"Default: {DEFAULT_RASTER_STACK_CONFIG_PATH}."
+            "Complete TOML analysis definition containing sampling settings "
+            "and the raster-band contract."
         ),
     )
+    parser.add_argument("geotiff", type=Path, help="Multiband GeoTIFF to load.")
     parser.add_argument(
         "--no-band-report",
         action="store_true",
@@ -424,31 +415,6 @@ def parse_args() -> argparse.Namespace:
             "Output path for the spatial sample (.parquet). Defaults to "
             "outputs/samples/<ecoregion>_spatial_sample.parquet."
         ),
-    )
-    parser.add_argument(
-        "--sampling-block-size-m",
-        type=float,
-        default=DEFAULT_SAMPLING_BLOCK_SIZE_METERS,
-        help=(
-            "Square sampling-block size in meters "
-            f"(default: {DEFAULT_SAMPLING_BLOCK_SIZE_METERS:g})."
-        ),
-    )
-    parser.add_argument(
-        "--samples-per-class-per-block",
-        type=int,
-        default=DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK,
-        help=(
-            "Maximum sampled pixels for each binary reference-site class in each "
-            "block "
-            f"(default: {DEFAULT_SAMPLES_PER_CLASS_PER_BLOCK})."
-        ),
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=DEFAULT_RANDOM_SEED,
-        help=f"Random sampling seed (default: {DEFAULT_RANDOM_SEED}).",
     )
     parser.add_argument(
         "--no-sampling",
@@ -698,7 +664,7 @@ def create_spatial_sample(
     samples_per_class_per_block: int,
     random_seed: int,
     show_progress: bool,
-    stack_configuration: RasterStackConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> SpatialSample:
     """Create a deterministic spatially balanced sample of raster pixels.
 
@@ -715,7 +681,7 @@ def create_spatial_sample(
             reference-site class within each block.
         random_seed: Seed for reproducible sampling without replacement.
         show_progress: Whether to display tqdm progress bars.
-        stack_configuration: Configured band-role contract.
+        analysis_configuration: Complete analysis and band-role contract.
 
     Returns:
         Sample table and diagnostics describing its source population.
@@ -732,7 +698,7 @@ def create_spatial_sample(
     # first copy as the response and exclude every copy from predictor columns.
     reference_band_identifiers = {
         band.identifier
-        for band in stack_configuration.bands
+        for band in analysis_configuration.bands
         if band.role == "reference"
     }
     reference_band_offsets = tuple(
@@ -1856,15 +1822,15 @@ def main() -> None:
     """Load, report, sample, serialize, and map one ecoregion GeoTIFF."""
 
     args = parse_args()
-    stack_configuration = load_raster_stack_configuration(
-        args.stack_configuration
+    analysis_configuration = load_analysis_configuration(
+        args.analysis_configuration
     )
     raster = load_raster_pixels(
         args.geotiff,
         show_progress=not args.no_progress,
     )
     print_raster_report(raster, not args.no_band_report, not args.no_progress)
-    ecoregion_name = infer_ecoregion_name(raster.path)
+    ecoregion_name = analysis_configuration.display_name
     ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
 
     if not args.no_sampling:
@@ -1875,11 +1841,11 @@ def main() -> None:
         )
         sample = create_spatial_sample(
             raster,
-            args.sampling_block_size_m,
-            args.samples_per_class_per_block,
-            args.random_seed,
+            analysis_configuration.sampling.block_size_meters,
+            analysis_configuration.sampling.samples_per_class_per_block,
+            analysis_configuration.sampling.random_seed,
             not args.no_progress,
-            stack_configuration,
+            analysis_configuration,
         )
         print_spatial_sampling_report(sample)
         table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())

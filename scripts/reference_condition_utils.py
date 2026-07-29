@@ -15,17 +15,11 @@ from matplotlib.patches import Patch, Rectangle
 from pyproj import Transformer
 
 if __package__:
-    from .raster_stack_config import RasterStackConfiguration
+    from .analysis_config import AnalysisConfiguration
 else:
-    from raster_stack_config import RasterStackConfiguration
+    from analysis_config import AnalysisConfiguration
 
 
-DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000
-DEFAULT_VALIDATION_BLOCK_SIZE_METERS = 100_000
-DEFAULT_FOLD_COUNT = 5
-DEFAULT_MINIMUM_PREDICTOR_COVERAGE = 0.80
-DEFAULT_MAXIMUM_ROW_MISSING_FRACTION = 0.20
-DEFAULT_SPLINE_KNOT_COUNT = 6
 FIGURE_DPI = 300
 EQUAL_AREA_CRS = "EPSG:8857"
 SPATIAL_FOLD_COLORS = tuple(plt.get_cmap("Set2").colors)
@@ -46,12 +40,12 @@ class ReferenceConditionConfiguration:
         spline_knot_count: Number of knots for each continuous spline term.
     """
 
-    fold_count: int = DEFAULT_FOLD_COUNT
-    sampling_block_size_meters: int = DEFAULT_SAMPLING_BLOCK_SIZE_METERS
-    validation_block_size_meters: int = DEFAULT_VALIDATION_BLOCK_SIZE_METERS
-    minimum_predictor_coverage: float = DEFAULT_MINIMUM_PREDICTOR_COVERAGE
-    maximum_row_missing_fraction: float = DEFAULT_MAXIMUM_ROW_MISSING_FRACTION
-    spline_knot_count: int = DEFAULT_SPLINE_KNOT_COUNT
+    fold_count: int
+    sampling_block_size_meters: int
+    validation_block_size_meters: int
+    minimum_predictor_coverage: float
+    maximum_row_missing_fraction: float
+    spline_knot_count: int
 
 
 @dataclass(frozen=True)
@@ -275,7 +269,7 @@ def assign_spatial_folds(
 def prepare_reference_condition_data(
     sample_table: pd.DataFrame,
     configuration: ReferenceConditionConfiguration,
-    stack_configuration: RasterStackConfiguration,
+    stack_configuration: AnalysisConfiguration,
 ) -> PreparedReferenceConditionData:
     """Select environmental predictors and prepare spatial validation rows.
 

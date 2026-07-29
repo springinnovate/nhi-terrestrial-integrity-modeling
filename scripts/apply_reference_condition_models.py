@@ -26,15 +26,18 @@ from rasterio.windows import Window
 from tqdm.auto import tqdm
 
 if __package__:
+    from .analysis_config import (
+        AnalysisConfiguration,
+        load_analysis_configuration,
+    )
     from .fit_grassland_integrity_parameters import predict_expected_response
     from .reference_condition_utils import FIGURE_DPI
 else:
+    from analysis_config import AnalysisConfiguration, load_analysis_configuration
     from fit_grassland_integrity_parameters import predict_expected_response
     from reference_condition_utils import FIGURE_DPI
 
 
-DEFAULT_WINDOW_SIZE_PIXELS = 256
-DEFAULT_COVARIANCE_SHRINKAGE = 0.10
 MAXIMUM_DISPLAY_DIMENSION = 700
 DISPLAY_COLOR_MAXIMUM = 10.0
 DISPLAY_YELLOW_GREEN_VALUE = 3.0
@@ -411,7 +414,7 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
     Returns:
-        Parsed raster, model, output, mask, window, and progress arguments.
+        Parsed analysis, raster, model, output, and progress arguments.
     """
 
     parser = argparse.ArgumentParser(
@@ -419,6 +422,14 @@ def parse_args() -> argparse.Namespace:
             "Apply final reference-condition models to an aligned ecoregion "
             "raster stack without constructing an integrity score."
         )
+    )
+    parser.add_argument(
+        "analysis_configuration",
+        type=Path,
+        help=(
+            "Complete TOML analysis definition containing inference settings "
+            "and the raster-band contract."
+        ),
     )
     parser.add_argument("raster_stack", type=Path, help="Multiband GeoTIFF to score.")
     parser.add_argument(
@@ -435,29 +446,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Output directory. Defaults to "
             "outputs/reference_condition_inference/<ecoregion>."
-        ),
-    )
-    parser.add_argument(
-        "--grassland-mask",
-        type=Path,
-        help=(
-            "Optional exactly aligned raster whose defined nonzero first-band "
-            "pixels identify the inference target."
-        ),
-    )
-    parser.add_argument(
-        "--window-size-pixels",
-        type=int,
-        default=DEFAULT_WINDOW_SIZE_PIXELS,
-        help=f"Square processing-window size. Default: {DEFAULT_WINDOW_SIZE_PIXELS}.",
-    )
-    parser.add_argument(
-        "--covariance-shrinkage",
-        type=float,
-        default=DEFAULT_COVARIANCE_SHRINKAGE,
-        help=(
-            "Fraction of the reference covariance shrunk toward its diagonal "
-            f"before inversion. Default: {DEFAULT_COVARIANCE_SHRINKAGE:.2f}."
         ),
     )
     parser.add_argument(
@@ -1337,27 +1325,22 @@ def create_departure_percentile_figure(
 
 
 def run_reference_condition_inference(
+    analysis_configuration: AnalysisConfiguration,
     raster_stack_path: Path,
     model_run_directory: Path,
     output_directory: Path | None = None,
-    grassland_mask_path: Path | None = None,
-    window_size_pixels: int = DEFAULT_WINDOW_SIZE_PIXELS,
-    covariance_shrinkage: float = DEFAULT_COVARIANCE_SHRINKAGE,
     show_progress: bool = True,
 ) -> InferenceRunSummary:
     """Apply final response models to aligned raster pixels in bounded windows.
 
     Args:
+        analysis_configuration: Authoritative analysis identity, mask, window,
+            covariance, and raster-band settings.
         raster_stack_path: Multiband ecoregion GeoTIFF containing every model
             predictor and observed response band.
         model_run_directory: Output directory from the response-model workflow.
         output_directory: Destination directory. ``None`` uses an ecoregion-
             specific directory under ``outputs/reference_condition_inference``.
-        grassland_mask_path: Optional exactly aligned raster. Defined nonzero
-            values in its first band identify target pixels.
-        window_size_pixels: Width and height of each processing window.
-        covariance_shrinkage: Fraction of covariance shrunk toward its diagonal
-            before calculating multivariate reference distances.
         show_progress: Whether to display tqdm window progress.
 
     Returns:
@@ -1369,15 +1352,13 @@ def run_reference_condition_inference(
         RuntimeError: If a fitted model produces a nonfinite prediction.
     """
 
-    if window_size_pixels <= 0:
-        raise ValueError("window_size_pixels must be positive.")
     started = time.perf_counter()
+    window_size_pixels = analysis_configuration.inference.window_size_pixels
+    covariance_shrinkage = analysis_configuration.inference.covariance_shrinkage
     resolved_raster_path = raster_stack_path.expanduser().resolve()
     resolved_model_run_directory = model_run_directory.expanduser().resolve()
     resolved_mask_path = (
-        grassland_mask_path.expanduser().resolve()
-        if grassland_mask_path is not None
-        else None
+        analysis_configuration.inference.grassland_mask_path
     )
     run_metadata, response_models, maximum_missing_fraction = load_response_models(
         resolved_model_run_directory
@@ -1960,6 +1941,14 @@ def run_reference_condition_inference(
         "artifact_type": "grassland_reference_condition_raster_inference",
         "format_version": 2,
         "ecoregion_name": ecoregion_name,
+        "analysis_configuration": {
+            "path": str(analysis_configuration.path),
+            "analysis_name": analysis_configuration.analysis_name,
+            "display_name": analysis_configuration.display_name,
+            "aoi_path": str(analysis_configuration.aoi_path),
+            "year": analysis_configuration.year,
+            "sha256": analysis_configuration.configuration_sha256,
+        },
         "input_raster": str(resolved_raster_path),
         "model_run_directory": str(resolved_model_run_directory),
         "grassland_mask": str(resolved_mask_path) if resolved_mask_path else None,
@@ -2118,13 +2107,14 @@ def main() -> None:
     """
 
     args = parse_args()
+    analysis_configuration = load_analysis_configuration(
+        args.analysis_configuration
+    )
     run_reference_condition_inference(
+        analysis_configuration,
         args.raster_stack,
         args.model_run_directory,
         output_directory=args.output_directory,
-        grassland_mask_path=args.grassland_mask,
-        window_size_pixels=args.window_size_pixels,
-        covariance_shrinkage=args.covariance_shrinkage,
         show_progress=not args.no_progress,
     )
 

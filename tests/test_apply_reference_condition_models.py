@@ -8,6 +8,7 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,7 +33,7 @@ from scripts.fit_grassland_integrity_parameters import (
     fit_response_gam,
     predict_expected_response,
 )
-from scripts.raster_stack_config import load_raster_stack_configuration
+from scripts.analysis_config import load_analysis_configuration
 
 
 class ApplyReferenceConditionModelsTest(unittest.TestCase):
@@ -59,7 +60,15 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "y2018_d11_response",
         )
         self.response_rmse = {"d02": 2.0, "d11": 4.0}
-        self.stack_configuration = load_raster_stack_configuration()
+        base_configuration = load_analysis_configuration()
+        self.stack_configuration = replace(
+            base_configuration,
+            display_name="Synthetic Prairie",
+            inference=replace(
+                base_configuration.inference,
+                window_size_pixels=2,
+            ),
+        )
         self.models = self._create_models()
         self.raster_path = self.temporary_path / "synthetic_ecoregion.tif"
         self.transform = from_origin(-110.0, 45.0, 0.01, 0.01)
@@ -69,6 +78,9 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 {
                     "ecoregion_name": "Synthetic Prairie",
                     "configuration": {"maximum_row_missing_fraction": 0.20},
+                    "analysis_configuration": {
+                        "sha256": self.stack_configuration.configuration_sha256,
+                    },
                 }
             ),
             encoding="utf-8",
@@ -119,7 +131,16 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         )
         training_table[self.response_names[0]] = 5.0 + environmental_signal
         training_table[self.response_names[1]] = 20.0 + 2.0 * environmental_signal
-        configuration = IntegrityConfiguration(spline_knot_count=4, ridge_alpha=0.1)
+        configuration = IntegrityConfiguration(
+            fold_count=5,
+            sampling_block_size_meters=25_000,
+            validation_block_size_meters=100_000,
+            minimum_predictor_coverage=0.80,
+            maximum_row_missing_fraction=0.20,
+            spline_knot_count=4,
+            minimum_response_coverage=0.50,
+            ridge_alpha=0.1,
+        )
         models = {}
         for response_name, response_band in zip(
             self.response_names,
@@ -267,10 +288,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             contextlib.redirect_stdout(standard_output),
         ):
             summary = run_reference_condition_inference(
+                self.stack_configuration,
                 self.raster_path,
                 self.model_run_directory,
                 output_directory=output_directory,
-                window_size_pixels=2,
                 show_progress=False,
             )
 
@@ -484,11 +505,17 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         with contextlib.redirect_stdout(io.StringIO()):
             summary = run_reference_condition_inference(
+                replace(
+                    self.stack_configuration,
+                    inference=replace(
+                        self.stack_configuration.inference,
+                        grassland_mask_path=mask_path,
+                        window_size_pixels=3,
+                    ),
+                ),
                 self.raster_path,
                 self.model_run_directory,
                 output_directory=self.temporary_path / "masked_output",
-                grassland_mask_path=mask_path,
-                window_size_pixels=3,
                 show_progress=False,
             )
 

@@ -1,4 +1,4 @@
-"""Tests for shared TOML raster-stack configuration."""
+"""Tests for shared TOML analysis configuration."""
 
 from __future__ import annotations
 
@@ -6,10 +6,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.raster_stack_config import load_raster_stack_configuration
+from scripts.analysis_config import load_analysis_configuration
 
 
-MINIMAL_STACK_TOML = """
+MINIMAL_ANALYSIS_TOML = """
+[analysis]
+name = "test_analysis_2019"
+display_name = "Test analysis"
+aoi_path = "aoi.geojson"
+year = 2019
+
+[earth_engine]
+project = "example-project"
+cache_directory = "cache"
+
 [stack]
 name = "test_stack"
 version = 3
@@ -28,10 +38,29 @@ tile_size_pixels = 64
 origin_x = 0
 origin_y = 0
 
-[reference_defaults]
+[reference]
 grassland_probability = 75
 human_modification = 0.2
 human_influence = 0.1
+
+[sampling]
+block_size_meters = 25000
+samples_per_class_per_block = 100
+random_seed = 42
+
+[model]
+fold_count = 5
+validation_block_size_meters = 100000
+minimum_predictor_coverage = 0.8
+maximum_row_missing_fraction = 0.2
+spline_knot_count = 6
+minimum_response_coverage = 0.5
+ridge_alpha = 1.0
+responses = ["d02"]
+
+[inference]
+window_size_pixels = 256
+covariance_shrinkage = 0.1
 
 [datasets]
 reference = "projects/example/reference"
@@ -77,7 +106,7 @@ sources = ["precipitation"]
 """
 
 
-class RasterStackConfigurationTest(unittest.TestCase):
+class AnalysisConfigurationTest(unittest.TestCase):
     """Verify schema loading, role selection, and stable identity."""
 
     def setUp(self) -> None:
@@ -86,13 +115,24 @@ class RasterStackConfigurationTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.temporary_path = Path(self.temporary_directory.name)
+        (self.temporary_path / "aoi.geojson").write_text(
+            '{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}',
+            encoding="utf-8",
+        )
 
     def test_loads_default_39_band_pipeline_contract(self) -> None:
         """Expose the existing stack through configured names and roles."""
 
-        configuration = load_raster_stack_configuration()
+        configuration = load_analysis_configuration()
 
-        self.assertEqual("nhi_reference_condition", configuration.name)
+        self.assertEqual(
+            "south_africa_reference_condition_2018",
+            configuration.analysis_name,
+        )
+        self.assertEqual("nhi_reference_condition", configuration.stack_name)
+        self.assertEqual(2018, configuration.year)
+        self.assertEqual("South Africa", configuration.display_name)
+        self.assertTrue(configuration.aoi_path.is_file())
         self.assertEqual(39, len(configuration.bands))
         role_counts = {
             role: sum(band.role == role for band in configuration.bands)
@@ -115,8 +155,8 @@ class RasterStackConfigurationTest(unittest.TestCase):
         """Honor a reduced order and select one column per configured role band."""
 
         configuration_path = self.temporary_path / "reduced.toml"
-        configuration_path.write_text(MINIMAL_STACK_TOML, encoding="utf-8")
-        configuration = load_raster_stack_configuration(configuration_path)
+        configuration_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+        configuration = load_analysis_configuration(configuration_path)
 
         self.assertEqual(
             (
@@ -149,19 +189,43 @@ class RasterStackConfigurationTest(unittest.TestCase):
 
         first_path = self.temporary_path / "first.toml"
         second_path = self.temporary_path / "second.toml"
-        first_path.write_text(MINIMAL_STACK_TOML, encoding="utf-8")
+        first_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
         second_path.write_text(
-            MINIMAL_STACK_TOML.replace(
+            MINIMAL_ANALYSIS_TOML.replace(
                 'display_name = "Precipitation"',
                 'display_name = "Annual precipitation"',
             ),
             encoding="utf-8",
         )
 
-        first = load_raster_stack_configuration(first_path)
-        second = load_raster_stack_configuration(second_path)
+        first = load_analysis_configuration(first_path)
+        second = load_analysis_configuration(second_path)
 
         self.assertNotEqual(first.configuration_sha256, second.configuration_sha256)
+        self.assertNotEqual(
+            first.raster_configuration_sha256,
+            second.raster_configuration_sha256,
+        )
+
+    def test_model_change_preserves_raster_cache_identity(self) -> None:
+        """Do not redownload pixels when only a model setting changes."""
+
+        first_path = self.temporary_path / "first.toml"
+        second_path = self.temporary_path / "second.toml"
+        first_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+        second_path.write_text(
+            MINIMAL_ANALYSIS_TOML.replace("ridge_alpha = 1.0", "ridge_alpha = 2.0"),
+            encoding="utf-8",
+        )
+
+        first = load_analysis_configuration(first_path)
+        second = load_analysis_configuration(second_path)
+
+        self.assertNotEqual(first.configuration_sha256, second.configuration_sha256)
+        self.assertEqual(
+            first.raster_configuration_sha256,
+            second.raster_configuration_sha256,
+        )
 
 
 if __name__ == "__main__":

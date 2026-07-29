@@ -19,11 +19,10 @@ from shapely.geometry import box, mapping
 from shapely.ops import transform
 
 from scripts import fetch_gee_raster_tiles
+from scripts.analysis_config import load_analysis_configuration
 from scripts.fetch_gee_raster_tiles import (
     CacheGrid,
     CacheTile,
-    DEFAULT_STACK_CONFIGURATION,
-    ReferenceThresholds,
     build_stack_identifier,
     cache_aoi_tiles,
     fetch_tile_bytes,
@@ -46,6 +45,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             pixel_size_meters=1_000,
             tile_size_pixels=4,
         )
+        self.default_analysis = load_analysis_configuration()
 
     def tearDown(self) -> None:
         """Remove the isolated test workspace."""
@@ -71,6 +71,21 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.aoi_path.write_text(
             json.dumps(mapping(wgs84_geometry)),
             encoding="utf-8",
+        )
+
+    def analysis_configuration(self, **changes):
+        """Return the default analysis pointed at isolated test resources."""
+
+        return replace(
+            self.default_analysis,
+            aoi_path=self.aoi_path,
+            earth_engine=replace(
+                self.default_analysis.earth_engine,
+                project="offline-test-project",
+                cache_directory=self.cache_directory,
+            ),
+            grid=self.test_grid,
+            **changes,
         )
 
     @staticmethod
@@ -128,9 +143,9 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
     def test_band_schema_has_stable_d01_through_d39_names(self) -> None:
         """Expose one unique, ordered export name for every modeled band."""
 
-        band_names = DEFAULT_STACK_CONFIGURATION.band_names(2018)
+        band_names = self.default_analysis.band_names()
 
-        self.assertEqual(39, len(DEFAULT_STACK_CONFIGURATION.bands))
+        self.assertEqual(39, len(self.default_analysis.bands))
         self.assertEqual(39, len(band_names))
         self.assertEqual(39, len(set(band_names)))
         self.assertEqual(
@@ -207,18 +222,14 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         """Download once, persist metadata, and skip a repeated AOI request."""
 
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
-        thresholds = ReferenceThresholds()
+        analysis_configuration = self.analysis_configuration()
         with patch.object(
             fetch_gee_raster_tiles,
             "CacheGrid",
             return_value=self.test_grid,
         ):
             first_summary = cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                thresholds,
+                analysis_configuration,
                 refresh=False,
                 show_progress=False,
                 compute_tile=self.create_tile_bytes,
@@ -228,11 +239,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
                 self.fail("A valid cached tile should not be downloaded again.")
 
             second_summary = cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                thresholds,
+                analysis_configuration,
                 refresh=False,
                 show_progress=False,
                 compute_tile=unexpected_download,
@@ -246,7 +253,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         manifest = json.loads(
             (self.cache_directory / "manifest.json").read_text(encoding="utf-8")
         )
-        stack_identifier = build_stack_identifier(2018, thresholds)
+        stack_identifier = build_stack_identifier(analysis_configuration)
         tile_record = next(iter(manifest["tiles"].values()))
         self.assertEqual(stack_identifier, tile_record["stack_id"])
         self.assertEqual(2018, tile_record["year"])
@@ -257,11 +264,19 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.assertEqual(2, len(manifest["requests"]))
         self.assertEqual(39, len(manifest["stacks"][stack_identifier]["bands"]))
         self.assertEqual(
-            DEFAULT_STACK_CONFIGURATION.configuration_sha256,
-            manifest["stacks"][stack_identifier]["configuration_sha256"],
+            analysis_configuration.configuration_sha256,
+            manifest["stacks"][stack_identifier][
+                "analysis_configuration_sha256"
+            ],
         )
         self.assertEqual(
-            DEFAULT_STACK_CONFIGURATION.datasets["landsat_ndvi"],
+            analysis_configuration.raster_configuration_sha256,
+            manifest["stacks"][stack_identifier][
+                "raster_configuration_sha256"
+            ],
+        )
+        self.assertEqual(
+            analysis_configuration.datasets["landsat_ndvi"],
             manifest["stacks"][stack_identifier]["datasets"]["landsat_ndvi"],
         )
 
@@ -270,23 +285,20 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
 
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
         bands_by_identifier = {
-            band.identifier: band for band in DEFAULT_STACK_CONFIGURATION.bands
+            band.identifier: band for band in self.default_analysis.bands
         }
         reduced_configuration = replace(
-            DEFAULT_STACK_CONFIGURATION,
+            self.analysis_configuration(),
             configuration_sha256="1" * 64,
+            raster_configuration_sha256="2" * 64,
             bands=tuple(
                 bands_by_identifier[identifier]
                 for identifier in ("d01", "d35", "d02", "d24")
             ),
         )
         self.assertNotEqual(
-            build_stack_identifier(2018, ReferenceThresholds()),
-            build_stack_identifier(
-                2018,
-                ReferenceThresholds(),
-                reduced_configuration,
-            ),
+            build_stack_identifier(self.analysis_configuration()),
+            build_stack_identifier(reduced_configuration),
         )
         with patch.object(
             fetch_gee_raster_tiles,
@@ -294,14 +306,9 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             return_value=self.test_grid,
         ):
             cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                ReferenceThresholds(),
+                reduced_configuration,
                 refresh=False,
                 show_progress=False,
-                stack_configuration=reduced_configuration,
                 compute_tile=self.create_tile_bytes,
             )
 
@@ -329,11 +336,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             redirect_stdout(report_output),
         ):
             cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                ReferenceThresholds(),
+                self.analysis_configuration(),
                 refresh=False,
                 show_progress=True,
                 compute_tile=self.create_tile_bytes,
@@ -351,18 +354,14 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         """Reject a cached file whose checksum no longer matches the manifest."""
 
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
-        thresholds = ReferenceThresholds()
+        analysis_configuration = self.analysis_configuration()
         with patch.object(
             fetch_gee_raster_tiles,
             "CacheGrid",
             return_value=self.test_grid,
         ):
             cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                thresholds,
+                analysis_configuration,
                 refresh=False,
                 show_progress=False,
                 compute_tile=self.create_tile_bytes,
@@ -370,11 +369,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             cached_tile_path = next((self.cache_directory / "tiles").rglob("*.tif"))
             cached_tile_path.write_bytes(b"not a geotiff")
             replacement_summary = cache_aoi_tiles(
-                self.aoi_path,
-                2018,
-                "offline-test-project",
-                self.cache_directory,
-                thresholds,
+                analysis_configuration,
                 refresh=False,
                 show_progress=False,
                 compute_tile=self.create_tile_bytes,
