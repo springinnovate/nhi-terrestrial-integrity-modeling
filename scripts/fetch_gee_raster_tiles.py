@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import ee
+import httplib2
 import rasterio
 from pyproj import Transformer
 from rasterio.crs import CRS
@@ -32,6 +33,10 @@ DEFAULT_TILE_SIZE_PIXELS = 128
 DEFAULT_GRASSLAND_PROBABILITY_THRESHOLD = 80
 DEFAULT_HMI_THRESHOLD = 0.1
 DEFAULT_HII_THRESHOLD = 0.08
+# Earth Engine limits interactive computations to five minutes. The extra
+# minute lets the server return its own timeout before the transport is closed.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 360
+DEFAULT_REQUEST_RETRY_COUNT = 1
 MINIMUM_COMPLETE_STACK_YEAR = 2015
 MAXIMUM_COMPLETE_STACK_YEAR = 2019
 REFERENCE_START_YEAR = 2001
@@ -413,7 +418,7 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
     Returns:
-        AOI, year, Earth Engine project, cache, threshold, and refresh settings.
+        AOI, Earth Engine, cache, threshold, request, and refresh settings.
     """
 
     parser = argparse.ArgumentParser(
@@ -470,6 +475,24 @@ def parse_args() -> argparse.Namespace:
         "--refresh",
         action="store_true",
         help="Download every intersecting tile even when a valid cache entry exists.",
+    )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        help=(
+            "Maximum wait for one Earth Engine request attempt. Default: "
+            f"{DEFAULT_REQUEST_TIMEOUT_SECONDS} seconds."
+        ),
+    )
+    parser.add_argument(
+        "--request-retries",
+        type=int,
+        default=DEFAULT_REQUEST_RETRY_COUNT,
+        help=(
+            "Retries after a failed Earth Engine request attempt. Default: "
+            f"{DEFAULT_REQUEST_RETRY_COUNT}."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -1082,6 +1105,8 @@ def cache_aoi_tiles(
     thresholds: ReferenceThresholds,
     refresh: bool,
     show_progress: bool,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    request_retry_count: int = DEFAULT_REQUEST_RETRY_COUNT,
     compute_tile: (
         Callable[[ee.Image | None, CacheTile, CacheGrid, Sequence[str]], bytes]
         | None
@@ -1097,15 +1122,23 @@ def cache_aoi_tiles(
         thresholds: Reference-site thresholds used to construct d01.
         refresh: Whether valid existing tiles should be replaced.
         show_progress: Whether to display tqdm progress.
+        request_timeout_seconds: Maximum socket wait for one request attempt.
+        request_retry_count: Retry attempts after the initial request fails.
         compute_tile: Optional tile-fetch implementation used by offline tests.
 
     Returns:
         Counts and byte totals for requested, reused, downloaded, and failed tiles.
 
     Raises:
-        RuntimeError: If Earth Engine initialization fails or any tile fetch fails.
+        ValueError: If request timeout or retry settings are invalid.
+        RuntimeError: If Earth Engine initialization fails or a tile exhausts
+            its request attempts.
     """
 
+    if request_timeout_seconds <= 0:
+        raise ValueError("request_timeout_seconds must be positive.")
+    if not 0 <= request_retry_count < 100:
+        raise ValueError("request_retry_count must be between 0 and 99.")
     resolved_cache_directory = cache_directory.expanduser().resolve()
     resolved_cache_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = resolved_cache_directory / "manifest.json"
@@ -1184,22 +1217,33 @@ def cache_aoi_tiles(
     print(f"  Intersecting grids: {len(requested_tiles):,}")
     print(f"  Valid cached grids: {len(valid_cached_tiles):,}")
     print(f"  Grids to download: {len(tiles_requiring_download):,}")
+    print(
+        "  Request policy: "
+        f"{request_timeout_seconds:g} second timeout, "
+        f"{request_retry_count + 1} attempt(s) per grid"
+    )
 
     raster_stack = None
     tile_fetcher = compute_tile or fetch_tile_bytes
     if tiles_requiring_download and compute_tile is None:
         try:
-            ee.Initialize(project=earth_engine_project)
+            ee.data.setMaxRetries(request_retry_count)
+            ee.Initialize(
+                project=earth_engine_project,
+                http_transport=httplib2.Http(timeout=request_timeout_seconds),
+            )
+            ee.data.setDeadline(request_timeout_seconds * 1000)
         except Exception as error:
             raise RuntimeError(
-                "Could not initialize Earth Engine. Authenticate with "
-                "`earthengine authenticate` and verify --project."
+                "Could not initialize or configure Earth Engine. Authenticate "
+                "with `earthengine authenticate` and verify --project."
             ) from error
         raster_stack = build_earth_engine_stack(year, thresholds)
 
     downloaded_tile_count = 0
     downloaded_byte_count = 0
     failed_tile_ids = []
+    failed_tile_error: Exception | None = None
     tile_directory.mkdir(parents=True, exist_ok=True)
     with tqdm(
         total=len(requested_tiles),
@@ -1271,7 +1315,12 @@ def cache_aoi_tiles(
             except Exception as error:
                 temporary_path.unlink(missing_ok=True)
                 failed_tile_ids.append(tile.tile_id)
-                processing_progress.write(f"Failed {tile.tile_id}: {error}")
+                failed_tile_error = error
+                processing_progress.write(
+                    f"Failed {tile.tile_id} after "
+                    f"{request_retry_count + 1} attempt(s): "
+                    f"{type(error).__name__}: {error}"
+                )
             finally:
                 processed_tile_count = (
                     len(valid_cached_tiles)
@@ -1285,6 +1334,8 @@ def cache_aoi_tiles(
                     downloaded=downloaded_tile_count,
                     failed=len(failed_tile_ids),
                 )
+            if failed_tile_error is not None:
+                break
 
     request_timestamp = datetime.now(UTC).isoformat()
     request_identifier = hashlib.sha256(
@@ -1305,6 +1356,17 @@ def cache_aoi_tiles(
             "reused_tile_ids": sorted(valid_cached_tiles),
             "downloaded_tiles": downloaded_tile_count,
             "failed_tile_ids": failed_tile_ids,
+            "request_timeout_seconds": request_timeout_seconds,
+            "request_retry_count": request_retry_count,
+            "aborted_after_failure": failed_tile_error is not None,
+            "failure": (
+                {
+                    "type": type(failed_tile_error).__name__,
+                    "message": str(failed_tile_error),
+                }
+                if failed_tile_error is not None
+                else None
+            ),
         }
     )
     write_cache_manifest(manifest_path, manifest)
@@ -1336,9 +1398,11 @@ def cache_aoi_tiles(
 
     if failed_tile_ids:
         raise RuntimeError(
-            f"Earth Engine failed to return {len(failed_tile_ids)} tile(s): "
-            + ", ".join(failed_tile_ids)
-        )
+            f"Earth Engine failed to return tile {failed_tile_ids[0]} after "
+            f"{request_retry_count + 1} attempt(s) with a "
+            f"{request_timeout_seconds:g} second timeout per attempt. "
+            "Completed tiles remain cached; rerun the same command to resume."
+        ) from failed_tile_error
     return summary
 
 
@@ -1362,6 +1426,8 @@ def main() -> None:
         ),
         refresh=args.refresh,
         show_progress=not args.no_progress,
+        request_timeout_seconds=args.request_timeout_seconds,
+        request_retry_count=args.request_retries,
     )
 
 
