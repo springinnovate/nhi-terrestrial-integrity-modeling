@@ -494,9 +494,6 @@ def load_wgs84_aoi(aoi_path: Path) -> BaseGeometry:
     """
 
     resolved_path = aoi_path.expanduser().resolve()
-    if not resolved_path.exists():
-        raise FileNotFoundError(f"AOI does not exist: {resolved_path}")
-
     geojson = json.loads(resolved_path.read_text(encoding="utf-8"))
     object_type = geojson.get("type")
     if object_type == "FeatureCollection":
@@ -1193,12 +1190,12 @@ def cache_aoi_tiles(
     if tiles_requiring_download and compute_tile is None:
         try:
             ee.Initialize(project=earth_engine_project)
-            raster_stack = build_earth_engine_stack(year, thresholds)
         except Exception as error:
             raise RuntimeError(
                 "Could not initialize Earth Engine. Authenticate with "
                 "`earthengine authenticate` and verify --project."
             ) from error
+        raster_stack = build_earth_engine_stack(year, thresholds)
 
     downloaded_tile_count = 0
     downloaded_byte_count = 0
