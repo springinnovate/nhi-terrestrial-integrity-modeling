@@ -43,6 +43,14 @@ bytes, failures, and manifest location. A cache-validation progress bar first ch
 every intersecting grid. A second tqdm bar then reports processed, cached,
 downloaded, and failed grid counts while Earth Engine requests run.
 
+Each synchronous Earth Engine request has a six-minute transport timeout and one
+retry by default. If both attempts fail, the command stops immediately instead of
+trying every remaining tile during an outage. Every tile validated before the error
+remains in the manifest and is reused when the same command is run again. Adjust the
+request policy with `--request-timeout-seconds` and `--request-retries` when needed.
+`computePixels` requests are interactive calls rather than persistent Earth Engine
+batch tasks, so an in-flight request cannot be recovered after the process restarts.
+
 ## Load one ecoregion GeoTIFF
 
 Load every band and pixel from one multiband ecoregion export into memory and print
@@ -65,10 +73,10 @@ The spatial sample uses the first Grassland Reference Sites band as a binary cla
 with `1` representing a reference site and `0` representing a non-reference site.
 Duplicate reference bands are excluded from the predictor table. Eligible pixels are
 assigned to 25 km square blocks in an equal-area coordinate system, then up to 100
-pixels of each reference-site class are selected independently from every block. The table
-records source coordinates, block IDs, pixel area, sampling probabilities, sampling
-weights, area weights, and every non-reference raster band. Missing predictor values
-remain missing.
+pixels of each reference-site class are selected independently from every block. The
+table records source coordinates, block IDs, pixel area, sampling probabilities,
+sampling weights, area weights, and every non-reference raster band. Missing predictor
+values remain missing.
 
 Sampling is reproducible with random seed 42. Override the defaults or output path as
 needed:

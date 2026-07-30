@@ -27,6 +27,7 @@ from scripts.fetch_gee_raster_tiles import (
     cache_aoi_tiles,
     expected_band_names,
     fetch_tile_bytes,
+    parse_args,
     select_intersecting_tiles,
 )
 
@@ -141,6 +142,28 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             "y2018_d39_average_snow_depth_when_pres",
             band_names[-1],
         )
+
+    def test_parses_request_timeout_and_retry_options(self) -> None:
+        """Expose bounded request controls through the command line."""
+
+        with patch(
+            "sys.argv",
+            [
+                "fetch_gee_raster_tiles.py",
+                "aoi.geojson",
+                "2018",
+                "--project",
+                "example-project",
+                "--request-timeout-seconds",
+                "45.5",
+                "--request-retries",
+                "2",
+            ],
+        ):
+            arguments = parse_args()
+
+        self.assertEqual(45.5, arguments.request_timeout_seconds)
+        self.assertEqual(2, arguments.request_retries)
 
     def test_selects_globally_aligned_positive_area_intersections(self) -> None:
         """Select four shared tiles for an AOI spanning two rows and columns."""
@@ -290,6 +313,122 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.assertIn("cached=0", rendered_progress)
         self.assertIn("downloaded=1", rendered_progress)
         self.assertIn("failed=0", rendered_progress)
+
+    def test_configures_bounded_earth_engine_requests(self) -> None:
+        """Apply the requested transport timeout and retry count."""
+
+        self.write_projected_aoi(box(100, 100, 3_900, 3_900))
+        with (
+            patch.object(
+                fetch_gee_raster_tiles,
+                "CacheGrid",
+                return_value=self.test_grid,
+            ),
+            patch.object(fetch_gee_raster_tiles.ee, "Initialize") as initialize,
+            patch.object(
+                fetch_gee_raster_tiles.ee.data,
+                "setDeadline",
+            ) as set_deadline,
+            patch.object(
+                fetch_gee_raster_tiles.ee.data,
+                "setMaxRetries",
+            ) as set_max_retries,
+            patch.object(
+                fetch_gee_raster_tiles,
+                "build_earth_engine_stack",
+                return_value=object(),
+            ),
+            patch.object(
+                fetch_gee_raster_tiles,
+                "fetch_tile_bytes",
+                side_effect=self.create_tile_bytes,
+            ),
+        ):
+            summary = cache_aoi_tiles(
+                self.aoi_path,
+                2018,
+                "offline-test-project",
+                self.cache_directory,
+                ReferenceThresholds(),
+                refresh=False,
+                show_progress=False,
+                request_timeout_seconds=12.5,
+                request_retry_count=3,
+            )
+
+        self.assertEqual(1, summary.downloaded_tiles)
+        initialize_arguments = initialize.call_args.kwargs
+        self.assertEqual("offline-test-project", initialize_arguments["project"])
+        self.assertEqual(12.5, initialize_arguments["http_transport"].timeout)
+        set_deadline.assert_called_once_with(12_500)
+        set_max_retries.assert_called_once_with(3)
+
+    def test_stops_after_failure_and_rerun_reuses_completed_tiles(self) -> None:
+        """Fail fast during an outage and resume from validated cache entries."""
+
+        self.write_projected_aoi(box(100, 100, 7_900, 7_900))
+        attempted_tiles = []
+
+        def interrupted_fetch(raster_stack, tile, cache_grid, band_names):
+            """Return one tile, then simulate a disconnected request."""
+
+            attempted_tiles.append(tile.tile_id)
+            if len(attempted_tiles) == 2:
+                raise TimeoutError("network unavailable")
+            return self.create_tile_bytes(
+                raster_stack,
+                tile,
+                cache_grid,
+                band_names,
+            )
+
+        with patch.object(
+            fetch_gee_raster_tiles,
+            "CacheGrid",
+            return_value=self.test_grid,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Completed tiles remain cached; rerun the same command to resume",
+            ):
+                cache_aoi_tiles(
+                    self.aoi_path,
+                    2018,
+                    "offline-test-project",
+                    self.cache_directory,
+                    ReferenceThresholds(),
+                    refresh=False,
+                    show_progress=False,
+                    compute_tile=interrupted_fetch,
+                )
+
+            resumed_summary = cache_aoi_tiles(
+                self.aoi_path,
+                2018,
+                "offline-test-project",
+                self.cache_directory,
+                ReferenceThresholds(),
+                refresh=False,
+                show_progress=False,
+                compute_tile=self.create_tile_bytes,
+            )
+
+        self.assertEqual(2, len(attempted_tiles))
+        self.assertEqual(4, resumed_summary.requested_tiles)
+        self.assertEqual(1, resumed_summary.reused_tiles)
+        self.assertEqual(3, resumed_summary.downloaded_tiles)
+        manifest = json.loads(
+            (self.cache_directory / "manifest.json").read_text(encoding="utf-8")
+        )
+        failed_request = manifest["requests"][-2]
+        self.assertTrue(failed_request["aborted_after_failure"])
+        self.assertEqual([attempted_tiles[-1]], failed_request["failed_tile_ids"])
+        self.assertEqual("TimeoutError", failed_request["failure"]["type"])
+        self.assertEqual(
+            "network unavailable",
+            failed_request["failure"]["message"],
+        )
+        self.assertEqual(4, len(manifest["tiles"]))
 
     def test_corrupt_cached_tile_is_replaced(self) -> None:
         """Reject a cached file whose checksum no longer matches the manifest."""
