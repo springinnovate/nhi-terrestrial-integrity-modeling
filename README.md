@@ -25,6 +25,13 @@ The script constructs the same `d01-d39` layers as
 reuse the same cache files. The complete stack is available for 2015 through 2019;
 the current reference-condition model expects 2018 band names.
 
+The command-line AOI is the only boundary used to select cache tiles. Edge tiles are
+stored in full so later overlapping AOIs can reuse them. The possible-grassland
+ecoregion collection participates only in the `d01` reference-site definition; it
+does not mask the ecological-response or environmental bands in `d02-d39`. Exact
+AOI clipping can therefore be applied when cached tiles are assembled for analysis
+without changing the shared cache contents.
+
 Cached GeoTIFFs are stored by year and reference-threshold configuration under
 `data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
 grid, source datasets, data year, exact band schema, thresholds, tile bounds and
