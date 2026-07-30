@@ -143,6 +143,26 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             band_names[-1],
         )
 
+    def test_possible_grassland_ecoregions_only_define_reference_sites(self) -> None:
+        """Restrict the possible-grassland source to the d01 band definition."""
+
+        bands_using_ecoregion_source = [
+            definition.number
+            for definition in BAND_DEFINITIONS
+            if fetch_gee_raster_tiles.MAYBE_GRASSLAND_ECOREGIONS
+            in definition.source_dataset_ids
+        ]
+
+        self.assertEqual([1], bands_using_ecoregion_source)
+
+    def test_stack_version_invalidates_ecoregion_clipped_cache_tiles(self) -> None:
+        """Use a new namespace after removing the completed-stack mask."""
+
+        stack_identifier = build_stack_identifier(2018, ReferenceThresholds())
+
+        self.assertEqual(2, fetch_gee_raster_tiles.STACK_DEFINITION_VERSION)
+        self.assertTrue(stack_identifier.startswith("v2_year_2018_"))
+
     def test_parses_request_timeout_and_retry_options(self) -> None:
         """Expose bounded request controls through the command line."""
 

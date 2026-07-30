@@ -25,7 +25,7 @@ from tqdm.auto import tqdm
 
 
 MANIFEST_SCHEMA_VERSION = 1
-STACK_DEFINITION_VERSION = 1
+STACK_DEFINITION_VERSION = 2
 DEFAULT_CACHE_DIRECTORY = Path("data/gee_raster_cache")
 DEFAULT_CACHE_CRS = "EPSG:6933"
 DEFAULT_PIXEL_SIZE_METERS = 500
@@ -811,7 +811,7 @@ def build_earth_engine_stack(
         )
         return adjacent_year_pairs.reduce(ee.Reducer.min()).eq(1)
 
-    maybe_grassland_mask = (
+    reference_site_ecoregion_mask = (
         ee.Image()
         .byte()
         .paint(ee.FeatureCollection(MAYBE_GRASSLAND_ECOREGIONS), 1)
@@ -846,7 +846,7 @@ def build_earth_engine_stack(
     reference_sites = (
         grassland_probability_integrity.And(human_influence_integrity)
         .And(ee.Image(HUMAN_MODIFICATION_IMAGE).lte(thresholds.human_modification))
-        .And(maybe_grassland_mask)
+        .And(reference_site_ecoregion_mask)
         .selfMask()
         .toByte()
     )
@@ -1048,7 +1048,7 @@ def build_earth_engine_stack(
     raster_stack = renamed_layers[0]
     for renamed_layer in renamed_layers[1:]:
         raster_stack = raster_stack.addBands(renamed_layer)
-    return raster_stack.updateMask(maybe_grassland_mask).toFloat()
+    return raster_stack.toFloat()
 
 
 def fetch_tile_bytes(
