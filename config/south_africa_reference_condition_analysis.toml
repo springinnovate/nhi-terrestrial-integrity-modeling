@@ -1,9 +1,8 @@
 # South Africa reference-condition analysis
 #
-# This TOML file is the complete analysis contract shared by the pipeline. Copy it
-# to define another analysis, then edit the copy. Scientific settings should be
-# changed here rather than supplied as command-line overrides. Run all commands
-# from the repository root and pass this file as the first positional argument.
+# This TOML file is the complete analysis contract shared by the pipeline. Copy
+# it to define another analysis, then edit the copy. Run all commands from the
+# repository root and pass this file as the first positional argument.
 #
 # Typical workflow (PowerShell):
 #
