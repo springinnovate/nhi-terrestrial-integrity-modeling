@@ -23,10 +23,40 @@
 #     data\raster_stacks\example.tif `
 #     outputs\integrity_parameters\example_spatial_sample
 #
-# The fetch command writes reusable Earth Engine tiles and a cache manifest. It
-# does not currently mosaic those tiles into the single multiband GeoTIFF consumed
-# by the remaining commands. The GeoTIFF must follow the ordered [[bands]] contract
-# below, including its band descriptions.
+# What the Earth Engine multiband image is:
+#
+# This project asks Earth Engine to build all configured variables as one ee.Image
+# and downloads each spatial cache tile as one multiband GeoTIFF. This is only a
+# project packaging convention: it keeps the aligned variables together instead of
+# leaving dozens of separate raster files for every tile or AOI. The variables are
+# not mathematically combined. Each band remains an independent raster layer with
+# its own source dataset, units, missing values, and role in the analysis.
+#
+# The ordered [[bands]] tables below are the authoritative schema for that image.
+# They define which data layers are included, their order and names, their analysis
+# roles, and the Earth Engine sources they require. The computation key selects an
+# implementation in fetch_gee_raster_tiles.py, so calculations remain Python code
+# while this TOML controls which calculations make up this analysis's stack.
+# Earth Engine evaluates every configured layer on the common output [grid], which
+# gives every band the same CRS, pixel size, tile dimensions, and alignment.
+#
+# The fetch command writes these reusable multiband tiles and a cache manifest. It
+# does not currently mosaic them into the single multiband GeoTIFF consumed by the
+# remaining commands. That GeoTIFF must follow the same ordered [[bands]] contract,
+# including its band descriptions.
+#
+# In this project, dNN means "data layer NN," not "physical band NN." The stable
+# data-layer ID follows a variable into sample columns, model artifacts, reports,
+# and inference outputs even if a smaller TOML stack puts it in another physical
+# GeoTIFF position. The complete stack happens to place d01 in band 1, d02 in band
+# 2, and so on. Using bNN would blur this distinction and would also break existing
+# rasters and model artifacts, so the established dNN identifiers are retained.
+#
+# d01 is the reference-site data layer. It has role = "reference" and value 1 where
+# the configured grassland persistence and low-human-impact criteria are met within
+# the possible-grassland ecoregions. Earth Engine masks d01 elsewhere. During
+# sampling, a predictor-footprint pixel without d01=1 is class 0 (background); class
+# 0 means "not selected as a reference site," not "known non-grassland."
 #
 # All relative local paths are resolved from this file's directory, not from the
 # shell's current directory. Output paths remain operational command-line options.
@@ -121,12 +151,13 @@ srtm_landforms = "CSP/ERGo/1_0/Global/SRTM_landforms"
 alos_topographic_diversity = "CSP/ERGo/1_0/Global/ALOS_topoDiversity"
 
 # The repeated [[bands]] tables below are the stack, not an independent catalog.
-# Their file order is the GeoTIFF band order. In this definition d01 is raster band
-# 1, d02 is band 2, and so on through d39. Keep IDs and order stable because sample
-# columns, model artifacts, and inference outputs refer to these IDs.
+# Their file order is the GeoTIFF band order. In this complete definition d01 is
+# raster band 1, d02 is band 2, and so on through d39. The dNN value is the stable
+# data-layer identity, however, and does not have to match its physical position in
+# a reduced or reordered stack.
 #
 # Each band field has a specific purpose:
-#   id: stable dNN identifier used throughout the pipeline
+#   id: stable dNN data-layer identifier used throughout the pipeline
 #   computation: registered Python Earth Engine calculation (not arbitrary code)
 #   suffix: stable output-name suffix; year and id are added automatically
 #   display_name: label used in reports and figures
