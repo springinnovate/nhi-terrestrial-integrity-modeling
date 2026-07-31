@@ -7,10 +7,12 @@ year = 2018
 [earth_engine]
 project = "ecoshard-202922"
 cache_directory = "../data/gee_raster_cache"
+request_timeout_seconds = 360
+request_retry_count = 1
 
 [stack]
 name = "nhi_reference_condition"
-version = 1
+version = 2
 minimum_year = 2015
 maximum_year = 2019
 reference_start_year = 2001

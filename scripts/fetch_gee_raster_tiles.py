@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import ee
+import httplib2
 import rasterio
 from pyproj import Transformer
 from rasterio.crs import CRS
@@ -422,7 +423,7 @@ def build_earth_engine_stack(
         )
         return adjacent_year_pairs.reduce(ee.Reducer.min()).eq(1)
 
-    maybe_grassland_mask = (
+    reference_site_ecoregion_mask = (
         ee.Image()
         .byte()
         .paint(ee.FeatureCollection(datasets["maybe_grassland_ecoregions"]), 1)
@@ -464,7 +465,7 @@ def build_earth_engine_stack(
                 reference.human_modification
             )
         )
-        .And(maybe_grassland_mask)
+        .And(reference_site_ecoregion_mask)
         .selfMask()
         .toByte()
     )
@@ -715,7 +716,7 @@ def build_earth_engine_stack(
     raster_stack = renamed_layers[0]
     for renamed_layer in renamed_layers[1:]:
         raster_stack = raster_stack.addBands(renamed_layer)
-    return raster_stack.updateMask(maybe_grassland_mask).toFloat()
+    return raster_stack.toFloat()
 
 
 def fetch_tile_bytes(
@@ -786,10 +787,15 @@ def cache_aoi_tiles(
         Counts and byte totals for requested, reused, downloaded, and failed tiles.
 
     Raises:
-        RuntimeError: If Earth Engine initialization fails or any tile fetch fails.
+        RuntimeError: If Earth Engine initialization fails or a tile exhausts
+            its configured request attempts.
     """
 
     resolved_cache_directory = analysis_configuration.earth_engine.cache_directory
+    request_timeout_seconds = (
+        analysis_configuration.earth_engine.request_timeout_seconds
+    )
+    request_retry_count = analysis_configuration.earth_engine.request_retry_count
     resolved_cache_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = resolved_cache_directory / "manifest.json"
     cache_grid = CacheGrid(**asdict(analysis_configuration.grid))
@@ -879,15 +885,25 @@ def cache_aoi_tiles(
     print(f"  Intersecting grids: {len(requested_tiles):,}")
     print(f"  Valid cached grids: {len(valid_cached_tiles):,}")
     print(f"  Grids to download: {len(tiles_requiring_download):,}")
+    print(
+        "  Request policy: "
+        f"{request_timeout_seconds:g} second timeout, "
+        f"{request_retry_count + 1} attempt(s) per grid"
+    )
 
     raster_stack = None
     tile_fetcher = compute_tile or fetch_tile_bytes
     if tiles_requiring_download and compute_tile is None:
         try:
-            ee.Initialize(project=analysis_configuration.earth_engine.project)
+            ee.data.setMaxRetries(request_retry_count)
+            ee.Initialize(
+                project=analysis_configuration.earth_engine.project,
+                http_transport=httplib2.Http(timeout=request_timeout_seconds),
+            )
+            ee.data.setDeadline(request_timeout_seconds * 1000)
         except Exception as error:
             raise RuntimeError(
-                "Could not initialize Earth Engine. Authenticate with "
+                "Could not initialize or configure Earth Engine. Authenticate with "
                 "`earthengine authenticate` and verify earth_engine.project "
                 "in the analysis TOML."
             ) from error
@@ -896,6 +912,7 @@ def cache_aoi_tiles(
     downloaded_tile_count = 0
     downloaded_byte_count = 0
     failed_tile_ids = []
+    failed_tile_error: Exception | None = None
     tile_directory.mkdir(parents=True, exist_ok=True)
     with tqdm(
         total=len(requested_tiles),
@@ -967,7 +984,12 @@ def cache_aoi_tiles(
             except Exception as error:
                 temporary_path.unlink(missing_ok=True)
                 failed_tile_ids.append(tile.tile_id)
-                processing_progress.write(f"Failed {tile.tile_id}: {error}")
+                failed_tile_error = error
+                processing_progress.write(
+                    f"Failed {tile.tile_id} after "
+                    f"{request_retry_count + 1} attempt(s): "
+                    f"{type(error).__name__}: {error}"
+                )
             finally:
                 processed_tile_count = (
                     len(valid_cached_tiles)
@@ -981,6 +1003,8 @@ def cache_aoi_tiles(
                     downloaded=downloaded_tile_count,
                     failed=len(failed_tile_ids),
                 )
+            if failed_tile_error is not None:
+                break
 
     request_timestamp = datetime.now(UTC).isoformat()
     request_identifier = hashlib.sha256(
@@ -1002,6 +1026,17 @@ def cache_aoi_tiles(
             "reused_tile_ids": sorted(valid_cached_tiles),
             "downloaded_tiles": downloaded_tile_count,
             "failed_tile_ids": failed_tile_ids,
+            "request_timeout_seconds": request_timeout_seconds,
+            "request_retry_count": request_retry_count,
+            "aborted_after_failure": failed_tile_error is not None,
+            "failure": (
+                {
+                    "type": type(failed_tile_error).__name__,
+                    "message": str(failed_tile_error),
+                }
+                if failed_tile_error is not None
+                else None
+            ),
         }
     )
     write_cache_manifest(manifest_path, manifest)
@@ -1035,9 +1070,11 @@ def cache_aoi_tiles(
 
     if failed_tile_ids:
         raise RuntimeError(
-            f"Earth Engine failed to return {len(failed_tile_ids)} tile(s): "
-            + ", ".join(failed_tile_ids)
-        )
+            f"Earth Engine failed to return tile {failed_tile_ids[0]} after "
+            f"{request_retry_count + 1} attempt(s) with a "
+            f"{request_timeout_seconds:g} second timeout per attempt. "
+            "Completed tiles remain cached; rerun the same command to resume."
+        ) from failed_tile_error
     return summary
 
 

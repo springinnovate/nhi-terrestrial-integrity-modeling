@@ -19,6 +19,8 @@ year = 2019
 [earth_engine]
 project = "example-project"
 cache_directory = "cache"
+request_timeout_seconds = 45.5
+request_retry_count = 2
 
 [stack]
 name = "test_stack"
@@ -133,6 +135,8 @@ class AnalysisConfigurationTest(unittest.TestCase):
         self.assertEqual(2018, configuration.year)
         self.assertEqual("South Africa", configuration.display_name)
         self.assertTrue(configuration.aoi_path.is_file())
+        self.assertEqual(360, configuration.earth_engine.request_timeout_seconds)
+        self.assertEqual(1, configuration.earth_engine.request_retry_count)
         self.assertEqual(39, len(configuration.bands))
         role_counts = {
             role: sum(band.role == role for band in configuration.bands)
@@ -215,6 +219,29 @@ class AnalysisConfigurationTest(unittest.TestCase):
         first_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
         second_path.write_text(
             MINIMAL_ANALYSIS_TOML.replace("ridge_alpha = 1.0", "ridge_alpha = 2.0"),
+            encoding="utf-8",
+        )
+
+        first = load_analysis_configuration(first_path)
+        second = load_analysis_configuration(second_path)
+
+        self.assertNotEqual(first.configuration_sha256, second.configuration_sha256)
+        self.assertEqual(
+            first.raster_configuration_sha256,
+            second.raster_configuration_sha256,
+        )
+
+    def test_request_policy_change_preserves_raster_cache_identity(self) -> None:
+        """Do not redownload pixels when only request transport policy changes."""
+
+        first_path = self.temporary_path / "first.toml"
+        second_path = self.temporary_path / "second.toml"
+        first_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+        second_path.write_text(
+            MINIMAL_ANALYSIS_TOML.replace(
+                "request_timeout_seconds = 45.5",
+                "request_timeout_seconds = 90",
+            ),
             encoding="utf-8",
         )
 

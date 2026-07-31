@@ -33,6 +33,13 @@ suffix, display name, pipeline role (`reference`, `response`, or `predictor`), d
 type, and source aliases. Python still implements calculations such as phenology and
 growing-season aggregation; TOML selects and orders those implementations.
 
+The TOML-defined AOI is the only boundary used to select cache tiles. Edge tiles are
+stored in full so later overlapping AOIs can reuse them. The possible-grassland
+ecoregion collection participates only in the `d01` reference-site definition; it
+does not mask the ecological-response or environmental bands in `d02-d39`. Exact AOI
+clipping can therefore be applied when cached tiles are assembled for analysis
+without changing the shared cache contents.
+
 Cached GeoTIFFs are stored by year and reference-threshold configuration under
 `data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
 grid, source datasets, data year, exact band schema, thresholds, tile bounds and
@@ -53,6 +60,14 @@ The command reports AOI area, requested tiles, cache hits, downloads, transferre
 bytes, failures, and manifest location. A cache-validation progress bar first checks
 every intersecting grid. A second tqdm bar then reports processed, cached,
 downloaded, and failed grid counts while Earth Engine requests run.
+
+Each synchronous Earth Engine request uses the timeout and retry count in the
+`[earth_engine]` TOML section. If all configured attempts fail, the command stops
+immediately instead of trying every remaining tile during an outage. Every tile
+validated before the error remains in the manifest and is reused when the same
+analysis is run again. `computePixels` requests are interactive calls rather than
+persistent Earth Engine batch tasks, so an in-flight request cannot be recovered
+after the process restarts.
 
 ## Load one ecoregion GeoTIFF
 
@@ -80,9 +95,9 @@ site. Copies of that reference band from additional years are excluded from the
 predictor table. Eligible pixels are assigned to analysis-defined square blocks in an
 equal-area coordinate system, then the configured maximum number of pixels from each
 reference-site class are selected independently from every block. The table records
-source coordinates, block IDs,
-pixel area, sampling probabilities, sampling weights, area weights, and every
-non-reference raster band. Missing predictor values remain missing.
+source coordinates, block IDs, pixel area, sampling probabilities, sampling weights,
+area weights, and every non-reference raster band. Missing predictor values remain
+missing.
 
 Sampling is reproducible with the seed in the analysis TOML. The Parquet destination
 remains an operational command-line option:

@@ -71,10 +71,14 @@ class EarthEngineSettings:
     Attributes:
         project: Google Cloud project registered for Earth Engine.
         cache_directory: Resolved local directory for fetched raster tiles.
+        request_timeout_seconds: Maximum socket wait for one request attempt.
+        request_retry_count: Retry attempts after the initial request fails.
     """
 
     project: str
     cache_directory: Path
+    request_timeout_seconds: float
+    request_retry_count: int
 
 
 @dataclass(frozen=True)
@@ -348,6 +352,10 @@ def load_analysis_configuration(
         )
     if int(grid["pixel_size_meters"]) <= 0 or int(grid["tile_size_pixels"]) <= 0:
         raise ValueError("Raster cache pixel and tile sizes must be positive.")
+    if float(earth_engine["request_timeout_seconds"]) <= 0:
+        raise ValueError("Earth Engine request_timeout_seconds must be positive.")
+    if not 0 <= int(earth_engine["request_retry_count"]) < 100:
+        raise ValueError("Earth Engine request_retry_count must be between 0 and 99.")
     if (
         int(sampling["block_size_meters"]) <= 0
         or int(sampling["samples_per_class_per_block"]) <= 0
@@ -451,6 +459,10 @@ def load_analysis_configuration(
             cache_directory=resolved_local_path(
                 str(earth_engine["cache_directory"])
             ),
+            request_timeout_seconds=float(
+                earth_engine["request_timeout_seconds"]
+            ),
+            request_retry_count=int(earth_engine["request_retry_count"]),
         ),
         stack_name=stack_name,
         stack_version=int(stack["version"]),
