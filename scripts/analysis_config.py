@@ -141,12 +141,12 @@ class InferenceSettings:
     """Store raster-inference settings.
 
     Attributes:
-        grassland_mask_path: Optional resolved raster defining target pixels.
+        application_mask_path: Optional resolved raster defining target pixels.
         window_size_pixels: Width and height of each processing window.
         covariance_shrinkage: Reference covariance diagonal shrinkage fraction.
     """
 
-    grassland_mask_path: Path | None
+    application_mask_path: Path | None
     window_size_pixels: int
     covariance_shrinkage: float
 
@@ -428,7 +428,7 @@ def load_analysis_configuration(
     resolved_aoi_path = resolved_local_path(str(analysis["aoi_path"]))
     if not resolved_aoi_path.is_file():
         raise ValueError(f"Analysis AOI does not exist: {resolved_aoi_path}")
-    grassland_mask_value = inference.get("grassland_mask_path")
+    application_mask_value = inference.get("application_mask_path")
     normalized_content = json.dumps(
         raw_configuration,
         sort_keys=True,
@@ -513,9 +513,9 @@ def load_analysis_configuration(
             responses=configured_responses,
         ),
         inference=InferenceSettings(
-            grassland_mask_path=(
-                resolved_local_path(str(grassland_mask_value))
-                if grassland_mask_value is not None
+            application_mask_path=(
+                resolved_local_path(str(application_mask_value))
+                if application_mask_value is not None
                 else None
             ),
             window_size_pixels=int(inference["window_size_pixels"]),

@@ -61,6 +61,7 @@ ridge_alpha = 1.0
 responses = ["d02"]
 
 [inference]
+application_mask_path = "application_mask.tif"
 window_size_pixels = 256
 covariance_shrinkage = 0.1
 
@@ -137,6 +138,10 @@ class AnalysisConfigurationTest(unittest.TestCase):
         self.assertTrue(configuration.aoi_path.is_file())
         self.assertEqual(360, configuration.earth_engine.request_timeout_seconds)
         self.assertEqual(1, configuration.earth_engine.request_retry_count)
+        self.assertEqual(
+            "grassland_mask_2018.tif",
+            configuration.inference.application_mask_path.name,
+        )
         self.assertEqual(39, len(configuration.bands))
         role_counts = {
             role: sum(band.role == role for band in configuration.bands)
@@ -161,6 +166,11 @@ class AnalysisConfigurationTest(unittest.TestCase):
         configuration_path = self.temporary_path / "reduced.toml"
         configuration_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
         configuration = load_analysis_configuration(configuration_path)
+
+        self.assertEqual(
+            self.temporary_path / "application_mask.tif",
+            configuration.inference.application_mask_path,
+        )
 
         self.assertEqual(
             (

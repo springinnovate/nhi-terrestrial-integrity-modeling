@@ -22,6 +22,8 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from rasterio.coords import BoundingBox
 from rasterio.crs import CRS
+from rasterio.enums import Resampling
+from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 from tqdm.auto import tqdm
 
@@ -675,16 +677,17 @@ def write_inference_report(
     departure_percentile = metadata["reference_departure_percentile"]
     percentile_statistics = departure_percentile["statistics"]
     color_scale_upper_value = aggregate_figure["color_scale_upper_value"]
+    application_mask = metadata["application_mask"]
     lines = [
         f"# Reference-condition raster inference: {metadata['ecoregion_name']}",
         "",
     ]
-    if metadata["grassland_mask"] is None:
+    if application_mask is None:
         lines.extend(
             [
-                "> **Important:** No grassland mask was supplied. These outputs cover "
-                "the usable ecoregion predictor footprint and must not be interpreted "
-                "as grassland integrity maps.",
+                "> **Important:** No application mask was supplied. These outputs "
+                "cover the usable ecoregion predictor footprint and must not be "
+                "interpreted as grassland integrity maps.",
                 "",
             ]
         )
@@ -694,7 +697,11 @@ def write_inference_report(
             "",
             f"- Raster stack: `{metadata['input_raster']}`",
             f"- Model run: `{metadata['model_run_directory']}`",
-            f"- Grassland mask: `{metadata['grassland_mask'] or 'not supplied'}`",
+            (
+                "- Application mask: `"
+                f"{application_mask['path'] if application_mask else 'not supplied'}`"
+            ),
+            f"- Application mask selection: {metadata['mask_interpretation']}",
             f"- Responses: {metadata['response_count']}",
             (
                 "- Maximum predictor missingness: "
@@ -861,7 +868,7 @@ def create_aggregate_deviation_figure(
     raster_crs: CRS | None,
     response_count: int,
     ecoregion_name: str,
-    grassland_mask_supplied: bool,
+    application_mask_supplied: bool,
     output_path: Path,
 ) -> dict[str, object]:
     """Map coarsened total standardized departure and reference-site locations.
@@ -880,8 +887,8 @@ def create_aggregate_deviation_figure(
         raster_crs: Source raster coordinate reference system, when defined.
         response_count: Number of standardized response deviations in each sum.
         ecoregion_name: Human-readable label included in the title.
-        grassland_mask_supplied: Whether inference was limited by an external
-            grassland mask.
+        application_mask_supplied: Whether inference was limited by an external
+            application mask.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
@@ -1041,9 +1048,9 @@ def create_aggregate_deviation_figure(
             framealpha=0.94,
         )
         warning = (
-            " No grassland mask was supplied, so the modeled surface includes "
+            " No application mask was supplied, so the modeled surface includes "
             "the usable ecoregion predictor footprint."
-            if not grassland_mask_supplied
+            if not application_mask_supplied
             else ""
         )
         figure.text(
@@ -1105,7 +1112,7 @@ def create_departure_percentile_figure(
     raster_crs: CRS | None,
     response_count: int,
     ecoregion_name: str,
-    grassland_mask_supplied: bool,
+    application_mask_supplied: bool,
     output_path: Path,
 ) -> dict[str, object]:
     """Map coarsened departure percentiles and reference-site locations.
@@ -1125,8 +1132,8 @@ def create_departure_percentile_figure(
         raster_crs: Source raster coordinate reference system, when defined.
         response_count: Number of responses in each multivariate distance.
         ecoregion_name: Human-readable label included in the title.
-        grassland_mask_supplied: Whether inference used an external grassland
-            mask.
+        application_mask_supplied: Whether inference used an external
+            application mask.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
@@ -1273,10 +1280,10 @@ def create_departure_percentile_figure(
             edgecolor="none",
             framealpha=0.94,
         )
-        missing_grassland_mask_warning = (
-            " No grassland mask was supplied, so the modeled surface includes "
+        missing_application_mask_warning = (
+            " No application mask was supplied, so the modeled surface includes "
             "the usable ecoregion predictor footprint."
-            if not grassland_mask_supplied
+            if not application_mask_supplied
             else ""
         )
         figure.text(
@@ -1287,7 +1294,7 @@ def create_departure_percentile_figure(
                 f"pixels using {response_count} responses. Violet display cells "
                 "contain reference pixels, which are excluded from colored values. "
                 "This measures departure from reference, not ecological degradation "
-                f"by itself.{missing_grassland_mask_warning}"
+                f"by itself.{missing_application_mask_warning}"
             ),
             ha="center",
             va="bottom",
@@ -1347,8 +1354,7 @@ def run_reference_condition_inference(
         Paths, counts, and elapsed time for the completed inference run.
 
     Raises:
-        ValueError: If the window size is invalid, required bands are absent,
-            or a supplied mask is not exactly aligned with the raster stack.
+        ValueError: If the window size is invalid or required bands are absent.
         RuntimeError: If a fitted model produces a nonfinite prediction.
     """
 
@@ -1357,8 +1363,8 @@ def run_reference_condition_inference(
     covariance_shrinkage = analysis_configuration.inference.covariance_shrinkage
     resolved_raster_path = raster_stack_path.expanduser().resolve()
     resolved_model_run_directory = model_run_directory.expanduser().resolve()
-    resolved_mask_path = (
-        analysis_configuration.inference.grassland_mask_path
+    resolved_application_mask_path = (
+        analysis_configuration.inference.application_mask_path
     )
     run_metadata, response_models, maximum_missing_fraction = load_response_models(
         resolved_model_run_directory
@@ -1449,30 +1455,57 @@ def run_reference_condition_inference(
         f"after {covariance_shrinkage:.1%} diagonal shrinkage"
     )
     print(f"Output directory: {resolved_output_directory}")
-    if resolved_mask_path is None:
+    if resolved_application_mask_path is None:
         print(
-            "Grassland mask: not supplied; inferring across the usable ecoregion "
+            "Application mask: not supplied; inferring across the usable ecoregion "
             "predictor footprint"
         )
     else:
-        print(f"Grassland mask: {resolved_mask_path}")
+        print(f"Application mask: {resolved_application_mask_path}")
+        print("Application mask target: defined first-band pixels equal to 1")
 
     with ExitStack() as stack:
         source = stack.enter_context(rasterio.open(resolved_raster_path))
-        grassland_mask = (
-            stack.enter_context(rasterio.open(resolved_mask_path))
-            if resolved_mask_path is not None
-            else None
-        )
-        if grassland_mask is not None and (
-            grassland_mask.width != source.width
-            or grassland_mask.height != source.height
-            or grassland_mask.crs != source.crs
-            or grassland_mask.transform != source.transform
-        ):
-            raise ValueError(
-                "Grassland mask width, height, CRS, and transform must exactly "
-                "match the raster stack."
+        application_mask_metadata = None
+        if resolved_application_mask_path is None:
+            application_mask = None
+        else:
+            application_mask_source = stack.enter_context(
+                rasterio.open(resolved_application_mask_path)
+            )
+            application_mask_metadata = {
+                "path": str(resolved_application_mask_path),
+                "selected_value": 1,
+                "resampling": "nearest",
+                "source_width": application_mask_source.width,
+                "source_height": application_mask_source.height,
+                "source_crs": (
+                    str(application_mask_source.crs)
+                    if application_mask_source.crs
+                    else None
+                ),
+                "source_transform": list(application_mask_source.transform),
+            }
+            print(
+                "Application mask source grid: "
+                f"{application_mask_source.width:,} columns x "
+                f"{application_mask_source.height:,} rows, "
+                f"{application_mask_source.crs}"
+            )
+            print(
+                "Application mask alignment: nearest neighbor to the inference "
+                f"grid ({source.width:,} columns x {source.height:,} rows, "
+                f"{source.crs})"
+            )
+            application_mask = stack.enter_context(
+                WarpedVRT(
+                    application_mask_source,
+                    crs=source.crs,
+                    transform=source.transform,
+                    width=source.width,
+                    height=source.height,
+                    resampling=Resampling.nearest,
+                )
             )
 
         source_band_indices = {}
@@ -1589,7 +1622,11 @@ def run_reference_condition_inference(
             "ecoregion_name": ecoregion_name,
             "input_raster": str(resolved_raster_path),
             "model_run_directory": str(resolved_model_run_directory),
-            "grassland_mask": str(resolved_mask_path or "not_supplied"),
+            "application_mask": str(
+                resolved_application_mask_path or "not_supplied"
+            ),
+            "application_mask_selected_value": "1",
+            "application_mask_resampling": "nearest",
         }
         expected_destination.update_tags(
             artifact_type="expected_reference_condition",
@@ -1695,15 +1732,19 @@ def run_reference_condition_inference(
                 ~predictor_validity,
                 axis=0,
             ).astype(np.uint8)
-            if grassland_mask is None:
+            if application_mask is None:
                 target = np.any(predictor_validity, axis=0)
             else:
-                masked_target = grassland_mask.read(1, window=window, masked=True)
+                masked_target = application_mask.read(
+                    1,
+                    window=window,
+                    masked=True,
+                )
                 target_values = np.asarray(np.ma.getdata(masked_target))
                 target = (
                     ~np.ma.getmaskarray(masked_target)
                     & np.isfinite(target_values)
-                    & (target_values != 0)
+                    & (target_values == 1)
                 )
             missing_fraction = missing_predictor_counts / predictor_count
             usable = target & (missing_fraction <= maximum_missing_fraction)
@@ -1874,7 +1915,7 @@ def run_reference_condition_inference(
         source_crs,
         len(response_models),
         ecoregion_name,
-        resolved_mask_path is not None,
+        resolved_application_mask_path is not None,
         aggregate_deviation_figure_path,
     )
     departure_percentile_figure_metadata = create_departure_percentile_figure(
@@ -1885,7 +1926,7 @@ def run_reference_condition_inference(
         source_crs,
         len(response_models),
         ecoregion_name,
-        resolved_mask_path is not None,
+        resolved_application_mask_path is not None,
         departure_percentile_figure_path,
     )
     elapsed_seconds = time.perf_counter() - started
@@ -1939,7 +1980,7 @@ def run_reference_condition_inference(
     }
     inference_metadata: dict[str, object] = {
         "artifact_type": "grassland_reference_condition_raster_inference",
-        "format_version": 2,
+        "format_version": 3,
         "ecoregion_name": ecoregion_name,
         "analysis_configuration": {
             "path": str(analysis_configuration.path),
@@ -1951,10 +1992,10 @@ def run_reference_condition_inference(
         },
         "input_raster": str(resolved_raster_path),
         "model_run_directory": str(resolved_model_run_directory),
-        "grassland_mask": str(resolved_mask_path) if resolved_mask_path else None,
+        "application_mask": application_mask_metadata,
         "mask_interpretation": (
-            "defined nonzero first-band pixels"
-            if resolved_mask_path
+            "defined first-band pixels equal to 1 after nearest-neighbor alignment"
+            if resolved_application_mask_path
             else "unmasked usable ecoregion predictor footprint"
         ),
         "response_count": len(response_models),

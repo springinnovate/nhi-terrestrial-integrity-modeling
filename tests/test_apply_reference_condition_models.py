@@ -16,7 +16,8 @@ import joblib
 import numpy as np
 import pandas as pd
 import rasterio
-from rasterio.transform import from_origin
+from rasterio.transform import from_bounds, from_origin
+from rasterio.warp import transform_bounds
 
 from scripts.apply_reference_condition_models import (
     FLOAT_NODATA,
@@ -66,6 +67,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             display_name="Synthetic Prairie",
             inference=replace(
                 base_configuration.inference,
+                application_mask_path=None,
                 window_size_pixels=2,
             ),
         )
@@ -399,13 +401,13 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         report = summary.report_path.read_text(encoding="utf-8")
         metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
-        self.assertIn("No grassland mask was supplied", report)
+        self.assertIn("No application mask was supplied", report)
         self.assertIn("Synthetic Prairie", report)
         self.assertIn("mean pixel-level `sum(abs(z_j))`", report)
         self.assertIn("fixed linear scale", report)
         self.assertIn("Multivariate reference-departure percentile", report)
         self.assertIn("farther from the reference center than 95%", report)
-        self.assertIsNone(metadata["grassland_mask"])
+        self.assertIsNone(metadata["application_mask"])
         self.assertEqual(18, metadata["responses"][0]["statistics"]["deviation_pixels"])
         self.assertEqual(16, summary.departure_percentile_pixels)
         self.assertEqual(16, metadata["coverage"]["departure_percentile_pixels"])
@@ -484,12 +486,13 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             standard_output.getvalue(),
         )
 
-    def test_limits_inference_to_an_aligned_nonzero_mask(self) -> None:
-        """Leave mask-zero pixels outside the inference target."""
+    def test_limits_inference_to_application_mask_value_one(self) -> None:
+        """Select only defined first-band mask pixels equal to one."""
 
-        mask_path = self.temporary_path / "grassland_mask.tif"
+        mask_path = self.temporary_path / "application_mask.tif"
         mask_values = np.ones((4, 5), dtype=np.uint8)
         mask_values[2, 3] = 0
+        mask_values[3, 4] = 2
         with rasterio.open(
             mask_path,
             "w",
@@ -509,7 +512,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     self.stack_configuration,
                     inference=replace(
                         self.stack_configuration.inference,
-                        grassland_mask_path=mask_path,
+                        application_mask_path=mask_path,
                         window_size_pixels=3,
                     ),
                 ),
@@ -519,8 +522,8 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 show_progress=False,
             )
 
-        self.assertEqual(19, summary.target_pixels)
-        self.assertEqual(18, summary.predicted_pixels)
+        self.assertEqual(18, summary.target_pixels)
+        self.assertEqual(17, summary.predicted_pixels)
         with rasterio.open(summary.expected_reference_path) as expected_source:
             expected = expected_source.read(masked=True)
         with rasterio.open(summary.inference_status_path) as status_source:
@@ -531,10 +534,60 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertTrue(bool(percentiles.mask[2, 3]))
         self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 2, 3])
         self.assertEqual(STATUS_NODATA, status[1, 2, 3])
+        self.assertTrue(bool(expected.mask[0, 3, 4]))
+        self.assertTrue(bool(percentiles.mask[3, 4]))
+        self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 3, 4])
+        metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(str(mask_path), metadata["application_mask"]["path"])
+        self.assertEqual(1, metadata["application_mask"]["selected_value"])
+        self.assertEqual("nearest", metadata["application_mask"]["resampling"])
         self.assertNotIn(
-            "No grassland mask was supplied",
+            "No application mask was supplied",
             summary.report_path.read_text(encoding="utf-8"),
         )
+
+    def test_aligns_application_mask_from_another_crs(self) -> None:
+        """Reproject a coarse global-style mask during windowed inference."""
+
+        mask_path = self.temporary_path / "projected_application_mask.tif"
+        source_bounds = rasterio.transform.array_bounds(4, 5, self.transform)
+        projected_bounds = transform_bounds(
+            "EPSG:4326",
+            "EPSG:3857",
+            *source_bounds,
+        )
+        with rasterio.open(
+            mask_path,
+            "w",
+            driver="GTiff",
+            width=1,
+            height=1,
+            count=1,
+            dtype="uint8",
+            crs="EPSG:3857",
+            transform=from_bounds(*projected_bounds, width=1, height=1),
+        ) as destination:
+            destination.write(np.ones((1, 1), dtype=np.uint8), 1)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = run_reference_condition_inference(
+                replace(
+                    self.stack_configuration,
+                    inference=replace(
+                        self.stack_configuration.inference,
+                        application_mask_path=mask_path,
+                    ),
+                ),
+                self.raster_path,
+                self.model_run_directory,
+                output_directory=self.temporary_path / "projected_mask_output",
+                show_progress=False,
+            )
+
+        self.assertEqual(20, summary.target_pixels)
+        self.assertEqual(19, summary.predicted_pixels)
+        metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual("EPSG:3857", metadata["application_mask"]["source_crs"])
 
 
 if __name__ == "__main__":

@@ -315,8 +315,11 @@ degradation or an ecological integrity score. Keep the individual standardized
 response rasters to identify the variables and directions responsible for a large
 departure.
 
-Set `inference.grassland_mask_path` to an exactly aligned raster whose defined nonzero
-first-band pixels identify the target when a current-grassland layer is available:
+Set `inference.application_mask_path` to a raster whose defined first-band pixels
+equal to `1` identify the inference target. The mask may have a different CRS,
+resolution, transform, or global extent; it is aligned to each raster window with
+nearest-neighbor resampling without loading the complete mask into memory. Zeros,
+other values, nodata, and pixels outside the mask extent are excluded:
 
 ```powershell
 python scripts/apply_reference_condition_models.py `
@@ -325,9 +328,9 @@ python scripts/apply_reference_condition_models.py `
   outputs\integrity_parameters\example_spatial_sample
 ```
 
-Without `inference.grassland_mask_path`, the script infers across the usable ecoregion
-predictor footprint and marks the report accordingly. Unmasked outputs are diagnostic
-reference-condition deviations, not grassland integrity maps. Positive standardized
-deviation means observed is above expected. The percentile combines multivariate
-departure without assigning ecological direction, so integrity interpretation remains
-a separate modeling decision.
+Without `inference.application_mask_path`, the script infers across the usable
+ecoregion predictor footprint and marks the report accordingly. Unmasked outputs are
+diagnostic reference-condition deviations, not grassland integrity maps. Positive
+standardized deviation means observed is above expected. The percentile combines
+multivariate departure without assigning ecological direction, so integrity
+interpretation remains a separate modeling decision.

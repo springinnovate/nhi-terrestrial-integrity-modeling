@@ -49,7 +49,7 @@ ridge_alpha = 1.0
 responses = []
 
 [inference]
-# grassland_mask_path = "../data/masks/south_africa_current_grassland.tif"
+application_mask_path = "../data/grassland_mask_2018.tif"
 window_size_pixels = 256
 covariance_shrinkage = 0.10
 
