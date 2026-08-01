@@ -21,10 +21,12 @@ from shapely.ops import transform
 from scripts import fetch_gee_raster_tiles
 from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
 from scripts.fetch_gee_raster_tiles import (
-    CacheTile,
-    build_stack_identifier,
     cache_aoi_tiles,
     fetch_tile_bytes,
+)
+from scripts.raster_cache_utils import (
+    CacheTile,
+    build_stack_identifier,
     select_intersecting_tiles,
 )
 
