@@ -3,6 +3,10 @@
 # This TOML file is the complete analysis contract shared by the pipeline. Copy
 # it to define another analysis, then edit the copy. Run all commands from the
 # repository root and pass this file as the first positional argument.
+# Each configuration section below explains when to change it, what its values
+# mean, and which pipeline products must be regenerated. Comments are ignored when
+# calculating configuration hashes, so documentation-only edits do not invalidate
+# cached tiles, samples, models, or inference outputs.
 #
 # Typical workflow (PowerShell):
 #
@@ -66,12 +70,23 @@
 # -----------------------------------------------------------------------------
 # Analysis identity and AOI
 # -----------------------------------------------------------------------------
-# name is a stable, file-safe identifier used in provenance. display_name is the
-# human-readable label used in reports and figures. aoi_path must identify a WGS84
-# polygon or multipolygon GeoJSON. It selects the Earth Engine tiles available to
-# the analysis; it does not identify an ecoregion or decide where inference occurs.
-# The optional inference raster target is configured separately under [inference].
-# year must be supported by [stack].
+# Change this section when defining a new geographic analysis or data year. AOI
+# changes reuse already cached overlapping tiles; year changes select another set of
+# source observations and therefore another raster cache namespace.
+#
+# Values:
+#   name: Stable, file-safe provenance identifier. Change it for a distinct analysis
+#     so manifests and model metadata remain distinguishable. It does not label a
+#     raster band or alter Earth Engine pixel calculations.
+#   display_name: Human-readable label for reports and figures. Change it for the
+#     audience; it does not alter fetched pixels.
+#   aoi_path: WGS84 Polygon or MultiPolygon GeoJSON, resolved relative to this file.
+#     It selects complete Earth Engine cache tiles. It does not identify an
+#     ecoregion or decide which pixels receive inference.
+#   year: Calendar year used for d02-d39. d01 instead uses the reference period in
+#     [stack]. The year must fall between minimum_year and maximum_year.
+#
+# The optional raster selecting inference pixels is configured under [inference].
 [analysis]
 name = "south_africa_reference_condition_2018"
 display_name = "South Africa"
@@ -81,9 +96,24 @@ year = 2018
 # -----------------------------------------------------------------------------
 # Earth Engine access and reusable local tile cache
 # -----------------------------------------------------------------------------
-# project must be registered for Earth Engine. Request settings bound each
-# synchronous computePixels attempt; completed and validated tiles remain cached
-# if a later request fails. Changing request policy does not invalidate raster data.
+# Change this section for another Google Cloud project, cache location, or network
+# environment. These are access, storage, and transport settings; changing them does
+# not change raster-effective identity when datasets and calculations are unchanged.
+#
+# Values:
+#   project: Google Cloud project registered for Earth Engine and authorized for the
+#     current credentials. Change it when running under another EE project.
+#   cache_directory: Local root for tile GeoTIFFs and manifest.json, resolved
+#     relative to this file. Move it for another disk or shared cache location.
+#   request_timeout_seconds: Maximum socket wait for one synchronous computePixels
+#     attempt. Increase for consistently slow successful requests; decrease to fail
+#     sooner during outages. It must be greater than zero.
+#   request_retry_count: Attempts after the first failed request. A value of 1 means
+#     at most two total attempts per tile; 0 disables retries. Increase only for
+#     transient failures because each retry delays detection of a sustained outage.
+#
+# Every completed tile is validated and recorded before the next request, so a
+# failed run can resume from its valid cache entries.
 [earth_engine]
 project = "ecoshard-202922"
 cache_directory = "../data/gee_raster_cache"
@@ -95,8 +125,35 @@ request_retry_count = 1
 # -----------------------------------------------------------------------------
 # [stack], [grid], [reference], [datasets], and every ordered [[bands]] table
 # together define the fetched multiband raster. Changes to any raster-effective
-# setting create a different cache namespace. Increment version when the meaning
-# or implementation of the stack changes incompatibly.
+# setting create a different cache namespace.
+#
+# Change this section only when defining another stack family, changing verified
+# temporal support, or changing one of the cross-band calculations. Most AOI users
+# should change [analysis], [reference], or [inference] instead.
+#
+# Values:
+#   name: Stable identifier for this family of band calculations. Change it only for
+#     a conceptually different raster product, not for a new AOI or year.
+#   version: Manual schema/implementation version. Increment it when Python code
+#     changes pixel meaning in a way not otherwise represented by this TOML. Do not
+#     increment it for an AOI, year, timeout, sampling, model, or inference change.
+#   minimum_year and maximum_year: Inclusive years for which the complete d02-d39
+#     stack has verified source coverage. Extend these only after checking every
+#     configured dataset and calculation for the proposed years.
+#   reference_start_year and reference_end_year: Inclusive d01 persistence period.
+#     Grassland probability and scaled HII may fail in isolated years, but not in
+#     two consecutive years anywhere in this period. Use at least two years.
+#   era5_start_year: Earliest ERA5 year the rainfall-window calculation may request.
+#     This is a source-availability guard, not a normal tuning parameter.
+#   interannual_rainfall_window_years: Number of annual precipitation totals ending
+#     in analysis.year used for d27's coefficient of variation. A larger value
+#     represents longer-term variability and requests more years; the interval is
+#     truncated at era5_start_year when necessary. For year 2018, the value 10 uses
+#     annual totals from 2009 through 2018.
+#   stream_upstream_area_threshold_km2: Minimum MERIT Hydro upstream drainage area
+#     used to define a stream for d32. Lower values include smaller channels and
+#     usually reduce distance-to-stream values; higher values retain major channels.
+#     The value 25 treats cells draining at least 25 km2 as streams.
 [stack]
 name = "nhi_reference_condition"
 version = 3
@@ -109,8 +166,22 @@ interannual_rainfall_window_years = 10
 stream_upstream_area_threshold_km2 = 25
 
 # The cache uses one globally anchored equal-area grid so overlapping analyses can
-# reuse complete tiles. With the values below, pixels are 500 m and each 128-pixel
-# tile is 64 km square. Changing any grid value invalidates cache compatibility.
+# reuse complete tiles. Change this section only for a deliberate output-grid or
+# performance redesign. Any change shifts cache identity and prevents reuse of tiles
+# made on the previous grid.
+#
+# Values:
+#   crs: Projected, meter-based output coordinate reference system. EPSG:6933 is a
+#     global equal-area grid suitable for area-weighted sampling and reporting.
+#   pixel_size_meters: Output pixel width and height. Smaller values increase tile
+#     counts, storage, and computation and cannot recover detail absent from coarse
+#     source products; larger values trade spatial detail for speed and storage.
+#   tile_size_pixels: Width and height of each square cache tile. At 128 pixels and
+#     500 m, a tile is 64 km square. Larger tiles mean fewer requests but larger,
+#     slower failures; smaller tiles provide finer progress but create more files.
+#   origin_x and origin_y: Projected coordinates anchoring all tile rows, columns,
+#     and pixel boundaries. Leave them at zero unless matching an established grid;
+#     changing either value shifts every cached pixel and defeats overlap reuse.
 [grid]
 crs = "EPSG:6933"
 pixel_size_meters = 500
@@ -118,29 +189,54 @@ tile_size_pixels = 128
 origin_x = 0
 origin_y = 0
 
-# These thresholds construct only d01, the reference-site band. A pixel is a
-# reference site when grassland probability meets the minimum and both human-impact
-# indices meet their maxima, subject to the temporal persistence criteria. No
-# ecoregion boundary participates in d01. These thresholds do not clip response or
-# predictor bands d02-d39.
+# These thresholds construct only d01, the reference-site band. Change them when the
+# scientific definition of a reference site changes. Stricter thresholds usually
+# produce fewer, less human-influenced reference pixels; looser thresholds increase
+# coverage but may admit more altered conditions. Every change creates new raster
+# cache identity because d01 changes. No ecoregion boundary participates in d01,
+# and these thresholds do not clip response or predictor bands d02-d39.
+#
+# Values:
+#   grassland_probability: Minimum annual natural/semi-natural grassland probability
+#     on the source's 0-100 percentage scale. The annual test is >= this value and
+#     must satisfy the persistence rule described under [stack]. The value 80 means
+#     at least 80% probability; higher is stricter.
+#   human_modification: Maximum accepted value from the static HMI image. The test
+#     is <= this value, so 0.1 excludes pixels above 0.1 on the source index. Lower
+#     values require less modification and are stricter.
+#   human_influence: Maximum accepted annual HII after the code divides its annual
+#     mean by 7000. The test is < 0.08 here and uses the same persistence rule;
+#     lower values require less human influence and are stricter.
 [reference]
 grassland_probability = 80
 human_modification = 0.1
 human_influence = 0.08
 
-# Dataset aliases keep Earth Engine IDs separate from band definitions. Each name
-# referenced by a band's sources list must be defined here. Replacing a dataset ID
-# changes the raster-effective configuration hash and therefore the cache namespace.
+# Dataset aliases keep Earth Engine IDs separate from band definitions. Change this
+# section when an asset moves, a collection version is replaced, or a new band
+# computation requires another source. Do not substitute a superficially similar
+# dataset without checking the Python computation's expected source band names,
+# temporal cadence, units, scale factors, and masks.
+#
+# Values are exact Earth Engine Image or ImageCollection asset IDs. The key on the
+# left is a stable local alias used in each band's sources list. Every referenced
+# alias must exist. Replacing any configured ID changes raster-effective identity
+# and creates a new cache namespace; remove aliases that no configured band uses.
 [datasets]
+# d01 reference-site inputs.
 grassland_probability = "projects/global-pasture-watch/assets/ggc-30m/v1/nat-semi-grassland_p"
 human_modification = "projects/hm-30x30/assets/output/v20240801/HMv20240801_2022s_AA_300"
 human_influence = "projects/HII/v1/hii"
+
+# d02-d19 ecological-response inputs.
 landsat_ndvi = "LANDSAT/COMPOSITES/C02/T1_L2_8DAY_NDVI"
 modis_phenology = "MODIS/061/MCD12Q2"
 short_vegetation_height = "projects/global-pasture-watch/assets/gsvh-30m/v1/short-veg-height_m"
 modis_vegetation_cover = "MODIS/061/MOD44B"
 modis_lai_fpar = "MODIS/061/MOD15A2H"
 modis_productivity = "MODIS/061/MOD17A3HGF"
+
+# d20-d39 abiotic/environmental predictor inputs.
 era5_daily = "ECMWF/ERA5/DAILY"
 era5_monthly = "ECMWF/ERA5/MONTHLY"
 gridmet_drought = "GRIDMET/DROUGHT"
@@ -155,19 +251,33 @@ srtm_landforms = "CSP/ERGo/1_0/Global/SRTM_landforms"
 alos_topographic_diversity = "CSP/ERGo/1_0/Global/ALOS_topoDiversity"
 
 # The repeated [[bands]] tables below are the stack, not an independent catalog.
+# Change them to add, remove, reorder, relabel, or reclassify a data layer. Use
+# model.responses instead when the pixels should remain available but only a subset
+# of response models should be fitted. Adding a new computation also requires an
+# implementation registered in fetch_gee_raster_tiles.py.
+#
 # Their file order is the GeoTIFF band order. In this complete definition d01 is
 # raster band 1, d02 is band 2, and so on through d39. The dNN value is the stable
 # data-layer identity, however, and does not have to match its physical position in
-# a reduced or reordered stack.
+# a reduced or reordered stack. Any edit changes raster-effective identity.
 #
 # Each band field has a specific purpose:
-#   id: stable dNN data-layer identifier used throughout the pipeline
-#   computation: registered Python Earth Engine calculation (not arbitrary code)
-#   suffix: stable output-name suffix; year and id are added automatically
-#   display_name: label used in reports and figures
-#   role: reference label, modeled ecological response, or abiotic predictor
-#   data_type: binary, continuous, or categorical interpretation by later stages
-#   sources: aliases from [datasets] used by the registered computation
+#   id: Stable dNN data-layer identifier used in raster descriptions, table columns,
+#     models, and reports. Preserve an ID when the variable's meaning is unchanged.
+#   computation: Registered Python Earth Engine calculation, not arbitrary code.
+#     Change it only to another implemented computation with compatible sources.
+#   suffix: Stable output-name suffix; year and id are prepended automatically.
+#     Change it only when the variable meaning/name changes because downstream
+#     GeoTIFF and Parquet column names will change.
+#   display_name: Human-readable report and figure label; it does not change values.
+#   role: "reference" is the binary d01 label, "response" is an ecological variable
+#     modeled from reference pixels, and "predictor" is an abiotic model input. The
+#     pipeline requires exactly one reference and one categorical predictor.
+#   data_type: "binary", "continuous", or "categorical" interpretation. It controls
+#     downstream treatment; categorical predictors are one-hot encoded rather than
+#     passed through continuous spline terms.
+#   sources: One or more aliases from [datasets] needed by the computation. This is
+#     dependency/provenance metadata and must agree with the implementation.
 #
 # For example, d02 becomes y2018_d02_ndvi_95th_percentile_across for this analysis.
 
@@ -537,6 +647,23 @@ sources = ["smap"]
 # Used by load_ecoregion_geotiff.py when it creates the Parquet sample. Pixels are
 # grouped into square blocks, then up to samples_per_class_per_block are retained
 # separately for reference (d01=1) and background (d01=0) pixels in each block.
+#
+# Change this section to trade spatial representation and class balance against
+# sample-table size and model runtime. It changes which rows are sampled but does not
+# change or redownload Earth Engine pixels. Regenerate the Parquet table and refit
+# models after changing any sampling value.
+#
+# Values:
+#   block_size_meters: Width and height of each equal-area sampling block. The 25 km
+#     default spreads samples across local areas. Smaller blocks can retain more rows
+#     and finer spatial balance; larger blocks impose coarser balance and fewer caps.
+#     Keep model.validation_block_size_meters an integer multiple of this value.
+#   samples_per_class_per_block: Maximum retained pixels in each block, applied
+#     separately to reference and background classes. The value 100 can retain up to
+#     200 rows per block when both classes are present. Higher values enlarge the
+#     table; lower values increase sampling weights and reduce within-block detail.
+#   random_seed: Seed for reproducible within-block sampling. Keep it fixed to
+#     reproduce a table; change it only to create an intentional alternative sample.
 [sampling]
 block_size_meters = 25000
 samples_per_class_per_block = 100
@@ -548,7 +675,41 @@ random_seed = 42
 # Used by fit_grassland_integrity_parameters.py. Whole validation blocks are held
 # out in fold_count spatial folds. responses accepts stable response IDs such as
 # ["d02", "d03", "d11"]; an empty list fits every band whose role is "response".
-# Coverage values and maximum_row_missing_fraction are proportions from 0 to 1.
+#
+# Change this section when revising spatial validation, missing-data tolerance,
+# model flexibility, regularization, or the responses to screen. Changes do not
+# redownload pixels, but they require refitting models and regenerating diagnostics.
+#
+# Values:
+#   fold_count: Number of spatial cross-validation folds. The value 5 trains five
+#     validation models, each holding out one fold. More folds increase fitting cost
+#     and leave smaller validation sets; fewer folds give coarser diagnostics. At
+#     least two are required, and each fold needs adequate reference observations.
+#   validation_block_size_meters: Width and height of blocks kept wholly within one
+#     fold. The 100 km default joins each 4 by 4 group of 25 km sampling blocks.
+#     Larger blocks reduce local leakage but produce fewer independent blocks. Keep
+#     this an integer multiple of sampling.block_size_meters.
+#   minimum_predictor_coverage: Minimum represented-area share with a defined value
+#     for a predictor to be retained. At 0.80, a predictor must cover at least 80% of
+#     sampled represented area. Higher values exclude incomplete predictors sooner.
+#     The configured categorical predictor is required and cannot be screened out.
+#   maximum_row_missing_fraction: Largest missing share among retained predictors
+#     for a row to remain usable. At 0.20, no more than 20% may be missing; accepted
+#     missing values are imputed from each fold's training rows. Higher values retain
+#     more rows but rely more heavily on imputation.
+#   spline_knot_count: Quantile knots for each continuous predictor's cubic spline.
+#     More knots permit more nonlinear shape but add coefficients, data demands, and
+#     overfitting risk; fewer knots impose simpler response curves. Minimum is 2.
+#   minimum_response_coverage: Minimum represented usable-reference area with a
+#     defined response. At 0.50, at least half must be defined or that response is
+#     skipped. Higher values demand more complete response observations.
+#   ridge_alpha: L2 penalty on fitted spline and category coefficients. Zero removes
+#     ridge regularization; larger values shrink coefficients more strongly and can
+#     stabilize noisy or collinear fits at the cost of additional bias.
+#   responses: Ordered dNN response IDs to fit. [] selects every configured response.
+#     Use a subset after diagnostics to reduce runtime without changing the raster.
+#
+# Coverage and missingness values are proportions strictly between 0 and 1.
 [model]
 fold_count = 5
 validation_block_size_meters = 100000
@@ -567,14 +728,27 @@ responses = []
 # not define the AOI, fetched data, reference sites, samples, or fitted models. It is
 # still part of this analysis TOML and therefore remains reproducible.
 #
-# application_mask_path is optional: remove the key to use every otherwise-eligible
-# raster pixel. When set, only defined first-band mask pixels exactly equal to 1
-# receive inference. The mask can use another CRS, resolution, grid, or extent and
-# is aligned with nearest-neighbor resampling. It does not alter tile fetching,
-# sampling, or model fitting.
+# Change this section for another assessment target, available memory/I/O profile,
+# or covariance-stabilization assumption. These values do not change fetched pixels
+# or fitted response models; rerun inference to regenerate raster outputs.
 #
-# window_size_pixels bounds processing memory. covariance_shrinkage stabilizes the
-# reference-departure covariance matrix and must be a proportion between 0 and 1.
+# Values:
+#   application_mask_path: Optional raster resolved relative to this file. Only
+#     defined first-band pixels exactly equal to 1 receive inference. Remove this key
+#     to use every otherwise-eligible predictor-footprint pixel. Change it for a
+#     different assessment extent or mask year. CRS, resolution, grid, and extent
+#     may differ from the stack because nearest-neighbor alignment is windowed.
+#   window_size_pixels: Width and height of each square processing window. The value
+#     256 processes at most 65,536 source pixels per window. Larger windows may
+#     improve sequential I/O but use more memory; smaller windows lower peak memory
+#     while increasing loop and file-I/O overhead. It does not change results.
+#   covariance_shrinkage: Fraction used to replace off-diagonal reference covariance
+#     with zero before matrix inversion. At 0.10, inference uses 90% of the measured
+#     covariance plus 10% of its diagonal-only form while preserving variances.
+#     Increase it when response correlations make inversion unstable; decrease it
+#     to retain more measured correlation when calibration is well supported. It
+#     must be strictly between 0 and 1 and changes multivariate distance and P_i,
+#     not the individual expected-response or standardized-deviation rasters.
 [inference]
 application_mask_path = "../data/grassland_mask_2018.tif"
 window_size_pixels = 256
