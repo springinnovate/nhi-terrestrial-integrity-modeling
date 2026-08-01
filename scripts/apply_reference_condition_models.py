@@ -27,17 +27,9 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 from tqdm.auto import tqdm
 
-if __package__:
-    from .analysis_config import (
-        AnalysisConfiguration,
-        load_analysis_configuration,
-    )
-    from .fit_grassland_integrity_parameters import predict_expected_response
-    from .reference_condition_utils import FIGURE_DPI
-else:
-    from analysis_config import AnalysisConfiguration, load_analysis_configuration
-    from fit_grassland_integrity_parameters import predict_expected_response
-    from reference_condition_utils import FIGURE_DPI
+from .analysis_config import AnalysisConfiguration, load_analysis_configuration
+from .fit_grassland_integrity_parameters import predict_expected_response
+from .reference_condition_utils import FIGURE_DPI
 
 
 MAXIMUM_DISPLAY_DIMENSION = 700

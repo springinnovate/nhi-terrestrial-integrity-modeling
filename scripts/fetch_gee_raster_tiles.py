@@ -23,20 +23,12 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 from tqdm.auto import tqdm
 
-if __package__:
-    from .analysis_config import (
-        DEFAULT_ANALYSIS_CONFIG_PATH,
-        AnalysisConfiguration,
-        RasterCacheGrid as CacheGrid,
-        load_analysis_configuration,
-    )
-else:
-    from analysis_config import (
-        DEFAULT_ANALYSIS_CONFIG_PATH,
-        AnalysisConfiguration,
-        RasterCacheGrid as CacheGrid,
-        load_analysis_configuration,
-    )
+from .analysis_config import (
+    DEFAULT_ANALYSIS_CONFIG_PATH,
+    AnalysisConfiguration,
+    RasterCacheGrid as CacheGrid,
+    load_analysis_configuration,
+)
 
 
 MANIFEST_SCHEMA_VERSION = 1

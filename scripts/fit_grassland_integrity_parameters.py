@@ -20,34 +20,16 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
-if __package__:
-    from .analysis_config import (
-        AnalysisConfiguration,
-        load_analysis_configuration,
-    )
-    from .reference_condition_utils import (
-        FIGURE_DPI,
-        SPATIAL_FOLD_COLORS,
-        ReferenceConditionConfiguration,
-        calculate_imputation_values,
-        create_fold_map,
-        prepare_reference_condition_data,
-        weighted_quantiles,
-    )
-else:
-    from analysis_config import (
-        AnalysisConfiguration,
-        load_analysis_configuration,
-    )
-    from reference_condition_utils import (
-        FIGURE_DPI,
-        SPATIAL_FOLD_COLORS,
-        ReferenceConditionConfiguration,
-        calculate_imputation_values,
-        create_fold_map,
-        prepare_reference_condition_data,
-        weighted_quantiles,
-    )
+from .analysis_config import AnalysisConfiguration, load_analysis_configuration
+from .reference_condition_utils import (
+    FIGURE_DPI,
+    SPATIAL_FOLD_COLORS,
+    ReferenceConditionConfiguration,
+    calculate_imputation_values,
+    create_fold_map,
+    prepare_reference_condition_data,
+    weighted_quantiles,
+)
 
 
 REGRESSION_METRIC_NAMES = (

@@ -11,18 +11,18 @@
 # Typical workflow (PowerShell):
 #
 #   earthengine authenticate
-#   python scripts\fetch_gee_raster_tiles.py `
+#   python -m scripts.fetch_gee_raster_tiles `
 #     config\south_africa_reference_condition_analysis.toml
 #
-#   python scripts\load_ecoregion_geotiff.py `
+#   python -m scripts.load_ecoregion_geotiff `
 #     config\south_africa_reference_condition_analysis.toml `
 #     data\raster_stacks\example.tif
 #
-#   python scripts\fit_grassland_integrity_parameters.py `
+#   python -m scripts.fit_grassland_integrity_parameters `
 #     config\south_africa_reference_condition_analysis.toml `
 #     outputs\samples\example_spatial_sample.parquet
 #
-#   python scripts\apply_reference_condition_models.py `
+#   python -m scripts.apply_reference_condition_models `
 #     config\south_africa_reference_condition_analysis.toml `
 #     data\raster_stacks\example.tif `
 #     outputs\integrity_parameters\example_spatial_sample

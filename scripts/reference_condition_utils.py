@@ -14,10 +14,7 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Patch, Rectangle
 from pyproj import Transformer
 
-if __package__:
-    from .analysis_config import AnalysisConfiguration
-else:
-    from analysis_config import AnalysisConfiguration
+from .analysis_config import AnalysisConfiguration
 
 
 FIGURE_DPI = 300

@@ -11,7 +11,7 @@ pass the complete analysis definition:
 ```powershell
 earthengine authenticate
 
-python scripts/fetch_gee_raster_tiles.py `
+python -m scripts.fetch_gee_raster_tiles `
   config\south_africa_reference_condition_analysis.toml
 ```
 
@@ -79,7 +79,7 @@ per-band descriptive statistics. The same run creates a spatially balanced Parqu
 sample in `outputs/samples` and a 300 DPI world locator map in `outputs/figures`:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py `
+python -m scripts.load_ecoregion_geotiff `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif
 ```
@@ -105,7 +105,7 @@ Sampling is reproducible with the seed in the analysis TOML. The Parquet destina
 remains an operational command-line option:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py `
+python -m scripts.load_ecoregion_geotiff `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
   --sample-output outputs\samples\example.parquet
@@ -120,7 +120,7 @@ The map label comes from `analysis.display_name`. Supply an explicit PNG, PDF, o
 path when vector output or a different destination is needed:
 
 ```powershell
-python scripts/load_ecoregion_geotiff.py `
+python -m scripts.load_ecoregion_geotiff `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
   --location-figure outputs\figures\northern_shortgrass_prairie.svg
@@ -180,7 +180,7 @@ a reference site using bands assigned the `predictor` role. HMI and HII are not 
 predictors.
 
 ```powershell
-python scripts/fit_grassland_integrity_parameters.py `
+python -m scripts.fit_grassland_integrity_parameters `
   config\south_africa_reference_condition_analysis.toml `
   outputs\samples\example_spatial_sample.parquet
 ```
@@ -248,7 +248,7 @@ Apply every final ecological-response model from one completed model run to its
 ecoregion raster stack:
 
 ```powershell
-python scripts/apply_reference_condition_models.py `
+python -m scripts.apply_reference_condition_models `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
   outputs\integrity_parameters\example_spatial_sample
@@ -331,7 +331,7 @@ nearest-neighbor resampling without loading the complete mask into memory. Zeros
 other values, nodata, and pixels outside the mask extent are excluded:
 
 ```powershell
-python scripts/apply_reference_condition_models.py `
+python -m scripts.apply_reference_condition_models `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
   outputs\integrity_parameters\example_spatial_sample

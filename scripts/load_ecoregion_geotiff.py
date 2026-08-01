@@ -28,24 +28,12 @@ from rasterio.transform import Affine
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 from tqdm.auto import tqdm
 
-if __package__:
-    from .analysis_config import (
-        AnalysisConfiguration,
-        BAND_COLUMN_PATTERN,
-        load_analysis_configuration,
-    )
-    from .reference_condition_utils import (
-        EQUAL_AREA_CRS,
-    )
-else:
-    from analysis_config import (
-        AnalysisConfiguration,
-        BAND_COLUMN_PATTERN,
-        load_analysis_configuration,
-    )
-    from reference_condition_utils import (
-        EQUAL_AREA_CRS,
-    )
+from .analysis_config import (
+    AnalysisConfiguration,
+    BAND_COLUMN_PATTERN,
+    load_analysis_configuration,
+)
+from .reference_condition_utils import EQUAL_AREA_CRS
 
 
 EARTH_RADIUS_METERS = 6_371_008.8
