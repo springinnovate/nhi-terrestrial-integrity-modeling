@@ -148,6 +148,31 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
             ).all()
         )
 
+    def test_promotes_int32_sampling_blocks_before_fold_merge(self) -> None:
+        """Avoid pandas merge failures for existing int32 sample tables."""
+
+        sample_table = self._create_sample_table()
+        sample_table["sampling_block_column"] = sample_table[
+            "sampling_block_column"
+        ].astype(np.int32)
+        sample_table["sampling_block_row"] = sample_table[
+            "sampling_block_row"
+        ].astype(np.int32)
+
+        assigned_table, _ = assign_spatial_folds(
+            sample_table,
+            self.reference_condition_configuration,
+        )
+
+        self.assertEqual(
+            np.dtype(np.int64),
+            assigned_table["validation_block_column"].dtype,
+        )
+        self.assertEqual(
+            np.dtype(np.int64),
+            assigned_table["validation_block_row"].dtype,
+        )
+
     def test_selects_environmental_bands_and_tracks_missing_rows(self) -> None:
         """Remove low-coverage d39 and flag a row above the missing limit."""
 

@@ -778,9 +778,9 @@ def assemble_spatial_sample(
         "cache_tile_id": np.empty(sampled_row_count, dtype=object),
         "longitude": np.empty(sampled_row_count, dtype=np.float64),
         "latitude": np.empty(sampled_row_count, dtype=np.float64),
-        "sampling_block_id": np.empty(sampled_row_count, dtype=np.int32),
-        "sampling_block_column": np.empty(sampled_row_count, dtype=np.int32),
-        "sampling_block_row": np.empty(sampled_row_count, dtype=np.int32),
+        "sampling_block_id": np.empty(sampled_row_count, dtype=np.int64),
+        "sampling_block_column": np.empty(sampled_row_count, dtype=np.int64),
+        "sampling_block_row": np.empty(sampled_row_count, dtype=np.int64),
         "reference_site": np.empty(sampled_row_count, dtype=np.uint8),
         "pixel_area_m2": np.empty(sampled_row_count, dtype=np.float64),
         "available_pixels_in_block_class": np.empty(

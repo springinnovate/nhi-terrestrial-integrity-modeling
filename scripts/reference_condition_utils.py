@@ -170,10 +170,12 @@ def assign_spatial_folds(
     )
     assigned_table = sample_table.copy()
     assigned_table["validation_block_column"] = (
-        assigned_table["sampling_block_column"] // sampling_blocks_per_validation_side
+        assigned_table["sampling_block_column"].astype(np.int64)
+        // sampling_blocks_per_validation_side
     )
     assigned_table["validation_block_row"] = (
-        assigned_table["sampling_block_row"] // sampling_blocks_per_validation_side
+        assigned_table["sampling_block_row"].astype(np.int64)
+        // sampling_blocks_per_validation_side
     )
 
     block_pairs = (

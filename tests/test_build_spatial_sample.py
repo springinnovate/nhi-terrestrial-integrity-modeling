@@ -336,6 +336,14 @@ class BuildSpatialSampleTest(unittest.TestCase):
         )
         pd.testing.assert_frame_equal(spatial_sample.table, round_trip_table)
         self.assertEqual(len(spatial_sample.table), parquet_summary.rows)
+        self.assertEqual(
+            np.dtype(np.int64),
+            round_trip_table["sampling_block_column"].dtype,
+        )
+        self.assertEqual(
+            np.dtype(np.int64),
+            round_trip_table["sampling_block_row"].dtype,
+        )
         self.assertEqual(2, provenance["cache_tile_count"])
         self.assertEqual(
             analysis_cache_tiles.stack_identifier,
