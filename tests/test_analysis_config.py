@@ -133,6 +133,7 @@ class AnalysisConfigurationTest(unittest.TestCase):
             configuration.analysis_name,
         )
         self.assertEqual("nhi_reference_condition", configuration.stack_name)
+        self.assertEqual(3, configuration.stack_version)
         self.assertEqual(2018, configuration.year)
         self.assertEqual("South Africa", configuration.display_name)
         self.assertTrue(configuration.aoi_path.is_file())
@@ -142,6 +143,7 @@ class AnalysisConfigurationTest(unittest.TestCase):
             "grassland_mask_2018.tif",
             configuration.inference.application_mask_path.name,
         )
+        self.assertNotIn("maybe_grassland_ecoregions", configuration.datasets)
         self.assertEqual(39, len(configuration.bands))
         role_counts = {
             role: sum(band.role == role for band in configuration.bands)

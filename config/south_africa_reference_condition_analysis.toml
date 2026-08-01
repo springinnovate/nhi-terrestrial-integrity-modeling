@@ -23,7 +23,7 @@
 #     data\raster_stacks\example.tif `
 #     outputs\integrity_parameters\example_spatial_sample
 #
-# What the Earth Engine multiband image is:
+# Data that goes into the pipeline:
 #
 # This project asks Earth Engine to build all configured variables as one ee.Image
 # and downloads each spatial cache tile as one multiband GeoTIFF. This is only a
@@ -53,10 +53,11 @@
 # rasters and model artifacts, so the established dNN identifiers are retained.
 #
 # d01 is the reference-site data layer. It has role = "reference" and value 1 where
-# the configured grassland persistence and low-human-impact criteria are met within
-# the possible-grassland ecoregions. Earth Engine masks d01 elsewhere. During
-# sampling, a predictor-footprint pixel without d01=1 is class 0 (background); class
-# 0 means "not selected as a reference site," not "known non-grassland."
+# the configured grassland persistence and low-human-impact criteria are met. It is
+# evaluated throughout the cache tiles selected by the AOI without an ecoregion or
+# grassland-potential boundary. Earth Engine masks d01 elsewhere. During sampling, a
+# predictor-footprint pixel without d01=1 is class 0 (background); class 0 means "not
+# selected as a reference site," not "known non-grassland."
 #
 # All relative local paths are resolved from this file's directory, not from the
 # shell's current directory. Output paths remain operational command-line options.
@@ -67,7 +68,10 @@
 # -----------------------------------------------------------------------------
 # name is a stable, file-safe identifier used in provenance. display_name is the
 # human-readable label used in reports and figures. aoi_path must identify a WGS84
-# polygon or multipolygon GeoJSON. year must be supported by [stack].
+# polygon or multipolygon GeoJSON. It selects the Earth Engine tiles available to
+# the analysis; it does not identify an ecoregion or decide where inference occurs.
+# The optional inference raster target is configured separately under [inference].
+# year must be supported by [stack].
 [analysis]
 name = "south_africa_reference_condition_2018"
 display_name = "South Africa"
@@ -95,7 +99,7 @@ request_retry_count = 1
 # or implementation of the stack changes incompatibly.
 [stack]
 name = "nhi_reference_condition"
-version = 2
+version = 3
 minimum_year = 2015
 maximum_year = 2019
 reference_start_year = 2001
@@ -116,8 +120,9 @@ origin_y = 0
 
 # These thresholds construct only d01, the reference-site band. A pixel is a
 # reference site when grassland probability meets the minimum and both human-impact
-# indices meet their maxima, subject to the d01 computation's other criteria.
-# They do not clip response or predictor bands d02-d39.
+# indices meet their maxima, subject to the temporal persistence criteria. No
+# ecoregion boundary participates in d01. These thresholds do not clip response or
+# predictor bands d02-d39.
 [reference]
 grassland_probability = 80
 human_modification = 0.1
@@ -127,7 +132,6 @@ human_influence = 0.08
 # referenced by a band's sources list must be defined here. Replacing a dataset ID
 # changes the raster-effective configuration hash and therefore the cache namespace.
 [datasets]
-maybe_grassland_ecoregions = "projects/ecoshard-202922/assets/nhi_assets/maybe_grassland_ecoregions_simplified_100m"
 grassland_probability = "projects/global-pasture-watch/assets/ggc-30m/v1/nat-semi-grassland_p"
 human_modification = "projects/hm-30x30/assets/output/v20240801/HMv20240801_2022s_AA_300"
 human_influence = "projects/HII/v1/hii"
@@ -179,7 +183,6 @@ sources = [
   "grassland_probability",
   "human_modification",
   "human_influence",
-  "maybe_grassland_ecoregions",
 ]
 
 # Ecological response variables: GeoTIFF bands 2-19. Models learn the expected
@@ -559,11 +562,16 @@ responses = []
 # -----------------------------------------------------------------------------
 # Raster inference
 # -----------------------------------------------------------------------------
-# Used only by apply_reference_condition_models.py. application_mask_path is
-# optional: remove the key to use every otherwise-eligible raster pixel. When set,
-# only defined first-band mask pixels exactly equal to 1 receive inference. The mask
-# can use another CRS, resolution, grid, or extent and is aligned with nearest-
-# neighbor resampling. It does not alter tile fetching, sampling, or model fitting.
+# Used only by apply_reference_condition_models.py. The application mask belongs in
+# this section rather than [analysis] because it selects prediction pixels; it does
+# not define the AOI, fetched data, reference sites, samples, or fitted models. It is
+# still part of this analysis TOML and therefore remains reproducible.
+#
+# application_mask_path is optional: remove the key to use every otherwise-eligible
+# raster pixel. When set, only defined first-band mask pixels exactly equal to 1
+# receive inference. The mask can use another CRS, resolution, grid, or extent and
+# is aligned with nearest-neighbor resampling. It does not alter tile fetching,
+# sampling, or model fitting.
 #
 # window_size_pixels bounds processing memory. covariance_shrinkage stabilizes the
 # reference-departure covariance matrix and must be a proportion between 0 and 1.

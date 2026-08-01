@@ -157,25 +157,37 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             band_names[-1],
         )
 
-    def test_possible_grassland_ecoregions_only_define_reference_sites(self) -> None:
-        """Restrict the possible-grassland source to the d01 band definition."""
+    def test_reference_sites_have_no_ecoregion_source(self) -> None:
+        """Construct d01 without a hidden spatial ecoregion restriction."""
 
-        bands_using_ecoregion_source = [
-            definition.identifier
+        reference_definition = next(
+            definition
             for definition in self.default_analysis.bands
-            if "maybe_grassland_ecoregions"
-            in definition.source_dataset_keys
-        ]
+            if definition.role == "reference"
+        )
 
-        self.assertEqual(["d01"], bands_using_ecoregion_source)
+        self.assertNotIn(
+            "maybe_grassland_ecoregions",
+            self.default_analysis.datasets,
+        )
+        self.assertEqual(
+            (
+                "grassland_probability",
+                "human_modification",
+                "human_influence",
+            ),
+            reference_definition.source_dataset_keys,
+        )
 
-    def test_stack_version_invalidates_ecoregion_clipped_cache_tiles(self) -> None:
-        """Use a new namespace after removing the completed-stack mask."""
+    def test_stack_version_invalidates_ecoregion_restricted_reference_tiles(
+        self,
+    ) -> None:
+        """Use a new namespace after removing the d01 ecoregion restriction."""
 
         stack_identifier = build_stack_identifier(self.default_analysis)
 
-        self.assertEqual(2, self.default_analysis.stack_version)
-        self.assertIn("_v2_", stack_identifier)
+        self.assertEqual(3, self.default_analysis.stack_version)
+        self.assertIn("_v3_", stack_identifier)
 
     def test_request_policy_comes_from_analysis_configuration(self) -> None:
         """Keep Earth Engine request policy in the TOML single source of truth."""

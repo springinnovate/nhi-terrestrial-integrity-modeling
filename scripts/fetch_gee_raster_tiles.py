@@ -423,13 +423,6 @@ def build_earth_engine_stack(
         )
         return adjacent_year_pairs.reduce(ee.Reducer.min()).eq(1)
 
-    reference_site_ecoregion_mask = (
-        ee.Image()
-        .byte()
-        .paint(ee.FeatureCollection(datasets["maybe_grassland_ecoregions"]), 1)
-        .rename("maybe_grassland_ecoregion")
-        .selfMask()
-    )
     grassland_probability_collection = ee.ImageCollection(
         datasets["grassland_probability"]
     )
@@ -465,7 +458,6 @@ def build_earth_engine_stack(
                 reference.human_modification
             )
         )
-        .And(reference_site_ecoregion_mask)
         .selfMask()
         .toByte()
     )

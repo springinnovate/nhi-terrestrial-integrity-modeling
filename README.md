@@ -5,7 +5,7 @@ First-pass local analysis scripts for raster stacks exported from Google Earth E
 ## Cache Earth Engine raster tiles for an AOI
 
 Fetch an analysis-defined raster stack directly from Earth Engine without retaining a
-complete ecoregion export. Authenticate the Earth Engine Python client once, then
+complete AOI-sized export. Authenticate the Earth Engine Python client once, then
 pass the complete analysis definition:
 
 ```powershell
@@ -15,13 +15,15 @@ python scripts/fetch_gee_raster_tiles.py `
   config\south_africa_reference_condition_analysis.toml
 ```
 
-`config/south_africa_reference_condition_analysis.toml` constructs the same `d01-d39`
-layers as `gee_apps/nhi_raster_export_app.js`. It covers the configured AOI with
-globally aligned 128 by 128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area
-projection (`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth
-Engine's `computePixels` endpoint computes only missing tiles, and overlapping AOI
-requests reuse the same cache files. The default complete stack is available for 2015
-through 2019.
+`config/south_africa_reference_condition_analysis.toml` defines the project's
+`d01-d39` multiband stack. The calculations originated in
+`gee_apps/nhi_raster_export_app.js`, while the TOML now selects and orders the stack
+used by the Python pipeline. It covers the configured AOI with globally aligned 128
+by 128 pixel tiles in the NSIDC EASE-Grid 2.0 Global equal-area projection
+(`EPSG:6933`) at 500 m resolution. Each tile is a 64 km square. Earth Engine's
+`computePixels` endpoint computes only missing tiles, and overlapping AOI requests
+reuse the same cache files. The default complete stack is available for 2015 through
+2019.
 
 TOML is a configuration format similar in purpose to YAML, with explicit sections,
 key-value pairs, and repeated `[[bands]]` tables. One analysis file controls its
@@ -33,12 +35,12 @@ suffix, display name, pipeline role (`reference`, `response`, or `predictor`), d
 type, and source aliases. Python still implements calculations such as phenology and
 growing-season aggregation; TOML selects and orders those implementations.
 
-The TOML-defined AOI is the only boundary used to select cache tiles. Edge tiles are
-stored in full so later overlapping AOIs can reuse them. The possible-grassland
-ecoregion collection participates only in the `d01` reference-site definition; it
-does not mask the ecological-response or environmental bands in `d02-d39`. Exact AOI
-clipping can therefore be applied when cached tiles are assembled for analysis
-without changing the shared cache contents.
+The TOML-defined AOI is a general-purpose WGS84 polygon or multipolygon and is the
+only project boundary used to select cache tiles. Edge tiles are stored in full so
+later overlapping AOIs can reuse them. The `d01` reference criteria are evaluated
+without a possible-grassland ecoregion boundary, and no project boundary masks the
+ecological-response or environmental bands in `d02-d39`. Exact AOI clipping can be
+applied when cached tiles are assembled without changing the shared cache contents.
 
 Cached GeoTIFFs are stored by year and reference-threshold configuration under
 `data/gee_raster_cache/tiles`. `data/gee_raster_cache/manifest.json` records the
@@ -314,6 +316,13 @@ upper-percentile frequencies.
 degradation or an ecological integrity score. Keep the individual standardized
 response rasters to identify the variables and directions responsible for a large
 departure.
+
+`analysis.aoi_path` and `inference.application_mask_path` have separate purposes.
+The vector AOI determines which Earth Engine data are fetched. The application mask
+determines which pixels in the supplied raster stack receive predictions, so it
+belongs to the inference section even though the complete TOML defines one analysis.
+Changing the mask does not redefine reference sites or require refetching or
+refitting.
 
 Set `inference.application_mask_path` to a raster whose defined first-band pixels
 equal to `1` identify the inference target. The mask may have a different CRS,
