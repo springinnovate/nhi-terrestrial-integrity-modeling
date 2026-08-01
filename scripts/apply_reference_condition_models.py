@@ -469,7 +469,7 @@ def load_response_models(
     """
 
     metadata_path = model_run_directory / "run_metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    run_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     model_paths = sorted(
         (model_run_directory / "models").glob("*_reference_condition_gam.joblib")
     )
@@ -480,37 +480,56 @@ def load_response_models(
 
     response_models = []
     for model_path in model_paths:
-        bundle = joblib.load(model_path)
-        continuous_predictors = tuple(bundle["continuous_predictor_names"])
-        categorical_predictor = str(bundle["categorical_predictor_name"])
-        reference_rmse = float(bundle["reference_residual_rmse_oof"])
-        if not np.isfinite(reference_rmse) or reference_rmse <= 0:
+        model_bundle = joblib.load(model_path)
+        continuous_predictor_names = tuple(
+            model_bundle["continuous_predictor_names"]
+        )
+        categorical_predictor_name = str(
+            model_bundle["categorical_predictor_name"]
+        )
+        out_of_fold_reference_rmse = float(
+            model_bundle["reference_residual_rmse_oof"]
+        )
+        if (
+            not np.isfinite(out_of_fold_reference_rmse)
+            or out_of_fold_reference_rmse <= 0
+        ):
             raise ValueError(
                 f"{model_path.name} has invalid cross-validated reference RMSE "
-                f"{reference_rmse}."
+                f"{out_of_fold_reference_rmse}."
             )
         response_models.append(
             ResponseModel(
                 path=model_path,
-                response_name=str(bundle["response"]),
-                response_band=str(bundle["response_band"]),
-                display_name=str(bundle["display_name"]),
-                predictor_names=(*continuous_predictors, categorical_predictor),
-                reference_rmse=reference_rmse,
-                bundle=bundle,
+                response_name=str(model_bundle["response"]),
+                response_band=str(model_bundle["response_band"]),
+                display_name=str(model_bundle["display_name"]),
+                predictor_names=(
+                    *continuous_predictor_names,
+                    categorical_predictor_name,
+                ),
+                reference_rmse=out_of_fold_reference_rmse,
+                bundle=model_bundle,
             )
         )
 
     response_models.sort(key=lambda model: model.response_band)
-    predictor_names = response_models[0].predictor_names
-    if any(model.predictor_names != predictor_names for model in response_models[1:]):
+    expected_predictor_names = response_models[0].predictor_names
+    if any(
+        model.predictor_names != expected_predictor_names
+        for model in response_models[1:]
+    ):
         raise ValueError(
             "Models in one inference run must use the same ordered predictor bands."
         )
-    maximum_missing_fraction = float(
-        metadata["configuration"]["maximum_row_missing_fraction"]
+    maximum_predictor_missing_fraction = float(
+        run_metadata["configuration"]["maximum_row_missing_fraction"]
     )
-    return metadata, tuple(response_models), maximum_missing_fraction
+    return (
+        run_metadata,
+        tuple(response_models),
+        maximum_predictor_missing_fraction,
+    )
 
 
 def build_reference_departure_calibration(
@@ -524,18 +543,17 @@ def build_reference_departure_calibration(
         model_run_directory: Output directory from the response-model workflow.
         response_models: Ordered fitted responses included in each vector.
         covariance_shrinkage: Fraction of covariance shrunk toward its diagonal
-            before inversion. Must be strictly between zero and one.
+            before inversion. The analysis configuration guarantees a value
+            strictly between zero and one.
 
     Returns:
         Complete reference calibration for distance and percentile inference.
 
     Raises:
-        ValueError: If shrinkage is invalid, too few complete reference vectors
-            are available, or a fitted response has no reference variance.
+        ValueError: If too few complete reference vectors are available or a
+            fitted response has no reference variance.
     """
 
-    if not 0.0 < covariance_shrinkage < 1.0:
-        raise ValueError("covariance_shrinkage must be between zero and one.")
     prediction_table_path = (
         model_run_directory / "ecological_response_predictions.parquet"
     )
@@ -650,32 +668,56 @@ def build_reference_departure_calibration(
 
 def write_inference_report(
     output_path: Path,
-    metadata: dict[str, object],
+    inference_metadata: dict[str, object],
 ) -> None:
     """Write a human-readable raster inference report.
 
     Args:
         output_path: Destination path for the Markdown report.
-        metadata: JSON-ready inference metadata and response statistics.
+        inference_metadata: JSON-ready inference metadata and response
+            statistics.
 
     Returns:
         None: The completed report is written to ``output_path``.
     """
 
-    coverage = metadata["coverage"]
-    configuration = metadata["configuration"]
-    aggregate_figure = metadata["aggregate_deviation_figure"]
-    calibration = metadata["reference_departure_calibration"]
-    departure_percentile = metadata["reference_departure_percentile"]
-    percentile_statistics = departure_percentile["statistics"]
-    color_scale_upper_value = aggregate_figure["color_scale_upper_value"]
-    application_mask = metadata["application_mask"]
-    lines = [
-        f"# Reference-condition raster inference: {metadata['ecoregion_name']}",
+    coverage_statistics = inference_metadata["coverage"]
+    inference_configuration = inference_metadata["configuration"]
+    aggregate_figure_metadata = inference_metadata[
+        "aggregate_deviation_figure"
+    ]
+    reference_calibration_metadata = inference_metadata[
+        "reference_departure_calibration"
+    ]
+    departure_percentile_metadata = inference_metadata[
+        "reference_departure_percentile"
+    ]
+    percentile_statistics = departure_percentile_metadata["statistics"]
+    color_scale_upper_value = aggregate_figure_metadata[
+        "color_scale_upper_value"
+    ]
+    complete_reference_area_percent = reference_calibration_metadata[
+        "complete_reference_area_percent"
+    ]
+    stabilized_covariance_condition_number = reference_calibration_metadata[
+        "stabilized_covariance_condition_number"
+    ]
+    cells_at_or_above_color_maximum_percent = aggregate_figure_metadata[
+        "cells_at_or_above_color_maximum_percent"
+    ]
+    application_mask_metadata = inference_metadata["application_mask"]
+    application_mask_path_text = (
+        str(application_mask_metadata["path"])
+        if application_mask_metadata is not None
+        else "not supplied"
+    )
+    report_lines = [
+        "# Reference-condition raster inference: "
+        f"{inference_metadata['ecoregion_name']}",
         "",
     ]
-    if application_mask is None:
-        lines.extend(
+    if application_mask_metadata is None:
+        report_lines.extend(
             [
                 "> **Important:** No application mask was supplied. These outputs "
                 "cover the usable ecoregion predictor footprint and must not be "
@@ -683,41 +725,41 @@ def write_inference_report(
                 "",
             ]
         )
-    lines.extend(
+    report_lines.extend(
         [
             "## Inputs",
             "",
-            f"- Raster stack: `{metadata['input_raster']}`",
-            f"- Model run: `{metadata['model_run_directory']}`",
-            (
-                "- Application mask: `"
-                f"{application_mask['path'] if application_mask else 'not supplied'}`"
-            ),
-            f"- Application mask selection: {metadata['mask_interpretation']}",
-            f"- Responses: {metadata['response_count']}",
+            f"- Raster stack: `{inference_metadata['input_raster']}`",
+            f"- Model run: `{inference_metadata['model_run_directory']}`",
+            f"- Application mask: `{application_mask_path_text}`",
+            "- Application mask selection: "
+            f"{inference_metadata['mask_interpretation']}",
+            f"- Responses: {inference_metadata['response_count']}",
             (
                 "- Maximum predictor missingness: "
-                f"{configuration['maximum_predictor_missing_fraction']:.1%}"
+                f"{inference_configuration['maximum_predictor_missing_fraction']:.1%}"
             ),
-            f"- Processing window: {configuration['window_size_pixels']} pixels",
+            "- Processing window: "
+            f"{inference_configuration['window_size_pixels']} pixels",
             (
                 "- Covariance diagonal shrinkage: "
-                f"{configuration['covariance_shrinkage']:.1%}"
+                f"{inference_configuration['covariance_shrinkage']:.1%}"
             ),
             "",
             "## Pixel coverage",
             "",
-            f"- Raster pixels: {coverage['raster_pixels']:,}",
-            f"- Target pixels: {coverage['target_pixels']:,}",
-            f"- Predicted pixels: {coverage['predicted_pixels']:,}",
+            f"- Raster pixels: {coverage_statistics['raster_pixels']:,}",
+            f"- Target pixels: {coverage_statistics['target_pixels']:,}",
+            f"- Predicted pixels: {coverage_statistics['predicted_pixels']:,}",
             (
                 "- Insufficient-predictor pixels: "
-                f"{coverage['insufficient_predictor_pixels']:,}"
+                f"{coverage_statistics['insufficient_predictor_pixels']:,}"
             ),
-            f"- Predicted pixels using imputation: {coverage['imputed_pixels']:,}",
+            "- Predicted pixels using imputation: "
+            f"{coverage_statistics['imputed_pixels']:,}",
             (
                 "- Complete non-reference percentile pixels: "
-                f"{coverage['departure_percentile_pixels']:,}"
+                f"{coverage_statistics['departure_percentile_pixels']:,}"
             ),
             "",
             "Status raster codes: 0 is outside the target, 1 has too many missing "
@@ -728,19 +770,24 @@ def write_inference_report(
             "",
             (
                 "The calibration uses complete standardized out-of-fold residual "
-                f"vectors from {calibration['complete_reference_rows']:,} of "
-                f"{calibration['reference_rows']:,} reference rows, representing "
-                f"{calibration['complete_reference_area_percent']:.1f}% of sampled "
+                "vectors from "
+                f"{reference_calibration_metadata['complete_reference_rows']:,} of "
+                f"{reference_calibration_metadata['reference_rows']:,} reference "
+                "rows, representing "
+                f"{complete_reference_area_percent:.1f}% "
+                "of sampled "
                 "reference area. The area-weighted reference mean and covariance "
                 "are calculated from those vectors."
             ),
             "",
             (
                 "The covariance matrix is stabilized with "
-                f"{calibration['covariance_shrinkage']:.1%} diagonal shrinkage "
+                f"{reference_calibration_metadata['covariance_shrinkage']:.1%} "
+                "diagonal shrinkage "
                 "before inversion. Its condition number changes from "
-                f"{calibration['covariance_condition_number']:.3g} to "
-                f"{calibration['stabilized_covariance_condition_number']:.3g}."
+                f"{reference_calibration_metadata['covariance_condition_number']:.3g} "
+                "to "
+                f"{stabilized_covariance_condition_number:.3g}."
             ),
             "",
             (
@@ -785,7 +832,7 @@ def write_inference_report(
                 "pixels. A fixed linear scale maps 0 to green, "
                 f"{DISPLAY_YELLOW_GREEN_VALUE:g} to yellow-green, and "
                 f"{color_scale_upper_value:g} or more to red. "
-                f"{aggregate_figure['cells_at_or_above_color_maximum_percent']:.1f}% "
+                f"{cells_at_or_above_color_maximum_percent:.1f}% "
                 "of colored display cells are at or above "
                 f"{color_scale_upper_value:g}. This is a diagnostic total-departure "
                 "map, not a grassland integrity score."
@@ -801,28 +848,42 @@ def write_inference_report(
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
-    for response in metadata["responses"]:
-        statistics = response["statistics"]
-        if statistics["standardized_mean"] is None:
-            mean = standard_deviation = minimum = maximum = above_two = "NA"
+    for response_metadata in inference_metadata["responses"]:
+        response_statistics = response_metadata["statistics"]
+        if response_statistics["standardized_mean"] is None:
+            standardized_mean_text = "NA"
+            standardized_standard_deviation_text = "NA"
+            standardized_minimum_text = "NA"
+            standardized_maximum_text = "NA"
+            above_two_percent_text = "NA"
         else:
-            mean = f"{statistics['standardized_mean']:.3f}"
-            standard_deviation = (
-                f"{statistics['standardized_standard_deviation']:.3f}"
+            standardized_mean_text = (
+                f"{response_statistics['standardized_mean']:.3f}"
             )
-            minimum = f"{statistics['standardized_minimum']:.3f}"
-            maximum = f"{statistics['standardized_maximum']:.3f}"
-            above_two = (
-                f"{statistics['absolute_standardized_above_two_percent']:.1f}%"
+            standardized_standard_deviation_text = (
+                f"{response_statistics['standardized_standard_deviation']:.3f}"
             )
-        lines.append(
-            f"| {response['response_band']} | {response['display_name']} | "
-            f"{response['reference_residual_rmse_oof']:.6g} | "
-            f"{statistics['expected_pixels']:,} | "
-            f"{statistics['deviation_pixels']:,} | {mean} | "
-            f"{standard_deviation} | {minimum} | {maximum} | {above_two} |"
+            standardized_minimum_text = (
+                f"{response_statistics['standardized_minimum']:.3f}"
+            )
+            standardized_maximum_text = (
+                f"{response_statistics['standardized_maximum']:.3f}"
+            )
+            above_two_percent_text = (
+                f"{response_statistics['absolute_standardized_above_two_percent']:.1f}%"
+            )
+        report_lines.append(
+            f"| {response_metadata['response_band']} | "
+            f"{response_metadata['display_name']} | "
+            f"{response_metadata['reference_residual_rmse_oof']:.6g} | "
+            f"{response_statistics['expected_pixels']:,} | "
+            f"{response_statistics['deviation_pixels']:,} | "
+            f"{standardized_mean_text} | "
+            f"{standardized_standard_deviation_text} | "
+            f"{standardized_minimum_text} | {standardized_maximum_text} | "
+            f"{above_two_percent_text} |"
         )
-    lines.extend(
+    report_lines.extend(
         [
             "",
             "## Interpretation",
@@ -846,10 +907,10 @@ def write_inference_report(
             "",
         ]
     )
-    for artifact_name, artifact_path in metadata["artifacts"].items():
-        lines.append(f"- {artifact_name}: `{artifact_path}`")
-    lines.append("")
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    for artifact_name, artifact_path in inference_metadata["artifacts"].items():
+        report_lines.append(f"- {artifact_name}: `{artifact_path}`")
+    report_lines.append("")
+    output_path.write_text("\n".join(report_lines), encoding="utf-8")
 
 
 def create_aggregate_deviation_figure(
@@ -1346,7 +1407,7 @@ def run_reference_condition_inference(
         Paths, counts, and elapsed time for the completed inference run.
 
     Raises:
-        ValueError: If the window size is invalid or required bands are absent.
+        ValueError: If required raster bands are absent.
         RuntimeError: If a fitted model produces a nonfinite prediction.
     """
 
@@ -1355,11 +1416,13 @@ def run_reference_condition_inference(
     covariance_shrinkage = analysis_configuration.inference.covariance_shrinkage
     resolved_raster_path = raster_stack_path.expanduser().resolve()
     resolved_model_run_directory = model_run_directory.expanduser().resolve()
-    resolved_application_mask_path = (
-        analysis_configuration.inference.application_mask_path
-    )
-    run_metadata, response_models, maximum_missing_fraction = load_response_models(
-        resolved_model_run_directory
+    application_mask_path = analysis_configuration.inference.application_mask_path
+    (
+        run_metadata,
+        response_models,
+        maximum_predictor_missing_fraction,
+    ) = load_response_models(
+        resolved_model_run_directory,
     )
     reference_calibration = build_reference_departure_calibration(
         resolved_model_run_directory,
@@ -1418,11 +1481,11 @@ def run_reference_condition_inference(
         model.response_band: ResponseStatistics() for model in response_models
     }
     departure_percentile_statistics = DeparturePercentileStatistics()
-    raster_pixels = 0
-    target_pixels = 0
-    predicted_pixels = 0
-    insufficient_predictor_pixels = 0
-    imputed_pixels = 0
+    raster_pixel_count = 0
+    target_pixel_count = 0
+    predicted_pixel_count = 0
+    insufficient_predictor_pixel_count = 0
+    imputed_pixel_count = 0
 
     print("Reference-condition raster inference")
     print(f"Raster stack: {resolved_raster_path}")
@@ -1447,26 +1510,28 @@ def run_reference_condition_inference(
         f"after {covariance_shrinkage:.1%} diagonal shrinkage"
     )
     print(f"Output directory: {resolved_output_directory}")
-    if resolved_application_mask_path is None:
+    if application_mask_path is None:
         print(
             "Application mask: not supplied; inferring across the usable ecoregion "
             "predictor footprint"
         )
     else:
-        print(f"Application mask: {resolved_application_mask_path}")
+        print(f"Application mask: {application_mask_path}")
         print("Application mask target: defined first-band pixels equal to 1")
 
     with ExitStack() as stack:
-        source = stack.enter_context(rasterio.open(resolved_raster_path))
+        raster_stack_source = stack.enter_context(
+            rasterio.open(resolved_raster_path)
+        )
         application_mask_metadata = None
-        if resolved_application_mask_path is None:
-            application_mask = None
+        if application_mask_path is None:
+            aligned_application_mask = None
         else:
             application_mask_source = stack.enter_context(
-                rasterio.open(resolved_application_mask_path)
+                rasterio.open(application_mask_path)
             )
             application_mask_metadata = {
-                "path": str(resolved_application_mask_path),
+                "path": str(application_mask_path),
                 "selected_value": 1,
                 "resampling": "nearest",
                 "source_width": application_mask_source.width,
@@ -1486,22 +1551,26 @@ def run_reference_condition_inference(
             )
             print(
                 "Application mask alignment: nearest neighbor to the inference "
-                f"grid ({source.width:,} columns x {source.height:,} rows, "
-                f"{source.crs})"
+                f"grid ({raster_stack_source.width:,} columns x "
+                f"{raster_stack_source.height:,} rows, "
+                f"{raster_stack_source.crs})"
             )
-            application_mask = stack.enter_context(
+            aligned_application_mask = stack.enter_context(
                 WarpedVRT(
                     application_mask_source,
-                    crs=source.crs,
-                    transform=source.transform,
-                    width=source.width,
-                    height=source.height,
+                    crs=raster_stack_source.crs,
+                    transform=raster_stack_source.transform,
+                    width=raster_stack_source.width,
+                    height=raster_stack_source.height,
                     resampling=Resampling.nearest,
                 )
             )
 
         source_band_indices = {}
-        for band_index, description in enumerate(source.descriptions, start=1):
+        for band_index, description in enumerate(
+            raster_stack_source.descriptions,
+            start=1,
+        ):
             if description is not None:
                 source_band_indices[description] = band_index
         missing_band_names = [
@@ -1513,24 +1582,15 @@ def run_reference_condition_inference(
             raise ValueError(
                 "Raster stack is missing model bands: " + ", ".join(missing_band_names)
             )
-        reference_band_candidates = [
-            (band_name, band_index)
-            for band_name, band_index in source_band_indices.items()
-            if band_name.lower() == "reference_sites"
-            or band_name.lower().endswith("_grassland_reference_sites")
-        ]
-        if not reference_band_candidates:
-            raise ValueError(
-                "Raster stack must contain a reference_sites or "
-                "*_grassland_reference_sites band for the aggregate diagnostic."
+        reference_band_name = next(
+            iter(
+                analysis_configuration.columns_with_role(
+                    source_band_indices,
+                    "reference",
+                ).values()
             )
-        reference_band_name, reference_band_index = min(
-            reference_band_candidates,
-            key=lambda candidate: (
-                not candidate[0].lower().startswith("y2018_"),
-                candidate[1],
-            ),
         )
+        reference_band_index = source_band_indices[reference_band_name]
         required_band_indices = [
             source_band_indices[band_name] for band_name in required_band_names
         ]
@@ -1539,10 +1599,14 @@ def run_reference_condition_inference(
 
         display_scale = min(
             1.0,
-            MAXIMUM_DISPLAY_DIMENSION / max(source.width, source.height),
+            MAXIMUM_DISPLAY_DIMENSION
+            / max(raster_stack_source.width, raster_stack_source.height),
         )
-        display_width = max(1, round(source.width * display_scale))
-        display_height = max(1, round(source.height * display_scale))
+        display_width = max(1, round(raster_stack_source.width * display_scale))
+        display_height = max(
+            1,
+            round(raster_stack_source.height * display_scale),
+        )
         aggregate_value_sums = np.zeros(
             (display_height, display_width),
             dtype=np.float64,
@@ -1563,15 +1627,15 @@ def run_reference_condition_inference(
             (display_height, display_width),
             dtype=np.int64,
         )
-        source_bounds = source.bounds
-        source_crs = source.crs
+        source_bounds = raster_stack_source.bounds
+        source_crs = raster_stack_source.crs
         print(f"Reference-site band: {reference_band_name}")
         print(
             "Aggregate map display grid: "
             f"{display_width:,} columns x {display_height:,} rows"
         )
 
-        float_profile = source.profile.copy()
+        float_profile = raster_stack_source.profile.copy()
         float_profile.update(
             driver="GTiff",
             count=len(response_models),
@@ -1610,30 +1674,28 @@ def run_reference_condition_inference(
             rasterio.open(inference_status_path, "w", **status_profile)
         )
 
-        common_tags = {
+        shared_output_tags = {
             "ecoregion_name": ecoregion_name,
             "input_raster": str(resolved_raster_path),
             "model_run_directory": str(resolved_model_run_directory),
-            "application_mask": str(
-                resolved_application_mask_path or "not_supplied"
-            ),
+            "application_mask": str(application_mask_path or "not_supplied"),
             "application_mask_selected_value": "1",
             "application_mask_resampling": "nearest",
         }
         expected_destination.update_tags(
             artifact_type="expected_reference_condition",
-            **common_tags,
+            **shared_output_tags,
         )
         deviation_destination.update_tags(
             artifact_type="observed_minus_expected_reference_condition",
-            **common_tags,
+            **shared_output_tags,
         )
         standardized_destination.update_tags(
             artifact_type="standardized_reference_condition_deviation",
             interpretation=(
                 "observed minus expected divided by pooled out-of-fold reference RMSE"
             ),
-            **common_tags,
+            **shared_output_tags,
         )
         percentile_destination.update_tags(
             artifact_type="reference_condition_departure_percentile",
@@ -1646,7 +1708,7 @@ def run_reference_condition_inference(
             value_minimum="0",
             value_maximum="1",
             reference_pixels="nodata",
-            **common_tags,
+            **shared_output_tags,
         )
         percentile_destination.set_band_description(
             1,
@@ -1657,45 +1719,64 @@ def run_reference_condition_inference(
             status_0="outside inference target",
             status_1="target pixel with excessive predictor missingness",
             status_2="reference-condition predictions written",
-            **common_tags,
+            **shared_output_tags,
         )
         status_destination.set_band_description(1, "inference_status")
         status_destination.set_band_description(2, "imputed_predictor_count")
-        for output_band_index, model in enumerate(response_models, start=1):
+        for output_band_index, response_model in enumerate(
+            response_models,
+            start=1,
+        ):
             expected_destination.set_band_description(
                 output_band_index,
-                f"{model.response_band}_expected_reference",
+                f"{response_model.response_band}_expected_reference",
             )
             deviation_destination.set_band_description(
                 output_band_index,
-                f"{model.response_band}_observed_minus_expected",
+                f"{response_model.response_band}_observed_minus_expected",
             )
             standardized_destination.set_band_description(
                 output_band_index,
-                f"{model.response_band}_standardized_deviation",
+                f"{response_model.response_band}_standardized_deviation",
             )
             response_tags = {
-                "response_band": model.response_band,
-                "display_name": model.display_name,
-                "source_response_band": model.response_name,
-                "reference_residual_rmse_oof": str(model.reference_rmse),
-                "model_path": str(model.path),
+                "response_band": response_model.response_band,
+                "display_name": response_model.display_name,
+                "source_response_band": response_model.response_name,
+                "reference_residual_rmse_oof": str(
+                    response_model.reference_rmse
+                ),
+                "model_path": str(response_model.path),
             }
             expected_destination.update_tags(output_band_index, **response_tags)
             deviation_destination.update_tags(output_band_index, **response_tags)
             standardized_destination.update_tags(output_band_index, **response_tags)
 
-        window_rows = math.ceil(source.height / window_size_pixels)
-        window_columns = math.ceil(source.width / window_size_pixels)
+        window_rows = math.ceil(raster_stack_source.height / window_size_pixels)
+        window_columns = math.ceil(raster_stack_source.width / window_size_pixels)
         window_iterator = (
             Window(
                 column_offset,
                 row_offset,
-                min(window_size_pixels, source.width - column_offset),
-                min(window_size_pixels, source.height - row_offset),
+                min(
+                    window_size_pixels,
+                    raster_stack_source.width - column_offset,
+                ),
+                min(
+                    window_size_pixels,
+                    raster_stack_source.height - row_offset,
+                ),
             )
-            for row_offset in range(0, source.height, window_size_pixels)
-            for column_offset in range(0, source.width, window_size_pixels)
+            for row_offset in range(
+                0,
+                raster_stack_source.height,
+                window_size_pixels,
+            )
+            for column_offset in range(
+                0,
+                raster_stack_source.width,
+                window_size_pixels,
+            )
         )
         for window in tqdm(
             window_iterator,
@@ -1704,50 +1785,57 @@ def run_reference_condition_inference(
             unit="window",
             disable=not show_progress,
         ):
-            masked_values = source.read(
+            masked_window_values = raster_stack_source.read(
                 required_band_indices,
                 window=window,
                 masked=True,
             )
             window_values = np.asarray(
-                np.ma.getdata(masked_values),
+                np.ma.getdata(masked_window_values),
                 dtype=np.float64,
             )
-            window_validity = ~np.ma.getmaskarray(masked_values)
-            window_validity &= np.isfinite(window_values)
-            window_values[~window_validity] = np.nan
+            window_value_validity = ~np.ma.getmaskarray(masked_window_values)
+            window_value_validity &= np.isfinite(window_values)
+            window_values[~window_value_validity] = np.nan
 
             predictor_count = len(predictor_names)
             predictor_values = window_values[:predictor_count]
-            predictor_validity = window_validity[:predictor_count]
+            predictor_value_validity = window_value_validity[:predictor_count]
             missing_predictor_counts = np.count_nonzero(
-                ~predictor_validity,
+                ~predictor_value_validity,
                 axis=0,
             ).astype(np.uint8)
-            if application_mask is None:
-                target = np.any(predictor_validity, axis=0)
+            if aligned_application_mask is None:
+                target_pixel_mask = np.any(predictor_value_validity, axis=0)
             else:
-                masked_target = application_mask.read(
+                masked_application_values = aligned_application_mask.read(
                     1,
                     window=window,
                     masked=True,
                 )
-                target_values = np.asarray(np.ma.getdata(masked_target))
-                target = (
-                    ~np.ma.getmaskarray(masked_target)
-                    & np.isfinite(target_values)
-                    & (target_values == 1)
+                application_mask_values = np.asarray(
+                    np.ma.getdata(masked_application_values)
                 )
-            missing_fraction = missing_predictor_counts / predictor_count
-            usable = target & (missing_fraction <= maximum_missing_fraction)
-            reference_pixels = (
-                window_validity[reference_band_offset]
+                target_pixel_mask = (
+                    ~np.ma.getmaskarray(masked_application_values)
+                    & np.isfinite(application_mask_values)
+                    & (application_mask_values == 1)
+                )
+            missing_predictor_fraction = missing_predictor_counts / predictor_count
+            usable_pixel_mask = target_pixel_mask & (
+                missing_predictor_fraction
+                <= maximum_predictor_missing_fraction
+            )
+            reference_pixel_mask = (
+                window_value_validity[reference_band_offset]
                 & (window_values[reference_band_offset] != 0)
             )
-            complete_response_validity = usable.copy()
-            for model_offset in range(len(response_models)):
-                response_offset = predictor_count + model_offset
-                complete_response_validity &= window_validity[response_offset]
+            complete_response_pixel_mask = usable_pixel_mask.copy()
+            for response_model_offset in range(len(response_models)):
+                response_band_offset = predictor_count + response_model_offset
+                complete_response_pixel_mask &= window_value_validity[
+                    response_band_offset
+                ]
 
             window_height = int(window.height)
             window_width = int(window.width)
@@ -1761,68 +1849,93 @@ def run_reference_condition_inference(
             standardized_output = np.full_like(expected_output, FLOAT_NODATA)
             percentile_output = np.full(window_shape, FLOAT_NODATA, dtype=np.float32)
             status_output = np.zeros(window_shape, dtype=np.uint8)
-            status_output[target] = STATUS_INSUFFICIENT_PREDICTORS
-            status_output[usable] = STATUS_PREDICTED
+            status_output[target_pixel_mask] = STATUS_INSUFFICIENT_PREDICTORS
+            status_output[usable_pixel_mask] = STATUS_PREDICTED
             imputation_output = np.full(window_shape, STATUS_NODATA, dtype=np.uint8)
-            imputation_output[target] = missing_predictor_counts[target]
+            imputation_output[target_pixel_mask] = missing_predictor_counts[
+                target_pixel_mask
+            ]
 
-            raster_pixels += target.size
-            target_count = int(np.count_nonzero(target))
-            usable_count = int(np.count_nonzero(usable))
-            target_pixels += target_count
-            predicted_pixels += usable_count
-            insufficient_predictor_pixels += target_count - usable_count
-            imputed_pixels += int(
-                np.count_nonzero(usable & (missing_predictor_counts > 0))
+            raster_pixel_count += target_pixel_mask.size
+            window_target_pixel_count = int(
+                np.count_nonzero(target_pixel_mask)
+            )
+            window_predicted_pixel_count = int(
+                np.count_nonzero(usable_pixel_mask)
+            )
+            target_pixel_count += window_target_pixel_count
+            predicted_pixel_count += window_predicted_pixel_count
+            insufficient_predictor_pixel_count += (
+                window_target_pixel_count - window_predicted_pixel_count
+            )
+            imputed_pixel_count += int(
+                np.count_nonzero(
+                    usable_pixel_mask & (missing_predictor_counts > 0)
+                )
             )
 
-            usable_flat = usable.ravel()
-            if usable_count > 0:
+            usable_pixel_mask_flat = usable_pixel_mask.ravel()
+            if window_predicted_pixel_count > 0:
                 predictor_matrix = predictor_values.reshape(
                     predictor_count,
                     -1,
-                ).T[usable_flat]
+                ).T[usable_pixel_mask_flat]
                 predictor_table = pd.DataFrame(
                     predictor_matrix,
                     columns=predictor_names,
                 )
-                for model_offset, model in enumerate(response_models):
-                    expected_values = predict_expected_response(
-                        model.bundle,
+                for response_model_offset, response_model in enumerate(
+                    response_models
+                ):
+                    expected_reference_values = predict_expected_response(
+                        response_model.bundle,
                         predictor_table,
                     )
-                    if not np.isfinite(expected_values).all():
+                    if not np.isfinite(expected_reference_values).all():
                         raise RuntimeError(
-                            f"{model.response_band} produced a nonfinite prediction."
+                            f"{response_model.response_band} produced a nonfinite "
+                            "prediction."
                         )
-                    expected_flat = expected_output[model_offset].ravel()
-                    expected_flat[usable_flat] = expected_values.astype(np.float32)
+                    expected_output_flat = expected_output[
+                        response_model_offset
+                    ].ravel()
+                    expected_output_flat[usable_pixel_mask_flat] = (
+                        expected_reference_values.astype(np.float32)
+                    )
 
-                    response_offset = predictor_count + model_offset
-                    observed_values = window_values[response_offset].ravel()
-                    observed_validity = window_validity[response_offset].ravel()
-                    deviation_validity = usable_flat & observed_validity
+                    response_band_offset = predictor_count + response_model_offset
+                    observed_values = window_values[
+                        response_band_offset
+                    ].ravel()
+                    observed_value_validity = window_value_validity[
+                        response_band_offset
+                    ].ravel()
+                    deviation_pixel_mask = (
+                        usable_pixel_mask_flat & observed_value_validity
+                    )
                     deviation_values = (
-                        observed_values[deviation_validity]
-                        - expected_flat[deviation_validity]
+                        observed_values[deviation_pixel_mask]
+                        - expected_output_flat[deviation_pixel_mask]
                     )
-                    standardized_values = deviation_values / model.reference_rmse
-                    deviation_output[model_offset].ravel()[deviation_validity] = (
-                        deviation_values.astype(np.float32)
+                    standardized_deviation_values = (
+                        deviation_values / response_model.reference_rmse
                     )
-                    standardized_output[model_offset].ravel()[deviation_validity] = (
-                        standardized_values.astype(np.float32)
-                    )
-                    response_statistics[model.response_band].update(
-                        usable_count,
-                        standardized_values,
+                    deviation_output[response_model_offset].ravel()[
+                        deviation_pixel_mask
+                    ] = deviation_values.astype(np.float32)
+                    standardized_output[response_model_offset].ravel()[
+                        deviation_pixel_mask
+                    ] = standardized_deviation_values.astype(np.float32)
+                    response_statistics[response_model.response_band].update(
+                        window_predicted_pixel_count,
+                        standardized_deviation_values,
                     )
 
-            complete_non_reference_pixels = (
-                complete_response_validity & ~reference_pixels
+            complete_non_reference_pixel_mask = (
+                complete_response_pixel_mask & ~reference_pixel_mask
             )
             standardized_departure_vectors = standardized_output[
-                :, complete_non_reference_pixels
+                :, complete_non_reference_pixel_mask
             ].T.astype(np.float64)
             mahalanobis_distances = (
                 reference_calibration.calculate_mahalanobis_distances(
@@ -1834,7 +1947,7 @@ def run_reference_condition_inference(
                     mahalanobis_distances
                 )
             )
-            percentile_output[complete_non_reference_pixels] = (
+            percentile_output[complete_non_reference_pixel_mask] = (
                 departure_percentiles.astype(np.float32)
             )
             departure_percentile_statistics.update(departure_percentiles)
@@ -1851,11 +1964,11 @@ def run_reference_condition_inference(
                 int(window.col_off + window.width),
             )
             display_rows = np.minimum(
-                source_rows * display_height // source.height,
+                source_rows * display_height // raster_stack_source.height,
                 display_height - 1,
             )
             display_columns = np.minimum(
-                source_columns * display_width // source.width,
+                source_columns * display_width // raster_stack_source.width,
                 display_width - 1,
             )
             display_cell_indices = (
@@ -1864,29 +1977,29 @@ def run_reference_condition_inference(
             )
             np.add.at(
                 aggregate_value_sums.ravel(),
-                display_cell_indices[complete_non_reference_pixels],
+                display_cell_indices[complete_non_reference_pixel_mask],
                 total_absolute_standardized_departures[
-                    complete_non_reference_pixels
+                    complete_non_reference_pixel_mask
                 ],
             )
             np.add.at(
                 aggregate_value_counts.ravel(),
-                display_cell_indices[complete_non_reference_pixels],
+                display_cell_indices[complete_non_reference_pixel_mask],
                 1,
             )
             np.add.at(
                 percentile_value_sums.ravel(),
-                display_cell_indices[complete_non_reference_pixels],
+                display_cell_indices[complete_non_reference_pixel_mask],
                 departure_percentiles,
             )
             np.add.at(
                 percentile_value_counts.ravel(),
-                display_cell_indices[complete_non_reference_pixels],
+                display_cell_indices[complete_non_reference_pixel_mask],
                 1,
             )
             np.add.at(
                 reference_pixel_counts.ravel(),
-                display_cell_indices[reference_pixels],
+                display_cell_indices[reference_pixel_mask],
                 1,
             )
 
@@ -1907,7 +2020,7 @@ def run_reference_condition_inference(
         source_crs,
         len(response_models),
         ecoregion_name,
-        resolved_application_mask_path is not None,
+        application_mask_path is not None,
         aggregate_deviation_figure_path,
     )
     departure_percentile_figure_metadata = create_departure_percentile_figure(
@@ -1918,7 +2031,7 @@ def run_reference_condition_inference(
         source_crs,
         len(response_models),
         ecoregion_name,
-        resolved_application_mask_path is not None,
+        application_mask_path is not None,
         departure_percentile_figure_path,
     )
     elapsed_seconds = time.perf_counter() - started
@@ -1942,20 +2055,22 @@ def run_reference_condition_inference(
             strict=True,
         )
     }
-    response_summaries = []
-    for output_band_index, model in enumerate(response_models, start=1):
-        response_summaries.append(
+    response_summary_records = []
+    for output_band_index, response_model in enumerate(response_models, start=1):
+        response_summary_records.append(
             {
                 "output_band_index": output_band_index,
-                "response_band": model.response_band,
-                "response_name": model.response_name,
-                "display_name": model.display_name,
-                "model_path": str(model.path),
-                "reference_residual_rmse_oof": model.reference_rmse,
-                "statistics": response_statistics[model.response_band].summarize(),
+                "response_band": response_model.response_band,
+                "response_name": response_model.response_name,
+                "display_name": response_model.display_name,
+                "model_path": str(response_model.path),
+                "reference_residual_rmse_oof": response_model.reference_rmse,
+                "statistics": response_statistics[
+                    response_model.response_band
+                ].summarize(),
             }
         )
-    artifacts = {
+    artifact_paths = {
         "expected_reference": str(expected_reference_path),
         "observed_minus_expected": str(observed_minus_expected_path),
         "standardized_deviation": str(standardized_deviation_path),
@@ -1987,28 +2102,36 @@ def run_reference_condition_inference(
         "application_mask": application_mask_metadata,
         "mask_interpretation": (
             "defined first-band pixels equal to 1 after nearest-neighbor alignment"
-            if resolved_application_mask_path
+            if application_mask_path
             else "unmasked usable ecoregion predictor footprint"
         ),
         "response_count": len(response_models),
         "configuration": {
-            "maximum_predictor_missing_fraction": maximum_missing_fraction,
+            "maximum_predictor_missing_fraction": (
+                maximum_predictor_missing_fraction
+            ),
             "window_size_pixels": window_size_pixels,
             "covariance_shrinkage": covariance_shrinkage,
             "imputation": "final-reference-training values stored in each model",
         },
         "source_grid": {
-            "width": source.width,
-            "height": source.height,
-            "crs": str(source.crs) if source.crs else None,
-            "transform": list(source.transform),
+            "width": raster_stack_source.width,
+            "height": raster_stack_source.height,
+            "crs": (
+                str(raster_stack_source.crs)
+                if raster_stack_source.crs
+                else None
+            ),
+            "transform": list(raster_stack_source.transform),
         },
         "coverage": {
-            "raster_pixels": raster_pixels,
-            "target_pixels": target_pixels,
-            "predicted_pixels": predicted_pixels,
-            "insufficient_predictor_pixels": insufficient_predictor_pixels,
-            "imputed_pixels": imputed_pixels,
+            "raster_pixels": raster_pixel_count,
+            "target_pixels": target_pixel_count,
+            "predicted_pixels": predicted_pixel_count,
+            "insufficient_predictor_pixels": (
+                insufficient_predictor_pixel_count
+            ),
+            "imputed_pixels": imputed_pixel_count,
             "departure_percentile_pixels": departure_percentile_summary["pixels"],
         },
         "status_codes": {
@@ -2017,7 +2140,7 @@ def run_reference_condition_inference(
             "2": "reference-condition predictions written",
             "255": "nodata for imputed-predictor-count band",
         },
-        "responses": response_summaries,
+        "responses": response_summary_records,
         "reference_departure_calibration": {
             "prediction_table": str(reference_calibration.prediction_table_path),
             "response_bands": list(reference_calibration.response_bands),
@@ -2062,7 +2185,7 @@ def run_reference_condition_inference(
             "figure": departure_percentile_figure_metadata,
         },
         "aggregate_deviation_figure": aggregate_figure_metadata,
-        "artifacts": artifacts,
+        "artifacts": artifact_paths,
         "elapsed_seconds": elapsed_seconds,
     }
     metadata_path.write_text(
@@ -2073,26 +2196,27 @@ def run_reference_condition_inference(
 
     print()
     print("Inference coverage")
-    print(f"  Raster pixels: {raster_pixels:,}")
-    print(f"  Target pixels: {target_pixels:,}")
-    print(f"  Predicted pixels: {predicted_pixels:,}")
+    print(f"  Raster pixels: {raster_pixel_count:,}")
+    print(f"  Target pixels: {target_pixel_count:,}")
+    print(f"  Predicted pixels: {predicted_pixel_count:,}")
     print(
         "  Insufficient-predictor pixels: "
-        f"{insufficient_predictor_pixels:,}"
+        f"{insufficient_predictor_pixel_count:,}"
     )
-    print(f"  Predicted pixels using imputation: {imputed_pixels:,}")
+    print(f"  Predicted pixels using imputation: {imputed_pixel_count:,}")
     print(
         "  Complete non-reference percentile pixels: "
         f"{departure_percentile_summary['pixels']:,}"
     )
     print()
     print("Response standardized deviations")
-    for response in response_summaries:
-        statistics = response["statistics"]
+    for response_summary in response_summary_records:
+        statistics = response_summary["statistics"]
         mean = statistics["standardized_mean"]
         mean_text = f"{mean:7.3f}" if mean is not None else "     NA"
         print(
-            f"  {response['response_band']} {response['display_name']:<32} "
+            f"  {response_summary['response_band']} "
+            f"{response_summary['display_name']:<32} "
             f"pixels={statistics['deviation_pixels']:>10,}  mean z={mean_text}"
         )
     print()
@@ -2122,12 +2246,12 @@ def run_reference_condition_inference(
         report_path=report_path,
         metadata_path=metadata_path,
         response_count=len(response_models),
-        raster_pixels=raster_pixels,
-        target_pixels=target_pixels,
-        predicted_pixels=predicted_pixels,
+        raster_pixels=raster_pixel_count,
+        target_pixels=target_pixel_count,
+        predicted_pixels=predicted_pixel_count,
         departure_percentile_pixels=int(departure_percentile_summary["pixels"]),
-        insufficient_predictor_pixels=insufficient_predictor_pixels,
-        imputed_pixels=imputed_pixels,
+        insufficient_predictor_pixels=insufficient_predictor_pixel_count,
+        imputed_pixels=imputed_pixel_count,
         elapsed_seconds=elapsed_seconds,
     )
 

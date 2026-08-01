@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 from .analysis_config import (
     DEFAULT_ANALYSIS_CONFIG_PATH,
     AnalysisConfiguration,
-    RasterCacheGrid as CacheGrid,
+    RasterCacheGrid,
     load_analysis_configuration,
 )
 
@@ -126,16 +126,19 @@ def load_wgs84_aoi(aoi_path: Path) -> BaseGeometry:
     """
 
     resolved_path = aoi_path.expanduser().resolve()
-    geojson = json.loads(resolved_path.read_text(encoding="utf-8"))
-    object_type = geojson.get("type")
-    if object_type == "FeatureCollection":
+    geojson_object = json.loads(resolved_path.read_text(encoding="utf-8"))
+    geojson_type = geojson_object.get("type")
+    if geojson_type == "FeatureCollection":
         aoi_geometry = unary_union(
-            [shape(feature["geometry"]) for feature in geojson["features"]]
+            [
+                shape(feature["geometry"])
+                for feature in geojson_object["features"]
+            ]
         )
-    elif object_type == "Feature":
-        aoi_geometry = shape(geojson["geometry"])
+    elif geojson_type == "Feature":
+        aoi_geometry = shape(geojson_object["geometry"])
     else:
-        aoi_geometry = shape(geojson)
+        aoi_geometry = shape(geojson_object)
 
     if (
         aoi_geometry.is_empty
@@ -148,7 +151,7 @@ def load_wgs84_aoi(aoi_path: Path) -> BaseGeometry:
 
 def select_intersecting_tiles(
     wgs84_aoi: BaseGeometry,
-    cache_grid: CacheGrid,
+    cache_grid: RasterCacheGrid,
 ) -> tuple[BaseGeometry, tuple[CacheTile, ...]]:
     """Project an AOI and select every positive-area intersecting cache tile.
 
@@ -166,24 +169,32 @@ def select_intersecting_tiles(
         always_xy=True,
     )
     projected_aoi = transform(coordinate_transformer.transform, wgs84_aoi)
-    tile_span = cache_grid.pixel_size_meters * cache_grid.tile_size_pixels
-    minimum_x, minimum_y, maximum_x, maximum_y = projected_aoi.bounds
-    minimum_column = math.floor((minimum_x - cache_grid.origin_x) / tile_span)
-    maximum_column = math.floor(
-        (math.nextafter(maximum_x, -math.inf) - cache_grid.origin_x) / tile_span
+    tile_span_meters = (
+        cache_grid.pixel_size_meters * cache_grid.tile_size_pixels
     )
-    minimum_row = math.floor((minimum_y - cache_grid.origin_y) / tile_span)
+    minimum_x, minimum_y, maximum_x, maximum_y = projected_aoi.bounds
+    minimum_column = math.floor(
+        (minimum_x - cache_grid.origin_x) / tile_span_meters
+    )
+    maximum_column = math.floor(
+        (math.nextafter(maximum_x, -math.inf) - cache_grid.origin_x)
+        / tile_span_meters
+    )
+    minimum_row = math.floor(
+        (minimum_y - cache_grid.origin_y) / tile_span_meters
+    )
     maximum_row = math.floor(
-        (math.nextafter(maximum_y, -math.inf) - cache_grid.origin_y) / tile_span
+        (math.nextafter(maximum_y, -math.inf) - cache_grid.origin_y)
+        / tile_span_meters
     )
 
     intersecting_tiles = []
     for row in range(maximum_row, minimum_row - 1, -1):
         for column in range(minimum_column, maximum_column + 1):
-            tile_left = cache_grid.origin_x + column * tile_span
-            tile_bottom = cache_grid.origin_y + row * tile_span
-            tile_right = tile_left + tile_span
-            tile_top = tile_bottom + tile_span
+            tile_left = cache_grid.origin_x + column * tile_span_meters
+            tile_bottom = cache_grid.origin_y + row * tile_span_meters
+            tile_right = tile_left + tile_span_meters
+            tile_top = tile_bottom + tile_span_meters
             if projected_aoi.intersection(
                 box(tile_left, tile_bottom, tile_right, tile_top)
             ).area <= 0:
@@ -214,24 +225,30 @@ def build_stack_identifier(
         File-safe stack identifier.
     """
 
-    reference = analysis_configuration.reference
-    human_modification_text = format(reference.human_modification, "g").replace(
+    reference_settings = analysis_configuration.reference
+    human_modification_text = format(
+        reference_settings.human_modification,
+        "g",
+    ).replace(
         ".", "p"
     )
-    human_influence_text = format(reference.human_influence, "g").replace(".", "p")
+    human_influence_text = format(
+        reference_settings.human_influence,
+        "g",
+    ).replace(".", "p")
     return (
         f"{analysis_configuration.stack_name}_v"
         f"{analysis_configuration.stack_version}_"
         f"{analysis_configuration.raster_configuration_sha256[:12]}_"
         f"year_{analysis_configuration.year}_"
-        f"gp_{reference.grassland_probability}_"
+        f"gp_{reference_settings.grassland_probability}_"
         f"hmi_{human_modification_text}_hii_{human_influence_text}"
     )
 
 
 def load_cache_manifest(
     manifest_path: Path,
-    cache_grid: CacheGrid,
+    cache_grid: RasterCacheGrid,
 ) -> dict[str, Any]:
     """Load a cache manifest or initialize an empty compatible manifest.
 
@@ -256,24 +273,27 @@ def load_cache_manifest(
             "requests": [],
         }
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    cache_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if cache_manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         raise ValueError(
             "Cache manifest schema does not match the current script version."
         )
-    if manifest.get("grid") != expected_grid_metadata:
+    if cache_manifest.get("grid") != expected_grid_metadata:
         raise ValueError(
             "Cache manifest grid differs from the current fixed cache grid."
         )
-    return manifest
+    return cache_manifest
 
 
-def write_cache_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+def write_cache_manifest(
+    manifest_path: Path,
+    cache_manifest: dict[str, Any],
+) -> None:
     """Atomically write the complete cache manifest.
 
     Args:
         manifest_path: Destination JSON path.
-        manifest: Complete serializable manifest.
+        cache_manifest: Complete serializable manifest.
 
     Returns:
         None: The manifest is written and atomically replaced.
@@ -282,7 +302,7 @@ def write_cache_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
     temporary_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        json.dumps(cache_manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     os.replace(temporary_path, manifest_path)
@@ -308,7 +328,7 @@ def calculate_file_sha256(path: Path) -> str:
 def validate_cached_tile(
     tile_path: Path,
     tile: CacheTile,
-    cache_grid: CacheGrid,
+    cache_grid: RasterCacheGrid,
     band_names: Sequence[str],
     expected_checksum: str | None = None,
     expected_file_size: int | None = None,
@@ -342,18 +362,18 @@ def validate_cached_tile(
         -cache_grid.pixel_size_meters,
         tile.top,
     )
-    with rasterio.open(tile_path) as source:
-        if source.width != cache_grid.tile_size_pixels:
+    with rasterio.open(tile_path) as cached_raster:
+        if cached_raster.width != cache_grid.tile_size_pixels:
             raise ValueError("Cached tile width does not match the cache grid.")
-        if source.height != cache_grid.tile_size_pixels:
+        if cached_raster.height != cache_grid.tile_size_pixels:
             raise ValueError("Cached tile height does not match the cache grid.")
-        if source.count != len(band_names):
+        if cached_raster.count != len(band_names):
             raise ValueError("Cached tile band count does not match the stack.")
-        if source.crs != CRS.from_string(cache_grid.crs):
+        if cached_raster.crs != CRS.from_string(cache_grid.crs):
             raise ValueError("Cached tile CRS does not match the cache grid.")
-        if not source.transform.almost_equals(expected_transform):
+        if not cached_raster.transform.almost_equals(expected_transform):
             raise ValueError("Cached tile transform does not match its tile address.")
-        if tuple(source.descriptions) != tuple(band_names):
+        if tuple(cached_raster.descriptions) != tuple(band_names):
             raise ValueError("Cached tile band names do not match the stack schema.")
 
     actual_checksum = calculate_file_sha256(tile_path)
@@ -375,19 +395,22 @@ def build_earth_engine_stack(
         Computed Earth Engine image with configured stable export names.
     """
 
-    year = analysis_configuration.year
-    reference = analysis_configuration.reference
-    datasets = analysis_configuration.datasets
+    analysis_year = analysis_configuration.year
+    reference_settings = analysis_configuration.reference
+    dataset_ids = analysis_configuration.datasets
 
-    def annual_collection(dataset: str, selected_year: Any) -> ee.ImageCollection:
+    def annual_collection(
+        dataset_id: str,
+        selected_year: Any,
+    ) -> ee.ImageCollection:
         start_date = ee.Date.fromYMD(ee.Number(selected_year).toInt(), 1, 1)
-        return ee.ImageCollection(dataset).filterDate(
+        return ee.ImageCollection(dataset_id).filterDate(
             start_date,
             start_date.advance(1, "year"),
         )
 
-    def no_two_consecutive_zeros(
-        annual_binary_builder: Callable[[Any], ee.Image],
+    def meets_threshold_without_consecutive_failures(
+        annual_threshold_image_builder: Callable[[Any], ee.Image],
     ) -> ee.Image:
         reference_years = ee.List.sequence(
             analysis_configuration.reference_start_year,
@@ -395,7 +418,9 @@ def build_earth_engine_stack(
         )
         annual_binary_images = ee.ImageCollection.fromImages(
             reference_years.map(
-                lambda reference_year: annual_binary_builder(reference_year)
+                lambda reference_year: annual_threshold_image_builder(
+                    reference_year
+                )
                 .rename("g")
                 .set("year", reference_year)
             )
@@ -416,15 +441,15 @@ def build_earth_engine_stack(
         return adjacent_year_pairs.reduce(ee.Reducer.min()).eq(1)
 
     grassland_probability_collection = ee.ImageCollection(
-        datasets["grassland_probability"]
+        dataset_ids["grassland_probability"]
     )
     human_influence_collection = ee.ImageCollection(
-        datasets["human_influence"]
+        dataset_ids["human_influence"]
     ).filterDate(
         f"{analysis_configuration.reference_start_year}-01-01",
         f"{analysis_configuration.reference_end_year + 1}-01-01",
     )
-    grassland_probability_integrity = no_two_consecutive_zeros(
+    grassland_probability_integrity = meets_threshold_without_consecutive_failures(
         lambda reference_year: ee.Image(
             grassland_probability_collection.filterDate(
                 ee.Date.fromYMD(ee.Number(reference_year).toInt(), 1, 1),
@@ -432,51 +457,66 @@ def build_earth_engine_stack(
             ).first()
         )
         .select(0)
-        .gte(reference.grassland_probability)
+        .gte(reference_settings.grassland_probability)
     )
-    human_influence_integrity = no_two_consecutive_zeros(
+    human_influence_integrity = meets_threshold_without_consecutive_failures(
         lambda reference_year: human_influence_collection.filterDate(
             ee.Date.fromYMD(ee.Number(reference_year).toInt(), 1, 1),
             ee.Date.fromYMD(ee.Number(reference_year).add(1).toInt(), 1, 1),
         )
         .mean()
         .divide(7000)
-        .lt(reference.human_influence)
+        .lt(reference_settings.human_influence)
     )
     reference_sites = (
         grassland_probability_integrity.And(human_influence_integrity)
         .And(
-            ee.Image(datasets["human_modification"]).lte(
-                reference.human_modification
+            ee.Image(dataset_ids["human_modification"]).lte(
+                reference_settings.human_modification
             )
         )
         .selfMask()
         .toByte()
     )
 
-    year_start = ee.Date.fromYMD(year, 1, 1)
+    year_start = ee.Date.fromYMD(analysis_year, 1, 1)
     epoch_start = ee.Date("1970-01-01")
     phenology = ee.Image(
-        annual_collection(datasets["modis_phenology"], year).first()
+        annual_collection(dataset_ids["modis_phenology"], analysis_year).first()
     )
     year_start_day = year_start.difference(epoch_start, "day")
-    landsat_ndvi = annual_collection(datasets["landsat_ndvi"], year).select("NDVI")
+    landsat_ndvi = annual_collection(
+        dataset_ids["landsat_ndvi"],
+        analysis_year,
+    ).select("NDVI")
     vegetation_height = (
         ee.Image(
-            annual_collection(datasets["short_vegetation_height"], year).first()
+            annual_collection(
+                dataset_ids["short_vegetation_height"],
+                analysis_year,
+            ).first()
         )
         .select("height")
         .multiply(0.1)
     )
     vegetation_cover = ee.Image(
-        annual_collection(datasets["modis_vegetation_cover"], year).first()
+        annual_collection(
+            dataset_ids["modis_vegetation_cover"],
+            analysis_year,
+        ).first()
     )
-    lai_fpar_collection = annual_collection(datasets["modis_lai_fpar"], year)
+    lai_fpar_collection = annual_collection(
+        dataset_ids["modis_lai_fpar"],
+        analysis_year,
+    )
     productivity = ee.Image(
-        annual_collection(datasets["modis_productivity"], year).first()
+        annual_collection(
+            dataset_ids["modis_productivity"],
+            analysis_year,
+        ).first()
     )
 
-    computed_images = {
+    computed_images_by_name = {
         "grassland_reference_sites": reference_sites,
         "ndvi_95th_percentile": landsat_ndvi.reduce(
             ee.Reducer.percentile([95])
@@ -522,8 +562,8 @@ def build_earth_engine_stack(
         "gpp": productivity.select("Gpp").multiply(0.0001),
     }
 
-    era5_daily = annual_collection(datasets["era5_daily"], year)
-    era5_monthly = annual_collection(datasets["era5_monthly"], year)
+    era5_daily = annual_collection(dataset_ids["era5_daily"], analysis_year)
+    era5_monthly = annual_collection(dataset_ids["era5_monthly"], analysis_year)
     annual_precipitation = era5_daily.select("total_precipitation").sum().multiply(
         1000
     )
@@ -543,13 +583,15 @@ def build_earth_engine_stack(
 
     growing_season_daily = era5_daily.map(apply_growing_season_mask)
     rainfall_start_year = max(
-        year - analysis_configuration.interannual_rainfall_window_years + 1,
+        analysis_year
+        - analysis_configuration.interannual_rainfall_window_years
+        + 1,
         analysis_configuration.era5_start_year,
     )
     annual_rainfall_totals = ee.ImageCollection.fromImages(
-        ee.List.sequence(rainfall_start_year, year).map(
+        ee.List.sequence(rainfall_start_year, analysis_year).map(
             lambda rainfall_year: annual_collection(
-                datasets["era5_daily"],
+                dataset_ids["era5_daily"],
                 rainfall_year,
             )
             .select("total_precipitation")
@@ -564,23 +606,24 @@ def build_earth_engine_stack(
         .multiply(100)
         .updateMask(mean_annual_rainfall.neq(0))
     )
-    gridmet_drought = annual_collection(datasets["gridmet_drought"], year).select(
-        "spi30d"
-    )
+    gridmet_drought = annual_collection(
+        dataset_ids["gridmet_drought"],
+        analysis_year,
+    ).select("spi30d")
     burned_month_count = (
-        annual_collection(datasets["viirs_burned_area"], year)
+        annual_collection(dataset_ids["viirs_burned_area"], analysis_year)
         .select("Burn_Date")
         .map(lambda image: image.gt(0).unmask(0))
         .sum()
     )
     water_presence_variation = (
-        annual_collection(datasets["jrc_monthly_water"], year)
+        annual_collection(dataset_ids["jrc_monthly_water"], analysis_year)
         .select("water")
         .map(lambda image: image.eq(2).updateMask(image.neq(0)))
         .reduce(ee.Reducer.stdDev())
     )
     streams = (
-        ee.Image(datasets["merit_hydro"])
+        ee.Image(dataset_ids["merit_hydro"])
         .select("upa")
         .gte(analysis_configuration.stream_upstream_area_threshold_km2)
         .unmask(0)
@@ -590,9 +633,12 @@ def build_earth_engine_stack(
         .sqrt()
         .multiply(ee.Image.pixelArea().sqrt())
     )
-    gldas_annual = annual_collection(datasets["gldas"], year)
+    gldas_annual = annual_collection(dataset_ids["gldas"], analysis_year)
     modis_evapotranspiration = (
-        annual_collection(datasets["modis_evapotranspiration"], year)
+        annual_collection(
+            dataset_ids["modis_evapotranspiration"],
+            analysis_year,
+        )
         .select("ET")
         .map(lambda image: image.multiply(0.1))
         .sum()
@@ -606,9 +652,13 @@ def build_earth_engine_stack(
     # sums and counts preserve the observation-weighted annual mean while keeping
     # each interactive Earth Engine reduction below its server-memory limit.
     def summarize_smap_month(month: Any) -> ee.Image:
-        month_start = ee.Date.fromYMD(year, ee.Number(month).toInt(), 1)
+        month_start = ee.Date.fromYMD(
+            analysis_year,
+            ee.Number(month).toInt(),
+            1,
+        )
         positive_monthly_snow = (
-            ee.ImageCollection(datasets["smap"])
+            ee.ImageCollection(dataset_ids["smap"])
             .filterDate(month_start, month_start.advance(1, "month"))
             .select("snow_depth")
             .map(lambda image: image.updateMask(image.gt(0)))
@@ -627,7 +677,7 @@ def build_earth_engine_stack(
         .divide(annual_smap_snow_count)
         .updateMask(annual_smap_snow_count.gt(0))
     )
-    computed_images.update(
+    computed_images_by_name.update(
         {
             "maximum_annual_temperature": era5_daily.select(
                 "maximum_2m_air_temperature"
@@ -669,16 +719,16 @@ def build_earth_engine_stack(
             "water_presence_variation": water_presence_variation,
             "distance_to_streams": distance_to_streams,
             "soil_organic_carbon": ee.Image(
-                datasets["isric_soil_organic_carbon"]
+                dataset_ids["isric_soil_organic_carbon"]
             )
             .select("soc_5-15cm_mean")
             .divide(10),
             "soil_moisture": gldas_annual.select("SoilMoi10_40cm_inst").mean(),
-            "landform_type": ee.Image(datasets["srtm_landforms"]).select(
+            "landform_type": ee.Image(dataset_ids["srtm_landforms"]).select(
                 "constant"
             ),
             "topographic_diversity": ee.Image(
-                datasets["alos_topographic_diversity"]
+                dataset_ids["alos_topographic_diversity"]
             ).select("constant"),
             "annual_evapotranspiration": modis_evapotranspiration,
             "gldas_snow_depth": gldas_snow_depth,
@@ -686,27 +736,26 @@ def build_earth_engine_stack(
         }
     )
 
-    configured_images = [
-        computed_images[band.computation] for band in analysis_configuration.bands
-    ]
-    renamed_layers = [
-        ee.Image(layer_image).rename(band_name)
-        for layer_image, band_name in zip(
-            configured_images,
+    configured_band_images = [
+        ee.Image(computed_images_by_name[band_definition.computation]).rename(
+            band_name
+        )
+        for band_definition, band_name in zip(
+            analysis_configuration.bands,
             analysis_configuration.band_names(),
             strict=True,
         )
     ]
-    raster_stack = renamed_layers[0]
-    for renamed_layer in renamed_layers[1:]:
-        raster_stack = raster_stack.addBands(renamed_layer)
+    raster_stack = configured_band_images[0]
+    for configured_band_image in configured_band_images[1:]:
+        raster_stack = raster_stack.addBands(configured_band_image)
     return raster_stack.toFloat()
 
 
 def fetch_tile_bytes(
     raster_stack: ee.Image,
     tile: CacheTile,
-    cache_grid: CacheGrid,
+    cache_grid: RasterCacheGrid,
     band_names: Sequence[str],
 ) -> bytes:
     """Fetch one explicitly gridded GeoTIFF tile with ``computePixels``.
@@ -721,7 +770,7 @@ def fetch_tile_bytes(
         Raw GeoTIFF bytes returned by Earth Engine.
     """
 
-    request = {
+    compute_pixels_request = {
         "expression": raster_stack,
         "fileFormat": "GEO_TIFF",
         "bandIds": list(band_names),
@@ -746,15 +795,18 @@ def fetch_tile_bytes(
         },
         "workloadTag": "nhi-raster-tile-cache",
     }
-    return ee.data.computePixels(request)
+    return ee.data.computePixels(compute_pixels_request)
 
 
 def cache_aoi_tiles(
     analysis_configuration: AnalysisConfiguration,
     refresh: bool,
     show_progress: bool,
-    compute_tile: (
-        Callable[[ee.Image | None, CacheTile, CacheGrid, Sequence[str]], bytes]
+    tile_fetcher: (
+        Callable[
+            [ee.Image | None, CacheTile, RasterCacheGrid, Sequence[str]],
+            bytes,
+        ]
         | None
     ) = None,
 ) -> FetchSummary:
@@ -765,7 +817,7 @@ def cache_aoi_tiles(
             reference threshold, grid, and raster-stack settings.
         refresh: Whether valid existing tiles should be replaced.
         show_progress: Whether to display tqdm progress.
-        compute_tile: Optional tile-fetch implementation used by offline tests.
+        tile_fetcher: Optional tile-fetch implementation used by offline tests.
 
     Returns:
         Counts and byte totals for requested, reused, downloaded, and failed tiles.
@@ -782,7 +834,7 @@ def cache_aoi_tiles(
     request_retry_count = analysis_configuration.earth_engine.request_retry_count
     resolved_cache_directory.mkdir(parents=True, exist_ok=True)
     manifest_path = resolved_cache_directory / "manifest.json"
-    cache_grid = CacheGrid(**asdict(analysis_configuration.grid))
+    cache_grid = analysis_configuration.grid
     wgs84_aoi = load_wgs84_aoi(analysis_configuration.aoi_path)
     projected_aoi, requested_tiles = select_intersecting_tiles(
         wgs84_aoi,
@@ -790,8 +842,8 @@ def cache_aoi_tiles(
     )
     band_names = analysis_configuration.band_names()
     stack_identifier = build_stack_identifier(analysis_configuration)
-    manifest = load_cache_manifest(manifest_path, cache_grid)
-    manifest["stacks"][stack_identifier] = {
+    cache_manifest = load_cache_manifest(manifest_path, cache_grid)
+    cache_manifest["stacks"][stack_identifier] = {
         "analysis_name": analysis_configuration.analysis_name,
         "display_name": analysis_configuration.display_name,
         "aoi_path": str(analysis_configuration.aoi_path),
@@ -819,9 +871,9 @@ def cache_aoi_tiles(
             )
         ],
     }
-    write_cache_manifest(manifest_path, manifest)
+    write_cache_manifest(manifest_path, cache_manifest)
 
-    valid_cached_tiles: set[str] = set()
+    valid_cached_tile_ids: set[str] = set()
     tiles_requiring_download = []
     tile_directory = resolved_cache_directory / "tiles" / stack_identifier
     with tqdm(
@@ -834,7 +886,7 @@ def cache_aoi_tiles(
     ) as cache_progress:
         for tile in cache_progress:
             tile_record_key = f"{stack_identifier}/{tile.tile_id}"
-            tile_record = manifest["tiles"].get(tile_record_key)
+            tile_record = cache_manifest["tiles"].get(tile_record_key)
             tile_path = tile_directory / f"{tile.tile_id}.tif"
             if not refresh and tile_record is not None and tile_path.exists():
                 try:
@@ -846,28 +898,28 @@ def cache_aoi_tiles(
                         expected_checksum=tile_record["sha256"],
                         expected_file_size=tile_record["file_size_bytes"],
                     )
-                    valid_cached_tiles.add(tile.tile_id)
+                    valid_cached_tile_ids.add(tile.tile_id)
                     cache_progress.set_postfix(
-                        cached=len(valid_cached_tiles),
+                        cached=len(valid_cached_tile_ids),
                         download=len(tiles_requiring_download),
                         refresh=refresh,
                     )
                     continue
                 except (OSError, ValueError, rasterio.errors.RasterioError):
                     pass
-            manifest["tiles"].pop(tile_record_key, None)
+            cache_manifest["tiles"].pop(tile_record_key, None)
             tiles_requiring_download.append(tile)
             cache_progress.set_postfix(
-                cached=len(valid_cached_tiles),
+                cached=len(valid_cached_tile_ids),
                 download=len(tiles_requiring_download),
                 refresh=refresh,
             )
-    write_cache_manifest(manifest_path, manifest)
+    write_cache_manifest(manifest_path, cache_manifest)
 
     print()
     print("Earth Engine grid plan")
     print(f"  Intersecting grids: {len(requested_tiles):,}")
-    print(f"  Valid cached grids: {len(valid_cached_tiles):,}")
+    print(f"  Valid cached grids: {len(valid_cached_tile_ids):,}")
     print(f"  Grids to download: {len(tiles_requiring_download):,}")
     print(
         "  Request policy: "
@@ -876,8 +928,7 @@ def cache_aoi_tiles(
     )
 
     raster_stack = None
-    tile_fetcher = compute_tile or fetch_tile_bytes
-    if tiles_requiring_download and compute_tile is None:
+    if tiles_requiring_download and tile_fetcher is None:
         try:
             ee.data.setMaxRetries(request_retry_count)
             ee.Initialize(
@@ -892,6 +943,8 @@ def cache_aoi_tiles(
                 "in the analysis TOML."
             ) from error
         raster_stack = build_earth_engine_stack(analysis_configuration)
+    if tile_fetcher is None:
+        tile_fetcher = fetch_tile_bytes
 
     downloaded_tile_count = 0
     downloaded_byte_count = 0
@@ -900,15 +953,15 @@ def cache_aoi_tiles(
     tile_directory.mkdir(parents=True, exist_ok=True)
     with tqdm(
         total=len(requested_tiles),
-        initial=len(valid_cached_tiles),
+        initial=len(valid_cached_tile_ids),
         desc="Processing grids",
         unit="grid",
         dynamic_ncols=True,
         disable=not show_progress,
     ) as processing_progress:
         processing_progress.set_postfix(
-            processed=len(valid_cached_tiles),
-            cached=len(valid_cached_tiles),
+            processed=len(valid_cached_tile_ids),
+            cached=len(valid_cached_tile_ids),
             downloaded=downloaded_tile_count,
             failed=len(failed_tile_ids),
         )
@@ -936,7 +989,7 @@ def cache_aoi_tiles(
                 )
                 os.replace(temporary_path, destination_path)
                 tile_record_key = f"{stack_identifier}/{tile.tile_id}"
-                manifest["tiles"][tile_record_key] = {
+                cache_manifest["tiles"][tile_record_key] = {
                     "tile_id": tile.tile_id,
                     "stack_id": stack_identifier,
                     "year": analysis_configuration.year,
@@ -962,7 +1015,7 @@ def cache_aoi_tiles(
                     "file_size_bytes": file_size,
                     "sha256": checksum,
                 }
-                write_cache_manifest(manifest_path, manifest)
+                write_cache_manifest(manifest_path, cache_manifest)
                 downloaded_tile_count += 1
                 downloaded_byte_count += file_size
             except Exception as error:
@@ -976,14 +1029,14 @@ def cache_aoi_tiles(
                 )
             finally:
                 processed_tile_count = (
-                    len(valid_cached_tiles)
+                    len(valid_cached_tile_ids)
                     + downloaded_tile_count
                     + len(failed_tile_ids)
                 )
                 processing_progress.update(1)
                 processing_progress.set_postfix(
                     processed=processed_tile_count,
-                    cached=len(valid_cached_tiles),
+                    cached=len(valid_cached_tile_ids),
                     downloaded=downloaded_tile_count,
                     failed=len(failed_tile_ids),
                 )
@@ -997,7 +1050,7 @@ def cache_aoi_tiles(
             f"{stack_identifier}"
         ).encode("utf-8")
     ).hexdigest()[:16]
-    manifest["requests"].append(
+    cache_manifest["requests"].append(
         {
             "request_id": request_identifier,
             "requested_at_utc": request_timestamp,
@@ -1007,7 +1060,7 @@ def cache_aoi_tiles(
             "aoi_area_m2": projected_aoi.area,
             "stack_id": stack_identifier,
             "tile_ids": [tile.tile_id for tile in requested_tiles],
-            "reused_tile_ids": sorted(valid_cached_tiles),
+            "reused_tile_ids": sorted(valid_cached_tile_ids),
             "downloaded_tiles": downloaded_tile_count,
             "failed_tile_ids": failed_tile_ids,
             "request_timeout_seconds": request_timeout_seconds,
@@ -1023,11 +1076,11 @@ def cache_aoi_tiles(
             ),
         }
     )
-    write_cache_manifest(manifest_path, manifest)
+    write_cache_manifest(manifest_path, cache_manifest)
 
-    summary = FetchSummary(
+    fetch_summary = FetchSummary(
         requested_tiles=len(requested_tiles),
-        reused_tiles=len(valid_cached_tiles),
+        reused_tiles=len(valid_cached_tile_ids),
         downloaded_tiles=downloaded_tile_count,
         failed_tiles=len(failed_tile_ids),
         downloaded_bytes=downloaded_byte_count,
@@ -1045,11 +1098,14 @@ def cache_aoi_tiles(
         f"{cache_grid.crs}, {cache_grid.pixel_size_meters} m pixels, "
         f"{cache_grid.tile_size_pixels} x {cache_grid.tile_size_pixels} pixels/tile"
     )
-    print(f"  Requested tiles: {summary.requested_tiles:,}")
-    print(f"  Reused from cache: {summary.reused_tiles:,}")
-    print(f"  Downloaded: {summary.downloaded_tiles:,}")
-    print(f"  Downloaded size: {summary.downloaded_bytes / 1_048_576:,.2f} MiB")
-    print(f"  Failed: {summary.failed_tiles:,}")
+    print(f"  Requested tiles: {fetch_summary.requested_tiles:,}")
+    print(f"  Reused from cache: {fetch_summary.reused_tiles:,}")
+    print(f"  Downloaded: {fetch_summary.downloaded_tiles:,}")
+    print(
+        "  Downloaded size: "
+        f"{fetch_summary.downloaded_bytes / 1_048_576:,.2f} MiB"
+    )
+    print(f"  Failed: {fetch_summary.failed_tiles:,}")
     print(f"  Manifest: {manifest_path}")
 
     if failed_tile_ids:
@@ -1059,7 +1115,7 @@ def cache_aoi_tiles(
             f"{request_timeout_seconds:g} second timeout per attempt. "
             "Completed tiles remain cached; rerun the same command to resume."
         ) from failed_tile_error
-    return summary
+    return fetch_summary
 
 
 def main() -> None:

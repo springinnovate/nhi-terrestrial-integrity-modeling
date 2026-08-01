@@ -19,9 +19,8 @@ from shapely.geometry import box, mapping
 from shapely.ops import transform
 
 from scripts import fetch_gee_raster_tiles
-from scripts.analysis_config import load_analysis_configuration
+from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
 from scripts.fetch_gee_raster_tiles import (
-    CacheGrid,
     CacheTile,
     build_stack_identifier,
     cache_aoi_tiles,
@@ -40,7 +39,7 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.workspace = Path(self.temporary_directory.name)
         self.aoi_path = self.workspace / "aoi.geojson"
         self.cache_directory = self.workspace / "cache"
-        self.test_grid = CacheGrid(
+        self.test_grid = RasterCacheGrid(
             crs="EPSG:6933",
             pixel_size_meters=1_000,
             tile_size_pixels=4,
@@ -264,27 +263,22 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
 
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
         analysis_configuration = self.analysis_configuration()
-        with patch.object(
-            fetch_gee_raster_tiles,
-            "CacheGrid",
-            return_value=self.test_grid,
-        ):
-            first_summary = cache_aoi_tiles(
-                analysis_configuration,
-                refresh=False,
-                show_progress=False,
-                compute_tile=self.create_tile_bytes,
-            )
+        first_summary = cache_aoi_tiles(
+            analysis_configuration,
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=self.create_tile_bytes,
+        )
 
-            def unexpected_download(*args, **kwargs):
-                self.fail("A valid cached tile should not be downloaded again.")
+        def unexpected_download(*args, **kwargs):
+            self.fail("A valid cached tile should not be downloaded again.")
 
-            second_summary = cache_aoi_tiles(
-                analysis_configuration,
-                refresh=False,
-                show_progress=False,
-                compute_tile=unexpected_download,
-            )
+        second_summary = cache_aoi_tiles(
+            analysis_configuration,
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=unexpected_download,
+        )
 
         self.assertEqual(1, first_summary.downloaded_tiles)
         self.assertEqual(0, first_summary.reused_tiles)
@@ -341,17 +335,12 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             build_stack_identifier(self.analysis_configuration()),
             build_stack_identifier(reduced_configuration),
         )
-        with patch.object(
-            fetch_gee_raster_tiles,
-            "CacheGrid",
-            return_value=self.test_grid,
-        ):
-            cache_aoi_tiles(
-                reduced_configuration,
-                refresh=False,
-                show_progress=False,
-                compute_tile=self.create_tile_bytes,
-            )
+        cache_aoi_tiles(
+            reduced_configuration,
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=self.create_tile_bytes,
+        )
 
         cached_tile_path = next((self.cache_directory / "tiles").rglob("*.tif"))
         with fetch_gee_raster_tiles.rasterio.open(cached_tile_path) as source:
@@ -367,20 +356,12 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
         progress_output = io.StringIO()
         report_output = io.StringIO()
-        with (
-            patch.object(
-                fetch_gee_raster_tiles,
-                "CacheGrid",
-                return_value=self.test_grid,
-            ),
-            redirect_stderr(progress_output),
-            redirect_stdout(report_output),
-        ):
+        with redirect_stderr(progress_output), redirect_stdout(report_output):
             cache_aoi_tiles(
                 self.analysis_configuration(),
                 refresh=False,
                 show_progress=True,
-                compute_tile=self.create_tile_bytes,
+                tile_fetcher=self.create_tile_bytes,
             )
 
         rendered_progress = progress_output.getvalue()
@@ -405,11 +386,6 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             ),
         )
         with (
-            patch.object(
-                fetch_gee_raster_tiles,
-                "CacheGrid",
-                return_value=self.test_grid,
-            ),
             patch.object(fetch_gee_raster_tiles.ee, "Initialize") as initialize,
             patch.object(
                 fetch_gee_raster_tiles.ee.data,
@@ -462,28 +438,23 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
                 band_names,
             )
 
-        with patch.object(
-            fetch_gee_raster_tiles,
-            "CacheGrid",
-            return_value=self.test_grid,
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Completed tiles remain cached; rerun the same command to resume",
         ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Completed tiles remain cached; rerun the same command to resume",
-            ):
-                cache_aoi_tiles(
-                    self.analysis_configuration(),
-                    refresh=False,
-                    show_progress=False,
-                    compute_tile=interrupted_fetch,
-                )
-
-            resumed_summary = cache_aoi_tiles(
+            cache_aoi_tiles(
                 self.analysis_configuration(),
                 refresh=False,
                 show_progress=False,
-                compute_tile=self.create_tile_bytes,
+                tile_fetcher=interrupted_fetch,
             )
+
+        resumed_summary = cache_aoi_tiles(
+            self.analysis_configuration(),
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=self.create_tile_bytes,
+        )
 
         self.assertEqual(2, len(attempted_tiles))
         self.assertEqual(4, resumed_summary.requested_tiles)
@@ -507,25 +478,20 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
 
         self.write_projected_aoi(box(100, 100, 3_900, 3_900))
         analysis_configuration = self.analysis_configuration()
-        with patch.object(
-            fetch_gee_raster_tiles,
-            "CacheGrid",
-            return_value=self.test_grid,
-        ):
-            cache_aoi_tiles(
-                analysis_configuration,
-                refresh=False,
-                show_progress=False,
-                compute_tile=self.create_tile_bytes,
-            )
-            cached_tile_path = next((self.cache_directory / "tiles").rglob("*.tif"))
-            cached_tile_path.write_bytes(b"not a geotiff")
-            replacement_summary = cache_aoi_tiles(
-                analysis_configuration,
-                refresh=False,
-                show_progress=False,
-                compute_tile=self.create_tile_bytes,
-            )
+        cache_aoi_tiles(
+            analysis_configuration,
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=self.create_tile_bytes,
+        )
+        cached_tile_path = next((self.cache_directory / "tiles").rglob("*.tif"))
+        cached_tile_path.write_bytes(b"not a geotiff")
+        replacement_summary = cache_aoi_tiles(
+            analysis_configuration,
+            refresh=False,
+            show_progress=False,
+            tile_fetcher=self.create_tile_bytes,
+        )
 
         self.assertEqual(1, replacement_summary.downloaded_tiles)
         self.assertEqual(0, replacement_summary.reused_tiles)

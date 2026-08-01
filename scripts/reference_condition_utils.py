@@ -266,7 +266,7 @@ def assign_spatial_folds(
 def prepare_reference_condition_data(
     sample_table: pd.DataFrame,
     configuration: ReferenceConditionConfiguration,
-    stack_configuration: AnalysisConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> PreparedReferenceConditionData:
     """Select environmental predictors and prepare spatial validation rows.
 
@@ -278,7 +278,7 @@ def prepare_reference_condition_data(
     Args:
         sample_table: Table produced by ``load_ecoregion_geotiff.py``.
         configuration: Coverage, missingness, and spatial-fold settings.
-        stack_configuration: Configured predictor roles and data types.
+        analysis_configuration: Configured predictor roles and data types.
 
     Returns:
         Prepared rows, folds, coverage diagnostics, and predictor names.
@@ -288,49 +288,49 @@ def prepare_reference_condition_data(
             predictor coverage threshold.
     """
 
-    predictor_columns = stack_configuration.columns_with_role(
+    predictor_columns_by_identifier = analysis_configuration.columns_with_role(
         sample_table.columns,
         "predictor",
     )
-    predictor_definitions = {
-        band.identifier: band
-        for band in stack_configuration.bands
-        if band.role == "predictor"
-    }
-    ordered_predictor_names = tuple(predictor_columns.values())
+    ordered_predictor_names = tuple(predictor_columns_by_identifier.values())
     categorical_predictor_identifier = next(
         band.identifier
-        for band in predictor_definitions.values()
-        if band.data_type == "categorical"
+        for band in analysis_configuration.bands
+        if band.role == "predictor" and band.data_type == "categorical"
     )
-    categorical_predictor_name = predictor_columns[
+    categorical_predictor_name = predictor_columns_by_identifier[
         categorical_predictor_identifier
     ]
-    predictor_band_numbers = {
+    predictor_band_numbers_by_name = {
         column_name: int(identifier[1:])
-        for identifier, column_name in predictor_columns.items()
+        for identifier, column_name in predictor_columns_by_identifier.items()
     }
 
     total_represented_area = float(sample_table["area_weight_m2"].sum())
     coverage_records = []
     for predictor_name in ordered_predictor_names:
-        defined = sample_table[predictor_name].notna()
-        defined_area = float(sample_table.loc[defined, "area_weight_m2"].sum())
-        area_coverage = defined_area / total_represented_area
+        defined_row_mask = sample_table[predictor_name].notna()
+        defined_area_m2 = float(
+            sample_table.loc[defined_row_mask, "area_weight_m2"].sum()
+        )
+        represented_area_coverage = defined_area_m2 / total_represented_area
         coverage_records.append(
             {
                 "predictor": predictor_name,
-                "band_number": predictor_band_numbers[predictor_name],
+                "band_number": predictor_band_numbers_by_name[predictor_name],
                 "predictor_type": (
                     "categorical"
                     if predictor_name == categorical_predictor_name
                     else "continuous"
                 ),
-                "defined_rows": int(defined.sum()),
-                "row_coverage": float(defined.mean()),
-                "defined_area_m2": defined_area,
-                "area_coverage": area_coverage,
-                "retained": (area_coverage >= configuration.minimum_predictor_coverage),
+                "defined_rows": int(defined_row_mask.sum()),
+                "row_coverage": float(defined_row_mask.mean()),
+                "defined_area_m2": defined_area_m2,
+                "area_coverage": represented_area_coverage,
+                "retained": (
+                    represented_area_coverage
+                    >= configuration.minimum_predictor_coverage
+                ),
             }
         )
     predictor_coverage = pd.DataFrame.from_records(coverage_records)

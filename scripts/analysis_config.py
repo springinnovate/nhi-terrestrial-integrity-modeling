@@ -241,29 +241,39 @@ class AnalysisConfiguration:
             ValueError: If no supplied column belongs to the requested role.
         """
 
-        definitions_by_id = {
+        band_definitions_by_identifier = {
             band.identifier: band for band in self.bands if band.role == role
         }
-        available_columns = []
-        for column in columns:
-            match = BAND_COLUMN_PATTERN.match(column)
-            if match and match.group("band_id") in definitions_by_id:
-                available_columns.append(
-                    (int(match.group("year")), match.group("band_id"), column)
+        matching_column_records = []
+        for column_name in columns:
+            column_match = BAND_COLUMN_PATTERN.match(column_name)
+            if (
+                column_match
+                and column_match.group("band_id")
+                in band_definitions_by_identifier
+            ):
+                matching_column_records.append(
+                    (
+                        int(column_match.group("year")),
+                        column_match.group("band_id"),
+                        column_name,
+                    )
                 )
-        if not available_columns:
+        if not matching_column_records:
             raise ValueError(
-                f"No sample columns match the configured '{role}' band role."
+                f"No supplied columns match the configured '{role}' band role."
             )
-        selected_year = min(year for year, _, _ in available_columns)
+        selected_year = min(
+            year for year, _, _ in matching_column_records
+        )
         columns_by_identifier = {
-            identifier: column
-            for year, identifier, column in available_columns
+            identifier: column_name
+            for year, identifier, column_name in matching_column_records
             if year == selected_year
         }
         return {
             identifier: columns_by_identifier[identifier]
-            for identifier in definitions_by_id
+            for identifier in band_definitions_by_identifier
             if identifier in columns_by_identifier
         }
 
@@ -277,7 +287,8 @@ class AnalysisConfiguration:
             Matching configured band definition.
         """
 
-        band_identifier = BAND_COLUMN_PATTERN.match(column).group("band_id")
+        column_match = BAND_COLUMN_PATTERN.match(column)
+        band_identifier = column_match.group("band_id")
         return next(
             band for band in self.bands if band.identifier == band_identifier
         )
@@ -302,35 +313,37 @@ def load_analysis_configuration(
         ValueError: If the analysis contract is internally inconsistent.
     """
 
-    resolved_path = configuration_path.expanduser().resolve()
-    with resolved_path.open("rb") as configuration_file:
+    resolved_configuration_path = configuration_path.expanduser().resolve()
+    with resolved_configuration_path.open("rb") as configuration_file:
         raw_configuration = tomllib.load(configuration_file)
 
-    analysis = raw_configuration["analysis"]
-    earth_engine = raw_configuration["earth_engine"]
-    stack = raw_configuration["stack"]
-    grid = raw_configuration["grid"]
-    reference = raw_configuration["reference"]
-    sampling = raw_configuration["sampling"]
-    model = raw_configuration["model"]
-    inference = raw_configuration["inference"]
-    datasets = {
+    analysis_section = raw_configuration["analysis"]
+    earth_engine_section = raw_configuration["earth_engine"]
+    stack_section = raw_configuration["stack"]
+    grid_section = raw_configuration["grid"]
+    reference_section = raw_configuration["reference"]
+    sampling_section = raw_configuration["sampling"]
+    model_section = raw_configuration["model"]
+    inference_section = raw_configuration["inference"]
+    dataset_ids = {
         str(key): str(value) for key, value in raw_configuration["datasets"].items()
     }
-    bands = tuple(
+    band_definitions = tuple(
         RasterBandDefinition(
-            identifier=str(raw_band["id"]),
-            computation=str(raw_band["computation"]),
-            suffix=str(raw_band["suffix"]),
-            display_name=str(raw_band["display_name"]),
-            role=str(raw_band["role"]),
-            data_type=str(raw_band["data_type"]),
-            source_dataset_keys=tuple(str(key) for key in raw_band["sources"]),
+            identifier=str(raw_band_definition["id"]),
+            computation=str(raw_band_definition["computation"]),
+            suffix=str(raw_band_definition["suffix"]),
+            display_name=str(raw_band_definition["display_name"]),
+            role=str(raw_band_definition["role"]),
+            data_type=str(raw_band_definition["data_type"]),
+            source_dataset_keys=tuple(
+                str(key) for key in raw_band_definition["sources"]
+            ),
         )
-        for raw_band in raw_configuration["bands"]
+        for raw_band_definition in raw_configuration["bands"]
     )
-    analysis_name = str(analysis["name"])
-    stack_name = str(stack["name"])
+    analysis_name = str(analysis_section["name"])
+    stack_name = str(stack_section["name"])
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", analysis_name):
         raise ValueError(
             "Analysis names must contain lowercase letters, numbers, hyphens, "
@@ -341,58 +354,63 @@ def load_analysis_configuration(
             "Raster-stack names must contain lowercase letters, numbers, hyphens, "
             "or underscores."
         )
-    minimum_year = int(stack["minimum_year"])
-    maximum_year = int(stack["maximum_year"])
-    analysis_year = int(analysis["year"])
+    minimum_year = int(stack_section["minimum_year"])
+    maximum_year = int(stack_section["maximum_year"])
+    analysis_year = int(analysis_section["year"])
     if minimum_year > maximum_year:
         raise ValueError("Raster-stack minimum_year cannot exceed maximum_year.")
     if not minimum_year <= analysis_year <= maximum_year:
         raise ValueError(
             f"Analysis year must be between {minimum_year} and {maximum_year}."
         )
-    if int(grid["pixel_size_meters"]) <= 0 or int(grid["tile_size_pixels"]) <= 0:
+    if (
+        int(grid_section["pixel_size_meters"]) <= 0
+        or int(grid_section["tile_size_pixels"]) <= 0
+    ):
         raise ValueError("Raster cache pixel and tile sizes must be positive.")
-    if float(earth_engine["request_timeout_seconds"]) <= 0:
+    if float(earth_engine_section["request_timeout_seconds"]) <= 0:
         raise ValueError("Earth Engine request_timeout_seconds must be positive.")
-    if not 0 <= int(earth_engine["request_retry_count"]) < 100:
+    if not 0 <= int(earth_engine_section["request_retry_count"]) < 100:
         raise ValueError("Earth Engine request_retry_count must be between 0 and 99.")
     if (
-        int(sampling["block_size_meters"]) <= 0
-        or int(sampling["samples_per_class_per_block"]) <= 0
-        or int(model["fold_count"]) < 2
-        or int(model["validation_block_size_meters"]) <= 0
-        or int(model["spline_knot_count"]) < 2
-        or float(model["ridge_alpha"]) < 0
-        or int(inference["window_size_pixels"]) <= 0
+        int(sampling_section["block_size_meters"]) <= 0
+        or int(sampling_section["samples_per_class_per_block"]) <= 0
+        or int(model_section["fold_count"]) < 2
+        or int(model_section["validation_block_size_meters"]) <= 0
+        or int(model_section["spline_knot_count"]) < 2
+        or float(model_section["ridge_alpha"]) < 0
+        or int(inference_section["window_size_pixels"]) <= 0
     ):
         raise ValueError("Analysis size, count, and penalty settings are invalid.")
-    fractions = (
-        float(model["minimum_predictor_coverage"]),
-        float(model["maximum_row_missing_fraction"]),
-        float(model["minimum_response_coverage"]),
-        float(inference["covariance_shrinkage"]),
+    bounded_fraction_values = (
+        float(model_section["minimum_predictor_coverage"]),
+        float(model_section["maximum_row_missing_fraction"]),
+        float(model_section["minimum_response_coverage"]),
+        float(inference_section["covariance_shrinkage"]),
     )
-    if any(not 0.0 < value < 1.0 for value in fractions):
+    if any(not 0.0 < value < 1.0 for value in bounded_fraction_values):
         raise ValueError("Analysis coverage, missingness, and shrinkage must be 0-1.")
-    identifiers = [band.identifier for band in bands]
-    if len(identifiers) != len(set(identifiers)):
+    band_identifiers = [band.identifier for band in band_definitions]
+    if len(band_identifiers) != len(set(band_identifiers)):
         raise ValueError("Raster-stack band identifiers must be unique.")
-    if any(not re.fullmatch(r"d\d+", identifier) for identifier in identifiers):
+    if any(
+        not re.fullmatch(r"d\d+", identifier) for identifier in band_identifiers
+    ):
         raise ValueError("Raster-stack band identifiers must use dNN notation.")
-    if any(band.role not in VALID_BAND_ROLES for band in bands):
+    if any(band.role not in VALID_BAND_ROLES for band in band_definitions):
         raise ValueError(
             "Raster-stack band roles must be reference, response, or predictor."
         )
-    if any(band.data_type not in VALID_DATA_TYPES for band in bands):
+    if any(band.data_type not in VALID_DATA_TYPES for band in band_definitions):
         raise ValueError(
             "Raster-stack data types must be binary, continuous, or categorical."
         )
     missing_dataset_keys = sorted(
         {
             source_key
-            for band in bands
+            for band in band_definitions
             for source_key in band.source_dataset_keys
-            if source_key not in datasets
+            if source_key not in dataset_ids
         }
     )
     if missing_dataset_keys:
@@ -400,21 +418,23 @@ def load_analysis_configuration(
             "Raster bands reference undefined dataset aliases: "
             + ", ".join(missing_dataset_keys)
         )
-    if sum(band.role == "reference" for band in bands) != 1:
+    if sum(band.role == "reference" for band in band_definitions) != 1:
         raise ValueError("A raster stack must define exactly one reference band.")
-    categorical_predictors = [
+    categorical_predictor_definitions = [
         band
-        for band in bands
+        for band in band_definitions
         if band.role == "predictor" and band.data_type == "categorical"
     ]
-    if len(categorical_predictors) != 1:
+    if len(categorical_predictor_definitions) != 1:
         raise ValueError(
             "Reference-condition modeling requires exactly one categorical predictor."
         )
     response_identifiers = {
-        band.identifier for band in bands if band.role == "response"
+        band.identifier for band in band_definitions if band.role == "response"
     }
-    configured_responses = tuple(str(value) for value in model["responses"])
+    configured_responses = tuple(
+        str(value) for value in model_section["responses"]
+    )
     unknown_responses = sorted(set(configured_responses) - response_identifiers)
     if unknown_responses:
         raise ValueError(
@@ -422,105 +442,118 @@ def load_analysis_configuration(
             + ", ".join(unknown_responses)
         )
 
-    def resolved_local_path(value: str) -> Path:
-        return (resolved_path.parent / value).expanduser().resolve()
-
-    resolved_aoi_path = resolved_local_path(str(analysis["aoi_path"]))
+    configuration_directory = resolved_configuration_path.parent
+    resolved_aoi_path = (
+        configuration_directory / str(analysis_section["aoi_path"])
+    ).expanduser().resolve()
     if not resolved_aoi_path.is_file():
         raise ValueError(f"Analysis AOI does not exist: {resolved_aoi_path}")
-    application_mask_value = inference.get("application_mask_path")
-    normalized_content = json.dumps(
+    application_mask_path_value = inference_section.get("application_mask_path")
+    normalized_configuration_bytes = json.dumps(
         raw_configuration,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    raster_content = json.dumps(
+    raster_configuration_bytes = json.dumps(
         {
             "year": analysis_year,
-            "stack": stack,
-            "grid": grid,
-            "reference": reference,
-            "datasets": datasets,
+            "stack": stack_section,
+            "grid": grid_section,
+            "reference": reference_section,
+            "datasets": dataset_ids,
             "bands": raw_configuration["bands"],
         },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return AnalysisConfiguration(
-        path=resolved_path,
-        configuration_sha256=hashlib.sha256(normalized_content).hexdigest(),
-        raster_configuration_sha256=hashlib.sha256(raster_content).hexdigest(),
+        path=resolved_configuration_path,
+        configuration_sha256=hashlib.sha256(
+            normalized_configuration_bytes
+        ).hexdigest(),
+        raster_configuration_sha256=hashlib.sha256(
+            raster_configuration_bytes
+        ).hexdigest(),
         analysis_name=analysis_name,
-        display_name=str(analysis["display_name"]),
+        display_name=str(analysis_section["display_name"]),
         aoi_path=resolved_aoi_path,
         year=analysis_year,
         earth_engine=EarthEngineSettings(
-            project=str(earth_engine["project"]),
-            cache_directory=resolved_local_path(
-                str(earth_engine["cache_directory"])
-            ),
+            project=str(earth_engine_section["project"]),
+            cache_directory=(
+                configuration_directory
+                / str(earth_engine_section["cache_directory"])
+            ).expanduser().resolve(),
             request_timeout_seconds=float(
-                earth_engine["request_timeout_seconds"]
+                earth_engine_section["request_timeout_seconds"]
             ),
-            request_retry_count=int(earth_engine["request_retry_count"]),
+            request_retry_count=int(earth_engine_section["request_retry_count"]),
         ),
         stack_name=stack_name,
-        stack_version=int(stack["version"]),
+        stack_version=int(stack_section["version"]),
         minimum_year=minimum_year,
         maximum_year=maximum_year,
-        reference_start_year=int(stack["reference_start_year"]),
-        reference_end_year=int(stack["reference_end_year"]),
-        era5_start_year=int(stack["era5_start_year"]),
+        reference_start_year=int(stack_section["reference_start_year"]),
+        reference_end_year=int(stack_section["reference_end_year"]),
+        era5_start_year=int(stack_section["era5_start_year"]),
         interannual_rainfall_window_years=int(
-            stack["interannual_rainfall_window_years"]
+            stack_section["interannual_rainfall_window_years"]
         ),
         stream_upstream_area_threshold_km2=float(
-            stack["stream_upstream_area_threshold_km2"]
+            stack_section["stream_upstream_area_threshold_km2"]
         ),
         grid=RasterCacheGrid(
-            crs=str(grid["crs"]),
-            pixel_size_meters=int(grid["pixel_size_meters"]),
-            tile_size_pixels=int(grid["tile_size_pixels"]),
-            origin_x=int(grid["origin_x"]),
-            origin_y=int(grid["origin_y"]),
+            crs=str(grid_section["crs"]),
+            pixel_size_meters=int(grid_section["pixel_size_meters"]),
+            tile_size_pixels=int(grid_section["tile_size_pixels"]),
+            origin_x=int(grid_section["origin_x"]),
+            origin_y=int(grid_section["origin_y"]),
         ),
         reference=ReferenceSettings(
-            grassland_probability=int(reference["grassland_probability"]),
-            human_modification=float(reference["human_modification"]),
-            human_influence=float(reference["human_influence"]),
+            grassland_probability=int(
+                reference_section["grassland_probability"]
+            ),
+            human_modification=float(reference_section["human_modification"]),
+            human_influence=float(reference_section["human_influence"]),
         ),
         sampling=SamplingSettings(
-            block_size_meters=int(sampling["block_size_meters"]),
+            block_size_meters=int(sampling_section["block_size_meters"]),
             samples_per_class_per_block=int(
-                sampling["samples_per_class_per_block"]
+                sampling_section["samples_per_class_per_block"]
             ),
-            random_seed=int(sampling["random_seed"]),
+            random_seed=int(sampling_section["random_seed"]),
         ),
         model=ModelSettings(
-            fold_count=int(model["fold_count"]),
+            fold_count=int(model_section["fold_count"]),
             validation_block_size_meters=int(
-                model["validation_block_size_meters"]
+                model_section["validation_block_size_meters"]
             ),
             minimum_predictor_coverage=float(
-                model["minimum_predictor_coverage"]
+                model_section["minimum_predictor_coverage"]
             ),
             maximum_row_missing_fraction=float(
-                model["maximum_row_missing_fraction"]
+                model_section["maximum_row_missing_fraction"]
             ),
-            spline_knot_count=int(model["spline_knot_count"]),
-            minimum_response_coverage=float(model["minimum_response_coverage"]),
-            ridge_alpha=float(model["ridge_alpha"]),
+            spline_knot_count=int(model_section["spline_knot_count"]),
+            minimum_response_coverage=float(
+                model_section["minimum_response_coverage"]
+            ),
+            ridge_alpha=float(model_section["ridge_alpha"]),
             responses=configured_responses,
         ),
         inference=InferenceSettings(
             application_mask_path=(
-                resolved_local_path(str(application_mask_value))
-                if application_mask_value is not None
+                (
+                    configuration_directory / str(application_mask_path_value)
+                ).expanduser().resolve()
+                if application_mask_path_value is not None
                 else None
             ),
-            window_size_pixels=int(inference["window_size_pixels"]),
-            covariance_shrinkage=float(inference["covariance_shrinkage"]),
+            window_size_pixels=int(inference_section["window_size_pixels"]),
+            covariance_shrinkage=float(
+                inference_section["covariance_shrinkage"]
+            ),
         ),
-        datasets=MappingProxyType(datasets),
-        bands=bands,
+        datasets=MappingProxyType(dataset_ids),
+        bands=band_definitions,
     )

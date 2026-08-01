@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_response_names(
     columns: Sequence[str],
     requested_responses: Sequence[str] | None,
-    stack_configuration: AnalysisConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> tuple[str, ...]:
     """Resolve dNN aliases or full names to ordered response columns.
 
@@ -124,7 +124,8 @@ def resolve_response_names(
         columns (Sequence[str]): Column names from the ecoregion sample table.
         requested_responses (Sequence[str] | None): Requested dNN aliases or
             complete response column names. ``None`` selects every response.
-        stack_configuration (AnalysisConfiguration): Analysis band-role contract.
+        analysis_configuration (AnalysisConfiguration): Analysis band-role
+            contract.
 
     Returns:
         tuple[str, ...]: Unique response column names in requested order.
@@ -134,7 +135,7 @@ def resolve_response_names(
             response column.
     """
 
-    response_columns = stack_configuration.columns_with_role(columns, "response")
+    response_columns = analysis_configuration.columns_with_role(columns, "response")
     if not requested_responses:
         return tuple(response_columns.values())
 
@@ -302,7 +303,7 @@ def summarize_response_coverage(
     response_names: Sequence[str],
     selected_response_names: Sequence[str],
     configuration: IntegrityConfiguration,
-    stack_configuration: AnalysisConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> pd.DataFrame:
     """Determine which response bands can support every spatial fold.
 
@@ -314,49 +315,60 @@ def summarize_response_coverage(
             model fitting.
         configuration (IntegrityConfiguration): Coverage, spline, and fold
             requirements used to screen responses.
-        stack_configuration (AnalysisConfiguration): Response metadata.
+        analysis_configuration (AnalysisConfiguration): Response metadata.
 
     Returns:
         pandas.DataFrame: One screening record per response, including coverage,
         variation, fold support, selection state, and fit status.
     """
 
-    selected_names = set(selected_response_names)
-    usable_reference = prepared_table["usable_for_gam"] & prepared_table[
+    selected_response_name_set = set(selected_response_names)
+    usable_reference_row_mask = prepared_table["usable_for_gam"] & prepared_table[
         "reference_site"
     ].eq(1)
-    usable_reference_area = float(
-        prepared_table.loc[usable_reference, "area_weight_m2"].sum()
+    usable_reference_area_m2 = float(
+        prepared_table.loc[usable_reference_row_mask, "area_weight_m2"].sum()
     )
     minimum_training_rows = max(2, configuration.spline_knot_count)
-    records = []
+    coverage_records = []
     for response_name in response_names:
-        response_definition = stack_configuration.band_for_column(response_name)
-        finite_response = np.isfinite(
+        response_definition = analysis_configuration.band_for_column(response_name)
+        finite_response_row_mask = np.isfinite(
             pd.to_numeric(prepared_table[response_name], errors="coerce")
         )
-        defined_reference = usable_reference & finite_response
-        defined_area = float(
-            prepared_table.loc[defined_reference, "area_weight_m2"].sum()
+        defined_reference_row_mask = (
+            usable_reference_row_mask & finite_response_row_mask
         )
-        coverage = (
-            defined_area / usable_reference_area if usable_reference_area > 0 else 0.0
+        defined_reference_area_m2 = float(
+            prepared_table.loc[
+                defined_reference_row_mask,
+                "area_weight_m2",
+            ].sum()
         )
-        response_values = prepared_table.loc[defined_reference, response_name].to_numpy(
-            dtype=np.float64
+        reference_area_coverage = (
+            defined_reference_area_m2 / usable_reference_area_m2
+            if usable_reference_area_m2 > 0
+            else 0.0
         )
-        response_weights = prepared_table.loc[
-            defined_reference, "area_weight_m2"
+        response_values = prepared_table.loc[
+            defined_reference_row_mask,
+            response_name,
         ].to_numpy(dtype=np.float64)
-        response_sd = weighted_standard_deviation(response_values, response_weights)
-        unique_values = int(pd.Series(response_values).nunique())
+        response_weights = prepared_table.loc[
+            defined_reference_row_mask, "area_weight_m2"
+        ].to_numpy(dtype=np.float64)
+        reference_weighted_standard_deviation = weighted_standard_deviation(
+            response_values,
+            response_weights,
+        )
+        unique_reference_value_count = int(pd.Series(response_values).nunique())
         fold_training_rows = []
         fold_validation_rows = []
         for spatial_fold in range(1, configuration.fold_count + 1):
             fold_training_rows.append(
                 int(
                     np.count_nonzero(
-                        defined_reference
+                        defined_reference_row_mask
                         & prepared_table["spatial_fold"].ne(spatial_fold)
                     )
                 )
@@ -364,19 +376,23 @@ def summarize_response_coverage(
             fold_validation_rows.append(
                 int(
                     np.count_nonzero(
-                        defined_reference
+                        defined_reference_row_mask
                         & prepared_table["spatial_fold"].eq(spatial_fold)
                     )
                 )
             )
 
-        if response_name not in selected_names:
+        if response_name not in selected_response_name_set:
             status = "not_selected"
-        elif not np.any(defined_reference):
+        elif not np.any(defined_reference_row_mask):
             status = "no_reference_values"
-        elif coverage < configuration.minimum_response_coverage:
+        elif reference_area_coverage < configuration.minimum_response_coverage:
             status = "insufficient_reference_coverage"
-        elif unique_values < 2 or not np.isfinite(response_sd) or response_sd <= 0:
+        elif (
+            unique_reference_value_count < 2
+            or not np.isfinite(reference_weighted_standard_deviation)
+            or reference_weighted_standard_deviation <= 0
+        ):
             status = "no_reference_variation"
         elif (
             min(fold_training_rows) < minimum_training_rows
@@ -386,25 +402,31 @@ def summarize_response_coverage(
         else:
             status = "fit"
 
-        records.append(
+        coverage_records.append(
             {
                 "response": response_name,
                 "response_band": response_definition.identifier,
                 "display_name": response_definition.display_name,
-                "selected": response_name in selected_names,
+                "selected": response_name in selected_response_name_set,
                 "status": status,
-                "defined_reference_rows": int(np.count_nonzero(defined_reference)),
-                "usable_reference_rows": int(np.count_nonzero(usable_reference)),
-                "defined_reference_area_m2": defined_area,
-                "usable_reference_area_m2": usable_reference_area,
-                "reference_area_coverage": coverage,
-                "unique_reference_values": unique_values,
-                "reference_weighted_sd": response_sd,
+                "defined_reference_rows": int(
+                    np.count_nonzero(defined_reference_row_mask)
+                ),
+                "usable_reference_rows": int(
+                    np.count_nonzero(usable_reference_row_mask)
+                ),
+                "defined_reference_area_m2": defined_reference_area_m2,
+                "usable_reference_area_m2": usable_reference_area_m2,
+                "reference_area_coverage": reference_area_coverage,
+                "unique_reference_values": unique_reference_value_count,
+                "reference_weighted_sd": (
+                    reference_weighted_standard_deviation
+                ),
                 "minimum_fold_training_rows": min(fold_training_rows),
                 "minimum_fold_validation_rows": min(fold_validation_rows),
             }
         )
-    return pd.DataFrame.from_records(records)
+    return pd.DataFrame.from_records(coverage_records)
 
 
 def fit_response_gam(
@@ -414,7 +436,7 @@ def fit_response_gam(
     categorical_predictor_name: str,
     imputation_values: dict[str, float],
     configuration: IntegrityConfiguration,
-    stack_configuration: AnalysisConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> dict[str, object]:
     """Fit one regularized additive reference-condition regression.
 
@@ -429,7 +451,7 @@ def fit_response_gam(
         imputation_values (dict[str, float]): Training-derived replacement value
             for each predictor.
         configuration (IntegrityConfiguration): Spline and ridge settings.
-        stack_configuration (AnalysisConfiguration): Response and predictor
+        analysis_configuration (AnalysisConfiguration): Response and predictor
             display metadata.
 
     Returns:
@@ -475,9 +497,9 @@ def fit_response_gam(
         training_table[response_name].to_numpy(dtype=np.float64),
         sample_weight=fitting_weights,
     )
-    response_definition = stack_configuration.band_for_column(response_name)
+    response_definition = analysis_configuration.band_for_column(response_name)
     predictor_display_names = {
-        predictor_name: stack_configuration.band_for_column(
+        predictor_name: analysis_configuration.band_for_column(
             predictor_name
         ).display_name
         for predictor_name in predictor_names
@@ -489,10 +511,10 @@ def fit_response_gam(
         "response_band": response_definition.identifier,
         "display_name": response_definition.display_name,
         "predictor_display_names": predictor_display_names,
-        "raster_stack_name": stack_configuration.stack_name,
-        "raster_stack_version": stack_configuration.stack_version,
+        "raster_stack_name": analysis_configuration.stack_name,
+        "raster_stack_version": analysis_configuration.stack_version,
         "analysis_configuration_sha256": (
-            stack_configuration.configuration_sha256
+            analysis_configuration.configuration_sha256
         ),
         "continuous_predictor_names": continuous_predictor_names,
         "categorical_predictor_name": categorical_predictor_name,
@@ -518,13 +540,17 @@ def predict_expected_response(
         numpy.ndarray: Expected reference-condition response for each input row.
     """
 
-    continuous_names = tuple(fitted_model["continuous_predictor_names"])
-    categorical_name = str(fitted_model["categorical_predictor_name"])
-    predictor_names = (*continuous_names, categorical_name)
-    imputed_table = predictor_table.loc[:, predictor_names].fillna(
+    continuous_predictor_names = tuple(
+        fitted_model["continuous_predictor_names"]
+    )
+    categorical_predictor_name = str(fitted_model["categorical_predictor_name"])
+    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
+    imputed_predictor_table = predictor_table.loc[:, predictor_names].fillna(
         fitted_model["imputation_values"]
     )
-    design_matrix = fitted_model["preprocessor"].transform(imputed_table)
+    design_matrix = fitted_model["preprocessor"].transform(
+        imputed_predictor_table
+    )
     return np.asarray(fitted_model["regressor"].predict(design_matrix))
 
 
@@ -1069,10 +1095,12 @@ def create_partial_response_figure(
         None: The completed figure is written to ``output_path``.
     """
 
-    continuous_names = tuple(fitted_model["continuous_predictor_names"])
-    categorical_name = str(fitted_model["categorical_predictor_name"])
-    predictor_names = (*continuous_names, categorical_name)
-    baseline = {
+    continuous_predictor_names = tuple(
+        fitted_model["continuous_predictor_names"]
+    )
+    categorical_predictor_name = str(fitted_model["categorical_predictor_name"])
+    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
+    baseline_predictor_values = {
         predictor_name: fitted_model["imputation_values"][predictor_name]
         for predictor_name in predictor_names
     }
@@ -1087,17 +1115,28 @@ def create_partial_response_figure(
     )
     for axis, predictor_name in zip(axes.flat, predictor_names, strict=False):
         display_name = fitted_model["predictor_display_names"][predictor_name]
-        if predictor_name == categorical_name:
-            values = np.sort(reference_training_table[predictor_name].dropna().unique())
-            response_table = pd.DataFrame(
-                [baseline] * len(values), columns=predictor_names
+        if predictor_name == categorical_predictor_name:
+            category_values = np.sort(
+                reference_training_table[predictor_name].dropna().unique()
             )
-            response_table[predictor_name] = values
-            expected = predict_expected_response(fitted_model, response_table)
-            axis.bar(np.arange(len(values)), expected, color="#667F4A", width=0.75)
+            response_table = pd.DataFrame(
+                [baseline_predictor_values] * len(category_values),
+                columns=predictor_names,
+            )
+            response_table[predictor_name] = category_values
+            expected_response_values = predict_expected_response(
+                fitted_model,
+                response_table,
+            )
+            axis.bar(
+                np.arange(len(category_values)),
+                expected_response_values,
+                color="#667F4A",
+                width=0.75,
+            )
             axis.set_xticks(
-                np.arange(len(values)),
-                [f"{value:g}" for value in values],
+                np.arange(len(category_values)),
+                [f"{value:g}" for value in category_values],
                 rotation=45,
                 ha="right",
             )
@@ -1112,13 +1151,22 @@ def create_partial_response_figure(
             else:
                 predictor_values = np.linspace(lower, upper, 100)
             response_table = pd.DataFrame(
-                [baseline] * len(predictor_values), columns=predictor_names
+                [baseline_predictor_values] * len(predictor_values),
+                columns=predictor_names,
             )
             response_table[predictor_name] = predictor_values
-            expected = predict_expected_response(fitted_model, response_table)
-            axis.plot(predictor_values, expected, color="#2A6F73", linewidth=2)
+            expected_response_values = predict_expected_response(
+                fitted_model,
+                response_table,
+            )
+            axis.plot(
+                predictor_values,
+                expected_response_values,
+                color="#2A6F73",
+                linewidth=2,
+            )
             axis.axvline(
-                baseline[predictor_name],
+                baseline_predictor_values[predictor_name],
                 color="#8C9498",
                 linewidth=0.8,
                 linestyle="--",
@@ -1312,7 +1360,7 @@ def run_integrity_parameter_gams(
     sample_path: Path,
     output_directory: Path,
     configuration: IntegrityConfiguration,
-    stack_configuration: AnalysisConfiguration,
+    analysis_configuration: AnalysisConfiguration,
     requested_responses: Sequence[str] | None = None,
     show_progress: bool = True,
     create_partial_figures: bool = True,
@@ -1326,7 +1374,7 @@ def run_integrity_parameter_gams(
             models, reports, and figures.
         configuration (IntegrityConfiguration): Predictor screening, spatial
             validation, response screening, spline, and ridge settings.
-        stack_configuration (AnalysisConfiguration): Configured response and
+        analysis_configuration (AnalysisConfiguration): Configured response and
             predictor roles and display metadata.
         requested_responses (Sequence[str] | None): Optional dNN aliases or
             complete response column names. ``None`` fits every response that
@@ -1342,57 +1390,55 @@ def run_integrity_parameter_gams(
 
     Raises:
         ValueError: If none of the selected responses can be fit.
-        RuntimeError: If a usable row fails to receive an out-of-fold expected
-            response.
     """
 
     started = time.perf_counter()
     resolved_sample_path = sample_path.expanduser().resolve()
     resolved_output_directory = output_directory.expanduser().resolve()
-    resolved_ecoregion_name = stack_configuration.display_name
+    resolved_ecoregion_name = analysis_configuration.display_name
     print("Grassland ecological-response GAM validation")
     print(f"Input sample: {resolved_sample_path}")
     print(f"Output directory: {resolved_output_directory}")
     print(f"Ecoregion: {resolved_ecoregion_name}")
-    print(f"Raster stack: {stack_configuration.path}")
+    print(f"Analysis configuration: {analysis_configuration.path}")
     sample_table = pd.read_parquet(resolved_sample_path)
     print(
         f"Loaded {len(sample_table):,} sampled rows x {sample_table.shape[1]:,} columns"
     )
 
-    all_response_columns = stack_configuration.columns_with_role(
+    all_response_columns = analysis_configuration.columns_with_role(
         sample_table.columns,
         "response",
     )
     selected_response_names = resolve_response_names(
         sample_table.columns,
         requested_responses,
-        stack_configuration,
+        analysis_configuration,
     )
-    prepared = prepare_reference_condition_data(
+    prepared_reference_data = prepare_reference_condition_data(
         sample_table,
         configuration,
-        stack_configuration,
+        analysis_configuration,
     )
     response_coverage = summarize_response_coverage(
-        prepared.table,
+        prepared_reference_data.table,
         tuple(all_response_columns.values()),
         selected_response_names,
         configuration,
-        stack_configuration,
+        analysis_configuration,
     )
     fitted_response_names = tuple(
         response_coverage.loc[response_coverage["status"].eq("fit"), "response"]
     )
     if not fitted_response_names:
-        statuses = response_coverage.loc[
+        selected_response_statuses = response_coverage.loc[
             response_coverage["selected"], ["response_band", "status"]
         ]
         raise ValueError(
             "None of the selected responses can be fit: "
             + ", ".join(
                 f"{row.response_band}={row.status}"
-                for row in statuses.itertuples(index=False)
+                for row in selected_response_statuses.itertuples(index=False)
             )
         )
 
@@ -1417,9 +1463,9 @@ def run_integrity_parameter_gams(
     model_directory.mkdir(parents=True, exist_ok=True)
     figure_directory.mkdir(parents=True, exist_ok=True)
 
-    usable_mask = prepared.table["usable_for_gam"]
-    reference_mask = prepared.table["reference_site"].eq(1)
-    scored_table = prepared.table.copy()
+    usable_row_mask = prepared_reference_data.table["usable_for_gam"]
+    reference_row_mask = prepared_reference_data.table["reference_site"].eq(1)
+    scored_table = prepared_reference_data.table.copy()
     fold_metric_records = []
     response_metric_records = []
     final_models: dict[str, dict[str, object]] = {}
@@ -1433,52 +1479,68 @@ def run_integrity_parameter_gams(
         disable=not show_progress,
     )
     for response_name in fitted_response_names:
-        response_definition = stack_configuration.band_for_column(response_name)
+        response_definition = analysis_configuration.band_for_column(response_name)
         response_band = response_definition.identifier
-        finite_response = np.isfinite(
-            pd.to_numeric(prepared.table[response_name], errors="coerce")
+        finite_response_row_mask = np.isfinite(
+            pd.to_numeric(
+                prepared_reference_data.table[response_name],
+                errors="coerce",
+            )
         )
-        oof_expected = np.full(len(prepared.table), np.nan, dtype=np.float64)
+        out_of_fold_expected_values = np.full(
+            len(prepared_reference_data.table),
+            np.nan,
+            dtype=np.float64,
+        )
         for spatial_fold in range(1, configuration.fold_count + 1):
-            training_rows = (
-                usable_mask
-                & reference_mask
-                & finite_response
-                & prepared.table["spatial_fold"].ne(spatial_fold)
+            training_row_mask = (
+                usable_row_mask
+                & reference_row_mask
+                & finite_response_row_mask
+                & prepared_reference_data.table["spatial_fold"].ne(spatial_fold)
             )
-            validation_reference_rows = (
-                usable_mask
-                & reference_mask
-                & finite_response
-                & prepared.table["spatial_fold"].eq(spatial_fold)
+            validation_reference_row_mask = (
+                usable_row_mask
+                & reference_row_mask
+                & finite_response_row_mask
+                & prepared_reference_data.table["spatial_fold"].eq(spatial_fold)
             )
-            assessment_rows = usable_mask & prepared.table["spatial_fold"].eq(
-                spatial_fold
+            assessment_row_mask = usable_row_mask & prepared_reference_data.table[
+                "spatial_fold"
+            ].eq(
+                spatial_fold,
             )
-            training_table = prepared.table.loc[training_rows]
+            training_table = prepared_reference_data.table.loc[training_row_mask]
             imputation_values = calculate_imputation_values(
                 training_table,
-                prepared.continuous_predictor_names,
-                prepared.categorical_predictor_name,
+                prepared_reference_data.continuous_predictor_names,
+                prepared_reference_data.categorical_predictor_name,
             )
             fitted_model = fit_response_gam(
                 training_table,
                 response_name,
-                prepared.continuous_predictor_names,
-                prepared.categorical_predictor_name,
+                prepared_reference_data.continuous_predictor_names,
+                prepared_reference_data.categorical_predictor_name,
                 imputation_values,
                 configuration,
-                stack_configuration,
+                analysis_configuration,
             )
-            fold_expected = predict_expected_response(
-                fitted_model, prepared.table.loc[assessment_rows]
+            fold_expected_values = predict_expected_response(
+                fitted_model,
+                prepared_reference_data.table.loc[assessment_row_mask],
             )
-            oof_expected[assessment_rows.to_numpy()] = fold_expected
-            validation_table = prepared.table.loc[validation_reference_rows]
-            validation_expected = oof_expected[validation_reference_rows.to_numpy()]
+            out_of_fold_expected_values[assessment_row_mask.to_numpy()] = (
+                fold_expected_values
+            )
+            validation_table = prepared_reference_data.table.loc[
+                validation_reference_row_mask
+            ]
+            validation_expected_values = out_of_fold_expected_values[
+                validation_reference_row_mask.to_numpy()
+            ]
             fold_metrics = calculate_regression_metrics(
                 validation_table[response_name].to_numpy(dtype=np.float64),
-                validation_expected,
+                validation_expected_values,
                 validation_table["area_weight_m2"].to_numpy(dtype=np.float64),
             )
             fold_metric_records.append(
@@ -1487,9 +1549,11 @@ def run_integrity_parameter_gams(
                     "response_band": response_band,
                     "display_name": response_definition.display_name,
                     "spatial_fold": spatial_fold,
-                    "training_reference_rows": int(np.count_nonzero(training_rows)),
+                    "training_reference_rows": int(
+                        np.count_nonzero(training_row_mask)
+                    ),
                     "validation_reference_rows": int(
-                        np.count_nonzero(validation_reference_rows)
+                        np.count_nonzero(validation_reference_row_mask)
                     ),
                     "validation_reference_area_m2": float(
                         validation_table["area_weight_m2"].sum()
@@ -1499,33 +1563,40 @@ def run_integrity_parameter_gams(
             )
             fit_progress.update()
 
-        if not np.isfinite(oof_expected[usable_mask.to_numpy()]).all():
-            raise RuntimeError(
-                f"Not every usable row received an out-of-fold {response_band} "
-                "expectation."
-            )
         expected_column, deviation_column, standardized_column = (
             _response_output_columns(response_band)
         )
-        scored_table[expected_column] = oof_expected
-        observed = pd.to_numeric(scored_table[response_name], errors="coerce").to_numpy(
-            dtype=np.float64
+        scored_table[expected_column] = out_of_fold_expected_values
+        observed_values = pd.to_numeric(
+            scored_table[response_name],
+            errors="coerce",
+        ).to_numpy(
+            dtype=np.float64,
         )
-        deviations = observed - oof_expected
-        scored_table[deviation_column] = deviations
-        reference_validation = (
-            usable_mask.to_numpy() & reference_mask.to_numpy() & np.isfinite(observed)
+        observed_minus_expected_values = (
+            observed_values - out_of_fold_expected_values
+        )
+        scored_table[deviation_column] = observed_minus_expected_values
+        reference_validation_row_mask = (
+            usable_row_mask.to_numpy()
+            & reference_row_mask.to_numpy()
+            & np.isfinite(observed_values)
         )
         overall_metrics = calculate_regression_metrics(
-            observed[reference_validation],
-            oof_expected[reference_validation],
-            scored_table.loc[reference_validation, "area_weight_m2"].to_numpy(
-                dtype=np.float64
+            observed_values[reference_validation_row_mask],
+            out_of_fold_expected_values[reference_validation_row_mask],
+            scored_table.loc[
+                reference_validation_row_mask,
+                "area_weight_m2",
+            ].to_numpy(
+                dtype=np.float64,
             ),
         )
-        residual_scale = overall_metrics["weighted_rmse"]
+        out_of_fold_reference_rmse = overall_metrics["weighted_rmse"]
         scored_table[standardized_column] = (
-            deviations / residual_scale if residual_scale > 0 else np.nan
+            observed_minus_expected_values / out_of_fold_reference_rmse
+            if out_of_fold_reference_rmse > 0
+            else np.nan
         )
 
         response_fold_metrics = pd.DataFrame.from_records(fold_metric_records)
@@ -1540,11 +1611,16 @@ def run_integrity_parameter_gams(
             "response_band": response_band,
             "display_name": response_definition.display_name,
             "reference_area_coverage": float(coverage_row["reference_area_coverage"]),
-            "validation_reference_rows": int(np.count_nonzero(reference_validation)),
-            "validation_reference_area_m2": float(
-                scored_table.loc[reference_validation, "area_weight_m2"].sum()
+            "validation_reference_rows": int(
+                np.count_nonzero(reference_validation_row_mask)
             ),
-            "reference_residual_rmse_oof": residual_scale,
+            "validation_reference_area_m2": float(
+                scored_table.loc[
+                    reference_validation_row_mask,
+                    "area_weight_m2",
+                ].sum()
+            ),
+            "reference_residual_rmse_oof": out_of_fold_reference_rmse,
         }
         metric_record.update(
             {f"overall_{name}": value for name, value in overall_metrics.items()}
@@ -1563,23 +1639,27 @@ def run_integrity_parameter_gams(
             )
         response_metric_records.append(metric_record)
 
-        final_training_rows = usable_mask & reference_mask & finite_response
-        final_training_table = prepared.table.loc[final_training_rows]
+        final_training_row_mask = (
+            usable_row_mask & reference_row_mask & finite_response_row_mask
+        )
+        final_training_table = prepared_reference_data.table.loc[
+            final_training_row_mask
+        ]
         final_imputation_values = calculate_imputation_values(
             final_training_table,
-            prepared.continuous_predictor_names,
-            prepared.categorical_predictor_name,
+            prepared_reference_data.continuous_predictor_names,
+            prepared_reference_data.categorical_predictor_name,
         )
         final_model = fit_response_gam(
             final_training_table,
             response_name,
-            prepared.continuous_predictor_names,
-            prepared.categorical_predictor_name,
+            prepared_reference_data.continuous_predictor_names,
+            prepared_reference_data.categorical_predictor_name,
             final_imputation_values,
             configuration,
-            stack_configuration,
+            analysis_configuration,
         )
-        final_model["reference_residual_rmse_oof"] = residual_scale
+        final_model["reference_residual_rmse_oof"] = out_of_fold_reference_rmse
         final_model["standardized_deviation_interpretation"] = (
             "(observed - expected reference response) divided by the area-weighted "
             "RMSE of out-of-fold reference residuals"
@@ -1617,7 +1697,10 @@ def run_integrity_parameter_gams(
     metadata_path = resolved_output_directory / "run_metadata.json"
 
     scored_table.to_parquet(predictions_path, compression="zstd", index=False)
-    prepared.predictor_coverage.to_csv(predictor_coverage_path, index=False)
+    prepared_reference_data.predictor_coverage.to_csv(
+        predictor_coverage_path,
+        index=False,
+    )
     response_coverage.to_csv(response_coverage_path, index=False)
     fold_metrics.to_csv(fold_metrics_path, index=False)
     response_metrics.to_csv(response_metrics_path, index=False)
@@ -1638,8 +1721,8 @@ def run_integrity_parameter_gams(
         / f"{ecoregion_slug}_response_deviation_correlation.png",
     )
     create_fold_map(
-        prepared.block_summary,
-        prepared.table,
+        prepared_reference_data.block_summary,
+        prepared_reference_data.table,
         configuration,
         resolved_ecoregion_name,
         base_figure_paths[0],
@@ -1694,25 +1777,25 @@ def run_integrity_parameter_gams(
         resolved_ecoregion_name,
         response_coverage,
         response_metrics,
-        len(prepared.retained_predictor_names),
-        len(prepared.excluded_predictor_names),
+        len(prepared_reference_data.retained_predictor_names),
+        len(prepared_reference_data.excluded_predictor_names),
         tuple(path.name for path in base_figure_paths),
     )
-    metadata = {
+    run_metadata = {
         "input_sample": str(resolved_sample_path),
         "ecoregion_name": resolved_ecoregion_name,
         "configuration": asdict(configuration),
         "analysis_configuration": {
-            "path": str(stack_configuration.path),
-            "analysis_name": stack_configuration.analysis_name,
-            "display_name": stack_configuration.display_name,
-            "aoi_path": str(stack_configuration.aoi_path),
-            "year": stack_configuration.year,
-            "stack_name": stack_configuration.stack_name,
-            "stack_version": stack_configuration.stack_version,
-            "sha256": stack_configuration.configuration_sha256,
-            "datasets": dict(stack_configuration.datasets),
-            "bands": [asdict(band) for band in stack_configuration.bands],
+            "path": str(analysis_configuration.path),
+            "analysis_name": analysis_configuration.analysis_name,
+            "display_name": analysis_configuration.display_name,
+            "aoi_path": str(analysis_configuration.aoi_path),
+            "year": analysis_configuration.year,
+            "stack_name": analysis_configuration.stack_name,
+            "stack_version": analysis_configuration.stack_version,
+            "sha256": analysis_configuration.configuration_sha256,
+            "datasets": dict(analysis_configuration.datasets),
+            "bands": [asdict(band) for band in analysis_configuration.bands],
         },
         "model": {
             "family": "one regularized additive ridge regression per response",
@@ -1727,15 +1810,23 @@ def run_integrity_parameter_gams(
                 "deviation; neither is a present-day integrity score"
             ),
         },
-        "sampled_rows": int(len(prepared.table)),
-        "usable_rows": int(usable_mask.sum()),
-        "reference_rows": int(reference_mask.sum()),
-        "usable_reference_rows": int(np.count_nonzero(usable_mask & reference_mask)),
-        "validation_block_count": int(len(prepared.block_summary)),
+        "sampled_rows": int(len(prepared_reference_data.table)),
+        "usable_rows": int(usable_row_mask.sum()),
+        "reference_rows": int(reference_row_mask.sum()),
+        "usable_reference_rows": int(
+            np.count_nonzero(usable_row_mask & reference_row_mask)
+        ),
+        "validation_block_count": int(
+            len(prepared_reference_data.block_summary)
+        ),
         "selected_responses": list(selected_response_names),
         "fitted_responses": list(fitted_response_names),
-        "retained_predictors": list(prepared.retained_predictor_names),
-        "excluded_predictors": list(prepared.excluded_predictor_names),
+        "retained_predictors": list(
+            prepared_reference_data.retained_predictor_names
+        ),
+        "excluded_predictors": list(
+            prepared_reference_data.excluded_predictor_names
+        ),
         "artifacts": {
             "predictions": str(predictions_path),
             "predictor_coverage": str(predictor_coverage_path),
@@ -1748,7 +1839,10 @@ def run_integrity_parameter_gams(
             "figures": [str(path) for path in figure_paths],
         },
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metadata_path.write_text(
+        json.dumps(run_metadata, indent=2),
+        encoding="utf-8",
+    )
 
     print()
     print("Spatially held-out reference-condition performance")
@@ -1786,8 +1880,8 @@ def run_integrity_parameter_gams(
         metadata_path=metadata_path,
         model_paths=tuple(model_paths),
         figure_paths=tuple(figure_paths),
-        sampled_rows=int(len(prepared.table)),
-        usable_rows=int(usable_mask.sum()),
+        sampled_rows=int(len(prepared_reference_data.table)),
+        usable_rows=int(usable_row_mask.sum()),
         fitted_responses=len(fitted_response_names),
         elapsed_seconds=elapsed_seconds,
     )
@@ -1800,7 +1894,7 @@ def main() -> None:
     analysis_configuration = load_analysis_configuration(
         args.analysis_configuration
     )
-    configuration = IntegrityConfiguration(
+    integrity_configuration = IntegrityConfiguration(
         fold_count=analysis_configuration.model.fold_count,
         sampling_block_size_meters=(
             analysis_configuration.sampling.block_size_meters
@@ -1826,7 +1920,7 @@ def main() -> None:
     run_integrity_parameter_gams(
         args.sample_parquet,
         output_directory,
-        configuration,
+        integrity_configuration,
         analysis_configuration,
         requested_responses=analysis_configuration.model.responses or None,
         show_progress=not args.no_progress,

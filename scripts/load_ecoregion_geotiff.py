@@ -287,10 +287,12 @@ class SpatialSample:
         table: Model-ready table of selected pixels, weights, and raster bands.
         reference_band_name: Reference-site band used to classify pixels.
         ignored_reference_band_names: Additional reference-site bands excluded
-            from the predictor table.
-        predictor_band_names: Non-reference raster bands written as columns.
-        predictor_defined_pixels: Defined sampled values for each predictor.
-        complete_predictor_rows: Sampled rows defined in every predictor.
+            from the sample table.
+        sampled_band_names: Non-reference raster bands written as columns.
+        sampled_band_defined_pixel_counts: Defined sampled values for each
+            raster band.
+        complete_sampled_band_row_count: Sampled rows defined in every raster
+            band.
         block_size_meters: Width and height of each equal-area sampling block.
         samples_per_class_per_block: Per-block cap applied separately to zeroes
             and ones.
@@ -302,8 +304,8 @@ class SpatialSample:
         minimum_available_pixels_per_block: Smallest eligible block population.
         median_available_pixels_per_block: Median eligible block population.
         maximum_available_pixels_per_block: Largest eligible block population.
-        excluded_reference_pixels: Reference pixels lacking every predictor and
-            therefore excluded from the modeling domain.
+        excluded_reference_pixels: Reference pixels lacking every sampled
+            raster band and therefore excluded from the modeling domain.
         class_summaries: Diagnostics for non-reference and reference pixels.
         elapsed_seconds: Time used to construct the sample in memory.
     """
@@ -311,9 +313,9 @@ class SpatialSample:
     table: pd.DataFrame
     reference_band_name: str
     ignored_reference_band_names: tuple[str, ...]
-    predictor_band_names: tuple[str, ...]
-    predictor_defined_pixels: tuple[int, ...]
-    complete_predictor_rows: int
+    sampled_band_names: tuple[str, ...]
+    sampled_band_defined_pixel_counts: tuple[int, ...]
+    complete_sampled_band_row_count: int
     block_size_meters: float
     samples_per_class_per_block: int
     random_seed: int
@@ -648,28 +650,22 @@ def _transformed_coordinates(
 
 def create_spatial_sample(
     raster: RasterPixelData,
-    block_size_meters: float,
-    samples_per_class_per_block: int,
-    random_seed: int,
-    show_progress: bool,
     analysis_configuration: AnalysisConfiguration,
+    show_progress: bool,
 ) -> SpatialSample:
     """Create a deterministic spatially balanced sample of raster pixels.
 
     Earth Engine masks zeroes from the exported reference-site bands. Within
-    the usable predictor footprint, a defined reference value of one becomes
+    the usable raster-data footprint, a defined reference value of one becomes
     the reference class and every other pixel becomes the non-reference class.
     Reference and non-reference pixels are sampled separately inside each
     equal-area block.
 
     Args:
         raster: Fully loaded ecoregion raster.
-        block_size_meters: Width and height of square sampling blocks.
-        samples_per_class_per_block: Maximum pixels retained for each
-            reference-site class within each block.
-        random_seed: Seed for reproducible sampling without replacement.
+        analysis_configuration: Complete analysis, band-role contract, and
+            sampling settings.
         show_progress: Whether to display tqdm progress bars.
-        analysis_configuration: Complete analysis and band-role contract.
 
     Returns:
         Sample table and diagnostics describing its source population.
@@ -677,58 +673,62 @@ def create_spatial_sample(
     Raises:
         ValueError: If bands, pixel areas, or coordinates cannot
             support sampling.
-        RuntimeError: If no eligible pixels remain in the predictor footprint.
+        RuntimeError: If no eligible pixels remain in the raster-data footprint.
     """
 
     started = time.perf_counter()
+    sampling_settings = analysis_configuration.sampling
 
     # The export repeats the same reference surface for each year. Use the
-    # first copy as the response and exclude every copy from predictor columns.
-    reference_band_identifiers = {
+    # first copy as the label and exclude every copy from sampled data columns.
+    reference_band_identifier = next(
         band.identifier
         for band in analysis_configuration.bands
         if band.role == "reference"
-    }
+    )
     reference_band_offsets = tuple(
         band_offset
         for band_offset, band_name in enumerate(raster.band_names)
-        if (match := BAND_COLUMN_PATTERN.match(band_name))
-        and match.group("band_id") in reference_band_identifiers
+        if (band_name_match := BAND_COLUMN_PATTERN.match(band_name))
+        and band_name_match.group("band_id") == reference_band_identifier
     )
     reference_band_offset = reference_band_offsets[0]
-    predictor_band_offsets = tuple(
+    sampled_band_offsets = tuple(
         band_offset
         for band_offset in range(raster.band_count)
         if band_offset not in reference_band_offsets
     )
 
-    predictor_band_names = tuple(
-        raster.band_names[band_offset] for band_offset in predictor_band_offsets
+    sampled_band_names = tuple(
+        raster.band_names[band_offset] for band_offset in sampled_band_offsets
     )
 
     reference_band_values = raster.values[reference_band_offset]
     reference_band_validity = raster.validity[reference_band_offset]
 
     reference_site_mask = reference_band_validity & (reference_band_values == 1)
-    predictor_footprint = np.zeros((raster.height, raster.width), dtype=np.bool_)
-    for predictor_band_offset in tqdm(
-        predictor_band_offsets,
-        total=len(predictor_band_offsets),
-        desc="Building predictor footprint",
+    sampled_data_footprint = np.zeros(
+        (raster.height, raster.width),
+        dtype=np.bool_,
+    )
+    for sampled_band_offset in tqdm(
+        sampled_band_offsets,
+        total=len(sampled_band_offsets),
+        desc="Building raster-data footprint",
         unit="band",
         disable=not show_progress,
     ):
         np.logical_or(
-            predictor_footprint,
-            raster.validity[predictor_band_offset],
-            out=predictor_footprint,
+            sampled_data_footprint,
+            raster.validity[sampled_band_offset],
+            out=sampled_data_footprint,
         )
     excluded_reference_pixels = int(
-        np.count_nonzero(reference_site_mask & ~predictor_footprint)
+        np.count_nonzero(reference_site_mask & ~sampled_data_footprint)
     )
-    eligible_flat_indices = np.flatnonzero(predictor_footprint.ravel())
+    eligible_flat_indices = np.flatnonzero(sampled_data_footprint.ravel())
     if eligible_flat_indices.size == 0:
-        raise RuntimeError("No pixels contain a defined non-reference predictor value.")
+        raise RuntimeError("No pixels contain a defined non-reference raster value.")
 
     pixel_areas_by_row = pixel_area_by_row_square_meters(raster)
     if pixel_areas_by_row is None:
@@ -756,7 +756,7 @@ def create_spatial_sample(
     block_ids, block_columns, block_rows = assign_sampling_blocks(
         x_meters,
         y_meters,
-        block_size_meters,
+        sampling_settings.block_size_meters,
     )
     preparation_progress.update()
     preparation_progress.close()
@@ -778,7 +778,7 @@ def create_spatial_sample(
     # each group after applying the caller's per-class sampling cap.
     sampled_pixels_per_group = np.minimum(
         available_pixels_per_group,
-        samples_per_class_per_block,
+        sampling_settings.samples_per_class_per_block,
     )
     available_pixels_by_group_key = np.zeros(block_count * 2, dtype=np.int64)
     sampled_pixels_by_group_key = np.zeros(block_count * 2, dtype=np.int64)
@@ -789,7 +789,9 @@ def create_spatial_sample(
         int(np.sum(sampled_pixels_per_group)),
         dtype=np.int64,
     )
-    sampling_random_generator = np.random.default_rng(random_seed)
+    sampling_random_generator = np.random.default_rng(
+        sampling_settings.random_seed
+    )
     selection_write_offset = 0
     group_iterator = zip(
         group_start_offsets,
@@ -852,33 +854,36 @@ def create_spatial_sample(
         "area_weight_m2": area_weights,
     }
 
-    # Predictors are every non-reference raster band, such as climate, terrain,
-    # and vegetation measurements; reference-site bands were excluded above.
+    # Retain every non-reference raster band, including ecological responses
+    # and abiotic predictors; reference-site bands were excluded above.
     pixel_values = raster.pixel_values()
     pixel_validity = raster.pixel_validity()
-    predictor_defined_pixels: list[int] = []
-    complete_predictor_mask = np.ones(selected_positions.size, dtype=np.bool_)
-    for predictor_band_offset, predictor_band_name in tqdm(
-        zip(predictor_band_offsets, predictor_band_names, strict=True),
-        total=len(predictor_band_offsets),
-        desc="Building predictor columns",
+    sampled_band_defined_pixel_counts: list[int] = []
+    complete_sampled_band_row_mask = np.ones(
+        selected_positions.size,
+        dtype=np.bool_,
+    )
+    for sampled_band_offset, sampled_band_name in tqdm(
+        zip(sampled_band_offsets, sampled_band_names, strict=True),
+        total=len(sampled_band_offsets),
+        desc="Building raster data columns",
         unit="band",
         disable=not show_progress,
     ):
-        predictor_value_is_defined = pixel_validity[
+        sampled_band_value_is_defined = pixel_validity[
             selected_flat_indices,
-            predictor_band_offset,
+            sampled_band_offset,
         ]
-        predictor_values = np.asarray(
-            pixel_values[selected_flat_indices, predictor_band_offset],
+        sampled_band_values = np.asarray(
+            pixel_values[selected_flat_indices, sampled_band_offset],
             dtype=np.float64,
         ).copy()
-        predictor_values[~predictor_value_is_defined] = np.nan
-        table_columns[predictor_band_name] = predictor_values
-        predictor_defined_pixels.append(
-            int(np.count_nonzero(predictor_value_is_defined))
+        sampled_band_values[~sampled_band_value_is_defined] = np.nan
+        table_columns[sampled_band_name] = sampled_band_values
+        sampled_band_defined_pixel_counts.append(
+            int(np.count_nonzero(sampled_band_value_is_defined))
         )
-        complete_predictor_mask &= predictor_value_is_defined
+        complete_sampled_band_row_mask &= sampled_band_value_is_defined
 
     sample_table = pd.DataFrame(table_columns, copy=False)
     class_summaries = []
@@ -921,12 +926,18 @@ def create_spatial_sample(
         ignored_reference_band_names=tuple(
             raster.band_names[band_offset] for band_offset in reference_band_offsets[1:]
         ),
-        predictor_band_names=predictor_band_names,
-        predictor_defined_pixels=tuple(predictor_defined_pixels),
-        complete_predictor_rows=int(np.count_nonzero(complete_predictor_mask)),
-        block_size_meters=block_size_meters,
-        samples_per_class_per_block=samples_per_class_per_block,
-        random_seed=random_seed,
+        sampled_band_names=sampled_band_names,
+        sampled_band_defined_pixel_counts=tuple(
+            sampled_band_defined_pixel_counts
+        ),
+        complete_sampled_band_row_count=int(
+            np.count_nonzero(complete_sampled_band_row_mask)
+        ),
+        block_size_meters=sampling_settings.block_size_meters,
+        samples_per_class_per_block=(
+            sampling_settings.samples_per_class_per_block
+        ),
+        random_seed=sampling_settings.random_seed,
         block_count=block_count,
         reference_block_count=class_summaries[1].blocks_with_class,
         nonreference_block_count=class_summaries[0].blocks_with_class,
@@ -976,27 +987,27 @@ def write_spatial_sample_parquet(
     progress.update()
 
     parquet_file = pq.ParquetFile(path)
-    metadata = parquet_file.metadata
-    if metadata.num_rows != len(sample.table):
+    parquet_metadata = parquet_file.metadata
+    if parquet_metadata.num_rows != len(sample.table):
         raise RuntimeError(
             f"Parquet row verification failed: expected {len(sample.table):,}, "
-            f"found {metadata.num_rows:,}."
+            f"found {parquet_metadata.num_rows:,}."
         )
-    if metadata.num_columns != sample.table.shape[1]:
+    if parquet_metadata.num_columns != sample.table.shape[1]:
         raise RuntimeError(
             "Parquet column verification failed: expected "
-            f"{sample.table.shape[1]:,}, found {metadata.num_columns:,}."
+            f"{sample.table.shape[1]:,}, found {parquet_metadata.num_columns:,}."
         )
     if parquet_file.schema_arrow.names != list(sample.table.columns):
         raise RuntimeError("Parquet column-name verification failed.")
-    compression = metadata.row_group(0).column(0).compression
+    compression = parquet_metadata.row_group(0).column(0).compression
     progress.update()
     progress.close()
     return ParquetWriteSummary(
         path=path,
-        rows=metadata.num_rows,
-        columns=metadata.num_columns,
-        row_groups=metadata.num_row_groups,
+        rows=parquet_metadata.num_rows,
+        columns=parquet_metadata.num_columns,
+        row_groups=parquet_metadata.num_row_groups,
         compression=compression,
         file_bytes=path.stat().st_size,
         elapsed_seconds=time.perf_counter() - started,
@@ -1660,32 +1671,37 @@ def print_spatial_sampling_report(sample: SpatialSample) -> None:
         print("WARNING: this ecoregion contains no reference-site pixels.")
 
     sampled_rows = len(sample.table)
-    fully_defined = sum(
-        count == sampled_rows for count in sample.predictor_defined_pixels
+    fully_defined_band_count = sum(
+        count == sampled_rows
+        for count in sample.sampled_band_defined_pixel_counts
     )
-    completely_missing = sum(count == 0 for count in sample.predictor_defined_pixels)
-    partially_defined = (
-        len(sample.predictor_band_names) - fully_defined - completely_missing
+    completely_missing_band_count = sum(
+        count == 0 for count in sample.sampled_band_defined_pixel_counts
+    )
+    partially_defined_band_count = (
+        len(sample.sampled_band_names)
+        - fully_defined_band_count
+        - completely_missing_band_count
     )
     print()
-    print("Sampled predictor coverage")
-    print(f"Predictor columns: {len(sample.predictor_band_names):,}")
-    print(f"Fully defined predictors: {fully_defined:,}")
-    print(f"Partially defined predictors: {partially_defined:,}")
-    print(f"Completely missing predictors: {completely_missing:,}")
+    print("Sampled raster-band coverage")
+    print(f"Raster data columns: {len(sample.sampled_band_names):,}")
+    print(f"Fully defined bands: {fully_defined_band_count:,}")
+    print(f"Partially defined bands: {partially_defined_band_count:,}")
+    print(f"Completely missing bands: {completely_missing_band_count:,}")
     print(
-        "Rows complete across every predictor: "
-        f"{sample.complete_predictor_rows:,} / {sampled_rows:,} "
-        f"({100.0 * sample.complete_predictor_rows / sampled_rows:.2f}%)"
+        "Rows complete across every raster data band: "
+        f"{sample.complete_sampled_band_row_count:,} / {sampled_rows:,} "
+        f"({100.0 * sample.complete_sampled_band_row_count / sampled_rows:.2f}%)"
     )
     lowest_coverage = sorted(
         zip(
-            sample.predictor_defined_pixels,
-            sample.predictor_band_names,
+            sample.sampled_band_defined_pixel_counts,
+            sample.sampled_band_names,
             strict=True,
         )
-    )[: min(8, len(sample.predictor_band_names))]
-    print("Lowest-coverage predictor bands in the sample:")
+    )[: min(8, len(sample.sampled_band_names))]
+    print("Lowest-coverage raster data bands in the sample:")
     for defined_pixels, name in lowest_coverage:
         print(
             f"  {name}: {defined_pixels:,} / {sampled_rows:,} "
@@ -1827,22 +1843,21 @@ def main() -> None:
             / "samples"
             / f"{ecoregion_slug or 'ecoregion'}_spatial_sample.parquet"
         )
-        sample = create_spatial_sample(
+        spatial_sample = create_spatial_sample(
             raster,
-            analysis_configuration.sampling.block_size_meters,
-            analysis_configuration.sampling.samples_per_class_per_block,
-            analysis_configuration.sampling.random_seed,
-            not args.no_progress,
             analysis_configuration,
+            not args.no_progress,
         )
-        print_spatial_sampling_report(sample)
-        table_memory = int(sample.table.memory_usage(index=True, deep=True).sum())
+        print_spatial_sampling_report(spatial_sample)
+        table_memory_bytes = int(
+            spatial_sample.table.memory_usage(index=True, deep=True).sum()
+        )
         parquet_summary = write_spatial_sample_parquet(
-            sample,
+            spatial_sample,
             sample_path,
             not args.no_progress,
         )
-        print_parquet_report(parquet_summary, table_memory)
+        print_parquet_report(parquet_summary, table_memory_bytes)
 
     if not args.no_location_figure:
         figure_path = args.location_figure or (

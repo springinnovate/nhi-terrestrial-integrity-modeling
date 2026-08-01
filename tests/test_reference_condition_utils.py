@@ -26,7 +26,7 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
     def setUp(self) -> None:
         """Create compact spatial preparation settings."""
 
-        self.configuration = ReferenceConditionConfiguration(
+        self.reference_condition_configuration = ReferenceConditionConfiguration(
             fold_count=5,
             sampling_block_size_meters=25_000,
             validation_block_size_meters=100_000,
@@ -34,7 +34,7 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
             maximum_row_missing_fraction=0.20,
             spline_knot_count=4,
         )
-        self.stack_configuration = load_analysis_configuration()
+        self.analysis_configuration = load_analysis_configuration()
 
     def _create_sample_table(self) -> pd.DataFrame:
         """Create ten spatial blocks with every environmental predictor.
@@ -129,7 +129,7 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
 
         assigned_table, block_summary = assign_spatial_folds(
             self._create_sample_table(),
-            self.configuration,
+            self.reference_condition_configuration,
         )
 
         self.assertEqual(10, len(block_summary))
@@ -153,8 +153,8 @@ class ReferenceConditionUtilsTest(unittest.TestCase):
 
         prepared = prepare_reference_condition_data(
             self._create_sample_table(),
-            self.configuration,
-            self.stack_configuration,
+            self.reference_condition_configuration,
+            self.analysis_configuration,
         )
 
         self.assertEqual(19, len(prepared.retained_predictor_names))

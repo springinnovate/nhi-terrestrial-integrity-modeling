@@ -62,7 +62,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         )
         self.response_rmse = {"d02": 2.0, "d11": 4.0}
         base_configuration = load_analysis_configuration()
-        self.stack_configuration = replace(
+        self.analysis_configuration = replace(
             base_configuration,
             display_name="Synthetic Prairie",
             inference=replace(
@@ -81,7 +81,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     "ecoregion_name": "Synthetic Prairie",
                     "configuration": {"maximum_row_missing_fraction": 0.20},
                     "analysis_configuration": {
-                        "sha256": self.stack_configuration.configuration_sha256,
+                        "sha256": self.analysis_configuration.configuration_sha256,
                     },
                 }
             ),
@@ -159,7 +159,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     for predictor_name in self.predictor_names
                 },
                 configuration,
-                self.stack_configuration,
+                self.analysis_configuration,
             )
             model["reference_residual_rmse_oof"] = self.response_rmse[response_band]
             model["standardized_deviation_interpretation"] = (
@@ -290,7 +290,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             contextlib.redirect_stdout(standard_output),
         ):
             summary = run_reference_condition_inference(
-                self.stack_configuration,
+                self.analysis_configuration,
                 self.raster_path,
                 self.model_run_directory,
                 output_directory=output_directory,
@@ -509,9 +509,9 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             summary = run_reference_condition_inference(
                 replace(
-                    self.stack_configuration,
+                    self.analysis_configuration,
                     inference=replace(
-                        self.stack_configuration.inference,
+                        self.analysis_configuration.inference,
                         application_mask_path=mask_path,
                         window_size_pixels=3,
                     ),
@@ -572,9 +572,9 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             summary = run_reference_condition_inference(
                 replace(
-                    self.stack_configuration,
+                    self.analysis_configuration,
                     inference=replace(
-                        self.stack_configuration.inference,
+                        self.analysis_configuration.inference,
                         application_mask_path=mask_path,
                     ),
                 ),
