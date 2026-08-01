@@ -24,7 +24,6 @@ from scripts.load_ecoregion_geotiff import (
     assign_sampling_blocks,
     create_spatial_sample,
     create_ecoregion_location_figure,
-    infer_ecoregion_name,
     load_raster_pixels,
     pixel_area_by_row_square_meters,
     print_spatial_sampling_report,
@@ -33,6 +32,8 @@ from scripts.load_ecoregion_geotiff import (
     summarize_coverage,
     write_spatial_sample_parquet,
 )
+from scripts.analysis_config import load_analysis_configuration
+from scripts.reference_condition_utils import infer_ecoregion_name
 
 
 class LoadEcoregionGeoTiffTest(unittest.TestCase):
@@ -44,6 +45,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.raster_path = Path(self.temporary_directory.name) / "ecoregion.tif"
+        self.analysis_configuration = load_analysis_configuration()
 
         first_band = np.array(
             [[1.0, -9999.0, 3.0], [4.0, 5.0, 6.0]],
@@ -233,18 +235,23 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             self._create_sampling_raster(),
             show_progress=False,
         )
+        analysis_configuration = replace(
+            self.analysis_configuration,
+            sampling=replace(
+                self.analysis_configuration.sampling,
+                block_size_meters=1_000_000_000,
+                samples_per_class_per_block=2,
+                random_seed=7,
+            ),
+        )
         first_sample = create_spatial_sample(
             raster,
-            block_size_meters=1_000_000_000.0,
-            samples_per_class_per_block=2,
-            random_seed=7,
+            analysis_configuration,
             show_progress=False,
         )
         second_sample = create_spatial_sample(
             raster,
-            block_size_meters=1_000_000_000.0,
-            samples_per_class_per_block=2,
-            random_seed=7,
+            analysis_configuration,
             show_progress=False,
         )
 
@@ -278,7 +285,7 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         )
         self.assertNotIn(
             "y2018_d01_grassland_reference_sites",
-            first_sample.predictor_band_names,
+            first_sample.sampled_band_names,
         )
 
     def test_preserves_missing_predictors_and_writes_parquet(self) -> None:
@@ -288,11 +295,18 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             self._create_sampling_raster(),
             show_progress=False,
         )
+        analysis_configuration = replace(
+            self.analysis_configuration,
+            sampling=replace(
+                self.analysis_configuration.sampling,
+                block_size_meters=1_000_000_000,
+                samples_per_class_per_block=100,
+                random_seed=42,
+            ),
+        )
         sample = create_spatial_sample(
             raster,
-            block_size_meters=1_000_000_000.0,
-            samples_per_class_per_block=100,
-            random_seed=42,
+            analysis_configuration,
             show_progress=False,
         )
         output_path = Path(self.temporary_directory.name) / "sample.parquet"
@@ -319,11 +333,18 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
             self._create_sampling_raster(),
             show_progress=False,
         )
+        analysis_configuration = replace(
+            self.analysis_configuration,
+            sampling=replace(
+                self.analysis_configuration.sampling,
+                block_size_meters=1_000_000_000,
+                samples_per_class_per_block=2,
+                random_seed=42,
+            ),
+        )
         sample = create_spatial_sample(
             raster,
-            block_size_meters=1_000_000_000.0,
-            samples_per_class_per_block=2,
-            random_seed=42,
+            analysis_configuration,
             show_progress=False,
         )
         output = io.StringIO()
@@ -337,8 +358,8 @@ class LoadEcoregionGeoTiffTest(unittest.TestCase):
         self.assertIn("Class sampling and weight checks", report)
         self.assertIn("0 non-reference", report)
         self.assertIn("1 reference", report)
-        self.assertIn("Sampled predictor coverage", report)
-        self.assertIn("Lowest-coverage predictor bands", report)
+        self.assertIn("Sampled raster-band coverage", report)
+        self.assertIn("Lowest-coverage raster data bands", report)
 
     @patch("scripts.load_ecoregion_geotiff.cfeature.LAND.with_scale")
     def test_creates_world_location_figure_without_network(

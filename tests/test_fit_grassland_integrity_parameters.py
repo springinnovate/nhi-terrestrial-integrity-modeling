@@ -7,6 +7,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +25,7 @@ from scripts.fit_grassland_integrity_parameters import (
     run_integrity_parameter_gams,
     summarize_response_coverage,
 )
+from scripts.analysis_config import load_analysis_configuration
 from scripts.reference_condition_utils import (
     SPATIAL_FOLD_COLORS,
     prepare_reference_condition_data,
@@ -39,7 +41,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.temporary_path = Path(self.temporary_directory.name)
-        self.configuration = IntegrityConfiguration(
+        self.integrity_configuration = IntegrityConfiguration(
             fold_count=5,
             sampling_block_size_meters=25_000,
             validation_block_size_meters=100_000,
@@ -48,6 +50,10 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             minimum_response_coverage=0.50,
             spline_knot_count=4,
             ridge_alpha=1.0,
+        )
+        self.analysis_configuration = replace(
+            load_analysis_configuration(),
+            display_name="Example",
         )
 
     def _create_sample_table(self) -> pd.DataFrame:
@@ -123,6 +129,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         resolved = resolve_response_names(
             sample_table.columns,
             ["d02", "11", "y2018_d18_response", "d02"],
+            self.analysis_configuration,
         )
 
         self.assertEqual(
@@ -151,7 +158,11 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         """Explain why unusable response bands are skipped."""
 
         sample_table = self._create_sample_table()
-        prepared = prepare_reference_condition_data(sample_table, self.configuration)
+        prepared = prepare_reference_condition_data(
+            sample_table,
+            self.integrity_configuration,
+            self.analysis_configuration,
+        )
         response_names = tuple(
             f"y2018_d{band_number:02d}_response" for band_number in range(2, 20)
         )
@@ -160,7 +171,8 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             prepared.table,
             response_names,
             response_names,
-            self.configuration,
+            self.integrity_configuration,
+            self.analysis_configuration,
         ).set_index("response_band")
 
         self.assertEqual("no_reference_values", coverage.loc["d05", "status"])
@@ -194,7 +206,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             create_observed_expected_figure(
                 scored_table,
                 response_metrics,
-                self.configuration,
+                self.integrity_configuration,
                 "Example Ecoregion",
                 self.temporary_path / "observed_vs_expected.png",
             )
@@ -228,7 +240,7 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             create_model_performance_figure(
                 response_metrics,
                 fold_metrics,
-                self.configuration,
+                self.integrity_configuration,
                 "Example Ecoregion",
                 self.temporary_path / "response_model_performance.png",
             )
@@ -253,7 +265,8 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
             summary = run_integrity_parameter_gams(
                 sample_path,
                 output_directory,
-                self.configuration,
+                self.integrity_configuration,
+                self.analysis_configuration,
                 requested_responses=("d02", "d11", "d17"),
                 show_progress=False,
                 create_partial_figures=True,
@@ -314,6 +327,14 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         self.assertEqual(
             "one regularized additive ridge regression per response",
             metadata["model"]["family"],
+        )
+        self.assertEqual(
+            self.analysis_configuration.configuration_sha256,
+            metadata["analysis_configuration"]["sha256"],
+        )
+        self.assertEqual(
+            self.analysis_configuration.configuration_sha256,
+            fitted_model["analysis_configuration_sha256"],
         )
         self.assertFalse(metadata["model"]["human_impact_predictors"])
         self.assertIn("Grassland ecological-response GAM validation", report.getvalue())

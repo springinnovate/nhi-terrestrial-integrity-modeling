@@ -14,40 +14,12 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Patch, Rectangle
 from pyproj import Transformer
 
+from .analysis_config import AnalysisConfiguration
 
-DEFAULT_SAMPLING_BLOCK_SIZE_METERS = 25_000
-DEFAULT_VALIDATION_BLOCK_SIZE_METERS = 100_000
-DEFAULT_FOLD_COUNT = 5
-DEFAULT_MINIMUM_PREDICTOR_COVERAGE = 0.80
-DEFAULT_MAXIMUM_ROW_MISSING_FRACTION = 0.20
-DEFAULT_SPLINE_KNOT_COUNT = 6
+
 FIGURE_DPI = 300
 EQUAL_AREA_CRS = "EPSG:8857"
 SPATIAL_FOLD_COLORS = tuple(plt.get_cmap("Set2").colors)
-ENVIRONMENTAL_BAND_PATTERN = re.compile(r"^y2018_d(2[0-9]|3[0-9])_")
-LANDFORM_BAND_NUMBER = 35
-PREDICTOR_DISPLAY_NAMES = {
-    20: "Maximum annual temperature (C)",
-    21: "Mean annual temperature (C)",
-    22: "Median annual temperature (C)",
-    23: "Minimum annual temperature (C)",
-    24: "Annual precipitation (mm)",
-    25: "Growing-season average temperature (C)",
-    26: "Growing-season average precipitation (mm/day)",
-    27: "Interannual rainfall variability (CV%, 10-year)",
-    28: "Drought mean (SPI 30-day)",
-    29: "Drought 5th percentile (SPI 30-day)",
-    30: "Fire frequency (burned months)",
-    31: "Annual variation in water presence",
-    32: "Distance to streams (m)",
-    33: "Soil organic carbon (10 cm, g/kg)",
-    34: "Soil moisture annual mean (GLDAS 10-40 cm)",
-    35: "Landform type (SRTM)",
-    36: "Topographic diversity (ALOS)",
-    37: "Annual evapotranspiration (MODIS ET, mm)",
-    38: "Average snow depth when present (GLDAS, m)",
-    39: "Average snow depth when present (SMAP, m)",
-}
 
 
 @dataclass(frozen=True)
@@ -65,12 +37,12 @@ class ReferenceConditionConfiguration:
         spline_knot_count: Number of knots for each continuous spline term.
     """
 
-    fold_count: int = DEFAULT_FOLD_COUNT
-    sampling_block_size_meters: int = DEFAULT_SAMPLING_BLOCK_SIZE_METERS
-    validation_block_size_meters: int = DEFAULT_VALIDATION_BLOCK_SIZE_METERS
-    minimum_predictor_coverage: float = DEFAULT_MINIMUM_PREDICTOR_COVERAGE
-    maximum_row_missing_fraction: float = DEFAULT_MAXIMUM_ROW_MISSING_FRACTION
-    spline_knot_count: int = DEFAULT_SPLINE_KNOT_COUNT
+    fold_count: int
+    sampling_block_size_meters: int
+    validation_block_size_meters: int
+    minimum_predictor_coverage: float
+    maximum_row_missing_fraction: float
+    spline_knot_count: int
 
 
 @dataclass(frozen=True)
@@ -294,6 +266,7 @@ def assign_spatial_folds(
 def prepare_reference_condition_data(
     sample_table: pd.DataFrame,
     configuration: ReferenceConditionConfiguration,
+    analysis_configuration: AnalysisConfiguration,
 ) -> PreparedReferenceConditionData:
     """Select environmental predictors and prepare spatial validation rows.
 
@@ -305,6 +278,7 @@ def prepare_reference_condition_data(
     Args:
         sample_table: Table produced by ``load_ecoregion_geotiff.py``.
         configuration: Coverage, missingness, and spatial-fold settings.
+        analysis_configuration: Configured predictor roles and data types.
 
     Returns:
         Prepared rows, folds, coverage diagnostics, and predictor names.
@@ -314,40 +288,49 @@ def prepare_reference_condition_data(
             predictor coverage threshold.
     """
 
-    predictor_band_numbers: dict[str, int] = {}
-    for column_name in sample_table.columns:
-        match = ENVIRONMENTAL_BAND_PATTERN.match(column_name)
-        if match:
-            predictor_band_numbers[column_name] = int(match.group(1))
-    ordered_predictor_names = tuple(
-        sorted(predictor_band_numbers, key=predictor_band_numbers.get)
+    predictor_columns_by_identifier = analysis_configuration.columns_with_role(
+        sample_table.columns,
+        "predictor",
     )
-    categorical_predictor_name = next(
-        name
-        for name, band_number in predictor_band_numbers.items()
-        if band_number == LANDFORM_BAND_NUMBER
+    ordered_predictor_names = tuple(predictor_columns_by_identifier.values())
+    categorical_predictor_identifier = next(
+        band.identifier
+        for band in analysis_configuration.bands
+        if band.role == "predictor" and band.data_type == "categorical"
     )
+    categorical_predictor_name = predictor_columns_by_identifier[
+        categorical_predictor_identifier
+    ]
+    predictor_band_numbers_by_name = {
+        column_name: int(identifier[1:])
+        for identifier, column_name in predictor_columns_by_identifier.items()
+    }
 
     total_represented_area = float(sample_table["area_weight_m2"].sum())
     coverage_records = []
     for predictor_name in ordered_predictor_names:
-        defined = sample_table[predictor_name].notna()
-        defined_area = float(sample_table.loc[defined, "area_weight_m2"].sum())
-        area_coverage = defined_area / total_represented_area
+        defined_row_mask = sample_table[predictor_name].notna()
+        defined_area_m2 = float(
+            sample_table.loc[defined_row_mask, "area_weight_m2"].sum()
+        )
+        represented_area_coverage = defined_area_m2 / total_represented_area
         coverage_records.append(
             {
                 "predictor": predictor_name,
-                "band_number": predictor_band_numbers[predictor_name],
+                "band_number": predictor_band_numbers_by_name[predictor_name],
                 "predictor_type": (
                     "categorical"
                     if predictor_name == categorical_predictor_name
                     else "continuous"
                 ),
-                "defined_rows": int(defined.sum()),
-                "row_coverage": float(defined.mean()),
-                "defined_area_m2": defined_area,
-                "area_coverage": area_coverage,
-                "retained": (area_coverage >= configuration.minimum_predictor_coverage),
+                "defined_rows": int(defined_row_mask.sum()),
+                "row_coverage": float(defined_row_mask.mean()),
+                "defined_area_m2": defined_area_m2,
+                "area_coverage": represented_area_coverage,
+                "retained": (
+                    represented_area_coverage
+                    >= configuration.minimum_predictor_coverage
+                ),
             }
         )
     predictor_coverage = pd.DataFrame.from_records(coverage_records)
