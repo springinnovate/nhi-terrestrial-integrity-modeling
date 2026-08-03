@@ -932,6 +932,9 @@ def assemble_spatial_sample(
                     * sampling_weight
                 )
 
+            # np.newaxis reshapes the band offsets to (bands, 1) and the paired
+            # row and column offsets to (1, pixels). NumPy then broadcasts these
+            # indices to return one (bands, pixels) matrix without a Python loop.
             sampled_band_values = tile_values[
                 np.asarray(sampling_scan.sampled_band_offsets)[:, np.newaxis],
                 local_rows[np.newaxis, :],
