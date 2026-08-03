@@ -654,6 +654,9 @@ def scan_cached_tiles(
                     for position in retained_positions
                 ]
                 previous_candidate_count = len(stratum_state.candidates)
+                # Python's built-in sorted ranks the retained dataclass objects;
+                # this is not a NumPy operation. The secondary keys make ties
+                # deterministic before the per-stratum cap is applied.
                 stratum_state.candidates = sorted(
                     [*stratum_state.candidates, *new_candidates],
                     key=lambda candidate: (
