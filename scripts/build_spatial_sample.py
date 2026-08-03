@@ -44,6 +44,8 @@ from .reference_condition_utils import EQUAL_AREA_CRS
 MEBIBYTE = 1024**2
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
+# Arrow schema metadata uses byte-string keys. This key stores the analysis,
+# cache, and sampling provenance that is verified after the Parquet write.
 PARQUET_PROVENANCE_KEY = b"nhi_spatial_sample_provenance"
 # The d01 reference label is binary: background pixels are 0 and reference
 # pixels are 1. Sampling and weight summaries treat those classes separately.
