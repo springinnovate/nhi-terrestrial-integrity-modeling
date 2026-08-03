@@ -721,7 +721,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             )
 
         self.assertEqual(19, summary.predicted_pixels)
-        self.assertTrue(worker_process_ids)
+        self.assertEqual(2, len(worker_process_ids))
         self.assertNotIn(os.getpid(), worker_process_ids)
 
     def test_writes_nodata_outside_exact_aoi(self) -> None:

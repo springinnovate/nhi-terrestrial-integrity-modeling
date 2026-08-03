@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import re
 import time
@@ -14,6 +15,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import joblib
 import numpy as np
@@ -2026,12 +2028,14 @@ def calculate_inference_tile(
     )
 
 
-def initialize_inference_worker(context: InferenceWorkerContext) -> None:
-    """Initialize one process with reusable models and one BLAS thread.
+def initialize_inference_worker(
+    context_path: Path,
+) -> None:
+    """Initialize one process from the shared model-context artifact.
 
     Args:
-        context: Models, calibration, AOI, and raster settings shared by every
-            tile assigned to this worker process.
+        context_path: Joblib artifact containing models, calibration, AOI, and
+            raster settings shared by every worker process.
 
     Returns:
         None: The context and numerical-library limit are process globals.
@@ -2039,7 +2043,7 @@ def initialize_inference_worker(context: InferenceWorkerContext) -> None:
 
     global _INFERENCE_WORKER_CONTEXT
     global _INFERENCE_NUMERICAL_THREAD_LIMIT
-    _INFERENCE_WORKER_CONTEXT = context
+    _INFERENCE_WORKER_CONTEXT = joblib.load(context_path, mmap_mode="r")
     # Tile-level processes provide the parallelism. Allowing NumPy or
     # scikit-learn to create another thread pool inside every process would
     # oversubscribe the machine and can make inference substantially slower.
@@ -2120,38 +2124,46 @@ def iter_calculated_inference_tiles(
         return
 
     tile_iterator = iter(cached_tiles)
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        initializer=initialize_inference_worker,
-        initargs=(worker_context,),
-    ) as executor:
-        pending_futures: set[Future[ComputedInferenceTile]] = set()
-        for _ in range(worker_count):
-            pending_futures.add(
-                executor.submit(
-                    calculate_inference_tile_in_worker,
-                    next(tile_iterator),
-                )
-            )
-
-        while pending_futures:
-            completed_futures, _ = wait(
-                tuple(pending_futures),
-                return_when=FIRST_COMPLETED,
-            )
-            for completed_future in completed_futures:
-                pending_futures.remove(completed_future)
-                yield completed_future.result()
-                try:
-                    cached_tile = next(tile_iterator)
-                except StopIteration:
-                    continue
+    process_context = multiprocessing.get_context("spawn")
+    with TemporaryDirectory(prefix="nhi-inference-workers-") as temporary_directory:
+        worker_context_path = Path(temporary_directory) / "worker_context.joblib"
+        # Windows spawn otherwise pickles the complete model context serially
+        # for every process. A shared, uncompressed artifact is written once;
+        # workers load its arrays read-only through Joblib memory mapping.
+        joblib.dump(worker_context, worker_context_path, compress=0)
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=process_context,
+            initializer=initialize_inference_worker,
+            initargs=(worker_context_path,),
+        ) as executor:
+            pending_futures: set[Future[ComputedInferenceTile]] = set()
+            for _ in range(worker_count):
                 pending_futures.add(
                     executor.submit(
                         calculate_inference_tile_in_worker,
-                        cached_tile,
+                        next(tile_iterator),
                     )
                 )
+
+            while pending_futures:
+                completed_futures, _ = wait(
+                    tuple(pending_futures),
+                    return_when=FIRST_COMPLETED,
+                )
+                for completed_future in completed_futures:
+                    pending_futures.remove(completed_future)
+                    yield completed_future.result()
+                    try:
+                        cached_tile = next(tile_iterator)
+                    except StopIteration:
+                        continue
+                    pending_futures.add(
+                        executor.submit(
+                            calculate_inference_tile_in_worker,
+                            cached_tile,
+                        )
+                    )
 
 
 def write_computed_inference_tile(
@@ -2532,6 +2544,7 @@ def write_inference_tiles(
         )
         newly_processed_tile_count = 0
         failed_tile_count = 0
+        utilized_worker_process_ids: set[int] = set()
         with tqdm(
             total=len(analysis_cache_tiles.tiles),
             initial=len(completed_tile_ids),
@@ -2542,6 +2555,7 @@ def write_inference_tiles(
         ) as tile_progress:
             tile_progress.set_postfix(
                 workers=active_worker_count,
+                processes=0,
                 cached=len(completed_tile_ids),
                 processed=0,
                 failed=0,
@@ -2569,6 +2583,9 @@ def write_inference_tiles(
                         worker_context,
                         active_worker_count,
                     ):
+                        utilized_worker_process_ids.add(
+                            computed_tile.worker_process_id
+                        )
                         write_computed_inference_tile(
                             computed_tile,
                             artifact_paths,
@@ -2594,6 +2611,7 @@ def write_inference_tiles(
                         tile_progress.update(1)
                         tile_progress.set_postfix(
                             workers=active_worker_count,
+                            processes=len(utilized_worker_process_ids),
                             cached=(
                                 len(completed_tile_ids)
                                 - newly_processed_tile_count
@@ -2605,6 +2623,7 @@ def write_inference_tiles(
                     failed_tile_count += 1
                     tile_progress.set_postfix(
                         workers=active_worker_count,
+                        processes=len(utilized_worker_process_ids),
                         cached=(
                             len(completed_tile_ids)
                             - newly_processed_tile_count

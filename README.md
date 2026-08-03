@@ -262,12 +262,15 @@ tiles because they do not change pixel values.
 
 When `inference.worker_count` is greater than one, tile calculations use a bounded
 process pool. Each worker process loads the reusable model context once, reads source
-and application-mask data, and calculates model outputs independently. Numerical
-libraries are limited to one internal thread per worker so tile-level parallelism
-does not oversubscribe the CPU. A worker count of one calculates in the parent process
-and avoids process-startup overhead. Stitched GeoTIFF writes and checkpoint updates
-stay in the parent process, and at most one completed result tile per worker is
-retained in memory.
+and application-mask data, and calculates model outputs independently. The parent
+serializes the context once to a temporary Joblib artifact, and workers memory-map
+that shared artifact instead of receiving a separate serialized model copy during
+Windows process startup. This lets all requested processes start promptly while early
+workers begin calculating tiles. Numerical libraries are limited to one internal
+thread per worker so tile-level parallelism does not oversubscribe the CPU. A worker
+count of one calculates in the parent process and avoids process-startup overhead.
+Stitched GeoTIFF writes and checkpoint updates stay in the parent process, and at most
+one completed result tile per worker is retained in memory.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized
