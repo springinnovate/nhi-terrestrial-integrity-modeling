@@ -41,7 +41,7 @@ from .raster_cache_utils import (
 from .reference_condition_utils import EQUAL_AREA_CRS
 
 
-MEBIBYTE = 1024**2
+BYTES_PER_MEBIBYTE = 1024**2
 LOCATION_FIGURE_DPI = 300
 # Arrow schema metadata uses byte-string keys. This key stores the analysis,
 # cache, and sampling provenance that is verified after the Parquet write.
@@ -1500,11 +1500,11 @@ def print_cache_scan_report(
     print(f"Validated cache tiles: {raster_summary.cache_tile_count:,}")
     print(
         "Compressed cache input: "
-        f"{raster_summary.cache_file_size_bytes / MEBIBYTE:,.2f} MiB"
+        f"{raster_summary.cache_file_size_bytes / BYTES_PER_MEBIBYTE:,.2f} MiB"
     )
     print(
         "Largest in-memory source tile: "
-        f"{raster_summary.peak_tile_array_bytes / MEBIBYTE:,.2f} MiB"
+        f"{raster_summary.peak_tile_array_bytes / BYTES_PER_MEBIBYTE:,.2f} MiB"
     )
     print(
         "Grid: "
@@ -1707,10 +1707,12 @@ def print_parquet_report(
     )
     print(f"Row groups: {parquet_summary.row_groups:,}")
     print(f"Compression: {parquet_summary.compression}")
-    print(f"In-memory table: {table_memory_bytes / MEBIBYTE:,.2f} MiB")
+    print(
+        f"In-memory table: {table_memory_bytes / BYTES_PER_MEBIBYTE:,.2f} MiB"
+    )
     print(
         "Compressed file: "
-        f"{parquet_summary.file_size_bytes / MEBIBYTE:,.2f} MiB"
+        f"{parquet_summary.file_size_bytes / BYTES_PER_MEBIBYTE:,.2f} MiB"
     )
     print(f"Write and verification: {parquet_summary.elapsed_seconds:,.2f} s")
 
