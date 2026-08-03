@@ -337,6 +337,9 @@ def _read_tile_values_and_validity(
     """
 
     with rasterio.open(cached_tile.path) as source:
+        # A masked read keeps the complete (bands, rows, columns) tile shape.
+        # The data buffer still contains every pixel; the separate Boolean mask
+        # identifies source nodata rather than removing those array positions.
         masked_values = source.read(masked=True)
         tile_values = np.asarray(np.ma.getdata(masked_values))
         source_mask = np.ma.getmaskarray(masked_values)
