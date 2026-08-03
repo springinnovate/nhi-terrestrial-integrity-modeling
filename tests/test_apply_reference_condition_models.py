@@ -8,6 +8,7 @@ import json
 import math
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,7 @@ from scripts.apply_reference_condition_models import (
     STATUS_OUTSIDE_TARGET,
     STATUS_PREDICTED,
     build_reference_departure_calibration,
+    calculate_inference_tile,
     load_response_models,
     parse_args,
     run_reference_condition_inference,
@@ -601,6 +603,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "Reference-condition raster inference",
             standard_output.getvalue(),
         )
+        self.assertEqual(4, metadata["configuration"]["worker_count"])
 
         resumed_output = io.StringIO()
         with (
@@ -614,7 +617,13 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             contextlib.redirect_stdout(resumed_output),
         ):
             resumed_summary = run_reference_condition_inference(
-                self.analysis_configuration,
+                replace(
+                    self.analysis_configuration,
+                    inference=replace(
+                        self.analysis_configuration.inference,
+                        worker_count=1,
+                    ),
+                ),
                 self.model_run_directory,
                 output_directory=output_directory,
                 show_progress=False,
@@ -627,6 +636,13 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         """Checkpoint the first tile and recompute only the interrupted tile."""
 
         output_directory = self.temporary_path / "interrupted_output"
+        single_worker_configuration = replace(
+            self.analysis_configuration,
+            inference=replace(
+                self.analysis_configuration.inference,
+                worker_count=1,
+            ),
+        )
         prediction_call_count = 0
 
         def interrupt_second_tile(model_bundle, predictor_table):
@@ -646,7 +662,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             self.assertRaises(ConnectionError),
         ):
             run_reference_condition_inference(
-                self.analysis_configuration,
+                single_worker_configuration,
                 self.model_run_directory,
                 output_directory=output_directory,
                 show_progress=False,
@@ -661,7 +677,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         resumed_output = io.StringIO()
         with contextlib.redirect_stdout(resumed_output):
             summary = run_reference_condition_inference(
-                self.analysis_configuration,
+                single_worker_configuration,
                 self.model_run_directory,
                 output_directory=output_directory,
                 show_progress=False,
@@ -669,6 +685,47 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             )
         self.assertEqual(19, summary.predicted_pixels)
         self.assertIn("1 resumed from checkpoint", resumed_output.getvalue())
+
+    def test_calculates_tiles_with_multiple_workers(self) -> None:
+        """Run separate source tiles concurrently without parallel writes."""
+
+        worker_barrier = threading.Barrier(2, timeout=10)
+        worker_names = set()
+        worker_names_lock = threading.Lock()
+
+        def record_worker(*args, **kwargs):
+            with worker_names_lock:
+                worker_names.add(threading.current_thread().name)
+            worker_barrier.wait()
+            return calculate_inference_tile(*args, **kwargs)
+
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "calculate_inference_tile",
+                side_effect=record_worker,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            summary = run_reference_condition_inference(
+                replace(
+                    self.analysis_configuration,
+                    inference=replace(
+                        self.analysis_configuration.inference,
+                        worker_count=2,
+                    ),
+                ),
+                self.model_run_directory,
+                output_directory=self.temporary_path / "parallel_output",
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+
+        self.assertEqual(19, summary.predicted_pixels)
+        self.assertEqual(2, len(worker_names))
+        self.assertTrue(
+            all(name.startswith("inference-tile") for name in worker_names)
+        )
 
     def test_writes_nodata_outside_exact_aoi(self) -> None:
         """Mask polygon holes even when cached tiles cover those pixels."""

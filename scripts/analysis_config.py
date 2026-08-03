@@ -142,11 +142,13 @@ class InferenceSettings:
 
     Attributes:
         application_mask_path: Optional resolved raster defining target pixels.
+        worker_count: Maximum cache tiles calculated concurrently.
         window_size_pixels: Width and height of each processing window.
         covariance_shrinkage: Reference covariance diagonal shrinkage fraction.
     """
 
     application_mask_path: Path | None
+    worker_count: int
     window_size_pixels: int
     covariance_shrinkage: float
 
@@ -379,6 +381,7 @@ def load_analysis_configuration(
         or int(model_section["validation_block_size_meters"]) <= 0
         or int(model_section["spline_knot_count"]) < 2
         or float(model_section["ridge_alpha"]) < 0
+        or int(inference_section["worker_count"]) <= 0
         or int(inference_section["window_size_pixels"]) <= 0
     ):
         raise ValueError("Analysis size, count, and penalty settings are invalid.")
@@ -549,6 +552,7 @@ def load_analysis_configuration(
                 if application_mask_path_value is not None
                 else None
             ),
+            worker_count=int(inference_section["worker_count"]),
             window_size_pixels=int(inference_section["window_size_pixels"]),
             covariance_shrinkage=float(
                 inference_section["covariance_shrinkage"]

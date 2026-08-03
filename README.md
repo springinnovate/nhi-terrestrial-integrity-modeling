@@ -254,8 +254,17 @@ fixed windows, and writes directly into stitched GeoTIFFs without loading the AO
 outputs into memory. The output grid is the smallest cache-aligned rectangle around
 the AOI; pixels outside the exact AOI are nodata. A fingerprinted checkpoint records
 a tile only after all five raster products are written, so rerunning after an
-interruption skips compatible completed tiles. Changing the TOML, source-tile bytes,
-models, or reference calibration invalidates that checkpoint.
+interruption skips compatible completed tiles. Changing raster-effective TOML values,
+covariance shrinkage, the AOI or mask, source-tile bytes, models, or reference
+calibration invalidates that checkpoint. Operational changes to
+`inference.worker_count` or `inference.window_size_pixels` retain compatible completed
+tiles because they do not change pixel values.
+
+Tile calculations use the bounded thread pool configured by
+`inference.worker_count`. Workers read source and application-mask data and calculate
+model outputs concurrently. Stitched GeoTIFF writes and checkpoint updates stay on
+the main thread, and at most one completed result tile per worker is retained in
+memory.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized

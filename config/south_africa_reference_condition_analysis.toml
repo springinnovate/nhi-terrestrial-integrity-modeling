@@ -741,6 +741,10 @@ responses = []
 #     to use every otherwise-eligible predictor-footprint pixel. Change it for a
 #     different assessment extent or mask year. CRS, resolution, grid, and extent
 #     may differ from the stack because nearest-neighbor alignment is windowed.
+#   worker_count: Maximum cache tiles calculated concurrently. Increase it when
+#     CPU and storage bandwidth are available; decrease it to reduce peak memory
+#     and concurrent reads. Each worker can retain one tile's five result arrays.
+#     GeoTIFF writes and checkpoint updates remain serialized for file safety.
 #   window_size_pixels: Width and height of each square processing window. The value
 #     256 processes at most 65,536 source pixels per window. Larger windows may
 #     improve sequential I/O but use more memory; smaller windows lower peak memory
@@ -756,5 +760,6 @@ responses = []
 #     not the individual expected-response or standardized-deviation rasters.
 [inference]
 application_mask_path = "../data/grassland_mask_2018.tif"
+worker_count = 4
 window_size_pixels = 256
 covariance_shrinkage = 0.10
