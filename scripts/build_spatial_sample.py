@@ -558,8 +558,10 @@ def scan_cached_tiles(
                 eligible_local_pixel_indices
             ].astype(np.uint8)
 
-            # SHA-256 converts the signed tile address and user seed into a
-            # stable NumPy seed without relying on process-randomized hash().
+            # Python's built-in hash is randomly salted for each process, so it
+            # would select different pixels on another run. SHA-256 combines the
+            # configured seed and tile address into a repeatable per-tile NumPy
+            # seed across processes and machines.
             tile_seed_material = (
                 f"{sampling_settings.random_seed}:{cached_tile.tile.tile_id}"
             ).encode("utf-8")
