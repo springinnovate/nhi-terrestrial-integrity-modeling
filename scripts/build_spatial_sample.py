@@ -80,6 +80,10 @@ class SamplingCandidate:
 class SamplingStratumState:
     """Accumulate one global sampling-block and reference-class stratum.
 
+    A stratum is the complete group of eligible pixels sharing one global
+    sampling block and one binary reference class. Its sampling cap and weight
+    are calculated independently from every other such group.
+
     Attributes:
         available_pixel_count: Eligible source pixels encountered in the stratum.
         available_area_m2: Eligible source area encountered in the stratum.
