@@ -417,6 +417,9 @@ def scan_cached_tiles(
     band_value_sums = np.zeros(band_count, dtype=np.float64)
     band_minimum_values = np.full(band_count, np.inf, dtype=np.float64)
     band_maximum_values = np.full(band_count, -np.inf, dtype=np.float64)
+    # Each dictionary key identifies one (global block column, global block row,
+    # reference class) stratum. Reusing that key merges counts and retained
+    # candidates when the same sampling group crosses cache-tile boundaries.
     strata: dict[tuple[int, int, int], SamplingStratumState] = {}
     aoi_pixel_count = 0
     any_band_defined_pixel_count = 0
