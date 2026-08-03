@@ -12,19 +12,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pyogrio
 from pyproj import Transformer
 from rasterio.io import MemoryFile
-from rasterio.transform import Affine
+from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
 from scripts import fetch_gee_raster_tiles
 from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
 from scripts.fetch_gee_raster_tiles import (
-    CacheTile,
-    build_stack_identifier,
     cache_aoi_tiles,
     fetch_tile_bytes,
+)
+from scripts.raster_cache_utils import (
+    CacheTile,
+    build_stack_identifier,
+    load_wgs84_aoi,
     select_intersecting_tiles,
 )
 
@@ -87,6 +91,85 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
             **changes,
         )
 
+    def test_loads_projected_single_layer_vector_aoi(self) -> None:
+        """Read and transform a one-layer GDAL-compatible AOI dataset."""
+
+        projected_geometry = box(0, 0, 2_000, 1_000)
+        geopackage_path = self.workspace / "projected_aoi.gpkg"
+        pyogrio.raw.write(
+            geopackage_path,
+            np.asarray([projected_geometry.wkb], dtype=object),
+            [],
+            [],
+            layer="analysis_aoi",
+            driver="GPKG",
+            geometry_type="Polygon",
+            crs=self.test_grid.crs,
+        )
+
+        loaded_aoi = load_wgs84_aoi(geopackage_path)
+        to_wgs84 = Transformer.from_crs(
+            self.test_grid.crs,
+            "EPSG:4326",
+            always_xy=True,
+        )
+        expected_aoi = transform(to_wgs84.transform, projected_geometry)
+
+        self.assertEqual("Polygon", loaded_aoi.geom_type)
+        for loaded_bound, expected_bound in zip(
+            loaded_aoi.bounds,
+            expected_aoi.bounds,
+            strict=True,
+        ):
+            self.assertAlmostEqual(expected_bound, loaded_bound, places=9)
+
+    def test_unions_multiple_features_in_one_aoi_layer(self) -> None:
+        """Combine every geometry in the configured AOI layer."""
+
+        projected_geometries = (
+            box(0, 0, 1_000, 1_000),
+            box(2_000, 0, 3_000, 1_000),
+        )
+        geopackage_path = self.workspace / "multiple_aoi_features.gpkg"
+        pyogrio.raw.write(
+            geopackage_path,
+            np.asarray(
+                [geometry.wkb for geometry in projected_geometries],
+                dtype=object,
+            ),
+            [],
+            [],
+            layer="analysis_aoi",
+            driver="GPKG",
+            geometry_type="Polygon",
+            crs=self.test_grid.crs,
+        )
+
+        loaded_aoi = load_wgs84_aoi(geopackage_path)
+
+        self.assertEqual("MultiPolygon", loaded_aoi.geom_type)
+        self.assertEqual(2, len(loaded_aoi.geoms))
+
+    def test_rejects_multilayer_vector_aoi(self) -> None:
+        """Require one unambiguous AOI layer in a vector dataset."""
+
+        geopackage_path = self.workspace / "multiple_aoi_layers.gpkg"
+        for layer_name, minimum_x in (("first", 0), ("second", 2_000)):
+            layer_geometry = box(minimum_x, 0, minimum_x + 1_000, 1_000)
+            pyogrio.raw.write(
+                geopackage_path,
+                np.asarray([layer_geometry.wkb], dtype=object),
+                [],
+                [],
+                layer=layer_name,
+                driver="GPKG",
+                geometry_type="Polygon",
+                crs=self.test_grid.crs,
+            )
+
+        with self.assertRaisesRegex(ValueError, "exactly one layer; found 2"):
+            load_wgs84_aoi(geopackage_path)
+
     @staticmethod
     def create_tile_bytes(
         raster_stack,
@@ -107,13 +190,11 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         """
 
         del raster_stack
-        transform_matrix = Affine(
-            cache_grid.pixel_size_meters,
-            0,
+        transform_matrix = from_origin(
             tile.left,
-            0,
-            -cache_grid.pixel_size_meters,
             tile.top,
+            cache_grid.pixel_size_meters,
+            cache_grid.pixel_size_meters,
         )
         with MemoryFile() as memory_file:
             with memory_file.open(

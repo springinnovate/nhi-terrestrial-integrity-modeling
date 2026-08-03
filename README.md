@@ -35,10 +35,12 @@ suffix, display name, pipeline role (`reference`, `response`, or `predictor`), d
 type, and source aliases. Python still implements calculations such as phenology and
 growing-season aggregation; TOML selects and orders those implementations.
 
-The TOML-defined AOI is a general-purpose WGS84 polygon or multipolygon and is the
-only project boundary used to select cache tiles. Edge tiles are stored in full so
-later overlapping AOIs can reuse them. The `d01` reference criteria are evaluated
-without a possible-grassland ecoregion boundary, and no project boundary masks the
+The TOML-defined AOI may be a GeoJSON, GeoPackage, Shapefile, or another
+GDAL-readable vector dataset. It must contain exactly one polygonal layer with a
+defined CRS; the loader transforms that layer to WGS84. This AOI is the only project
+boundary used to select cache tiles. Edge tiles are stored in full so later
+overlapping AOIs can reuse them. The `d01` reference criteria are evaluated without a
+possible-grassland ecoregion boundary, and no project boundary masks the
 ecological-response or environmental bands in `d02-d39`. Exact AOI clipping can be
 applied when cached tiles are assembled without changing the shared cache contents.
 
@@ -71,62 +73,58 @@ analysis is run again. `computePixels` requests are interactive calls rather tha
 persistent Earth Engine batch tasks, so an in-flight request cannot be recovered
 after the process restarts.
 
-## Load one ecoregion GeoTIFF
+## Build a spatial sample from cached tiles
 
-Load every band and pixel from one multiband ecoregion export into memory and print
-raster metadata, memory use, defined-pixel coverage, approximate defined area, and
-per-band descriptive statistics. The same run creates a spatially balanced Parquet
-sample in `outputs/samples` and a 300 DPI world locator map in `outputs/figures`:
+After fetching the analysis, build its model-ready sample directly from the validated
+Earth Engine tile cache:
 
 ```powershell
-python -m scripts.load_ecoregion_geotiff `
-  config\south_africa_reference_condition_analysis.toml `
-  data\raster_stacks\example.tif
+python -m scripts.build_spatial_sample `
+  config\south_africa_reference_condition_analysis.toml
 ```
 
-The importable `RasterPixelData` object retains a value cube and a separate per-band
-validity cube with shape `(bands, rows, columns)`. Its `pixel_values()` and
-`pixel_validity()` methods expose pixel-by-band views for later stratification without
-copying the arrays. Use `--no-band-report` for only the dataset-level summary or
-`--no-progress` to suppress tqdm output. The first map run may download Cartopy's
-Natural Earth 1:110 million land geometry.
+The TOML is the only scientific input. It identifies the AOI, cache directory,
+raster-effective stack, globally anchored grid, ordered band schema, reference band,
+sampling-block size, per-class cap, and random seed. The sampler recomputes the AOI's
+required tile addresses, verifies each manifest entry, checksum, grid, transform, and
+band description, and stops with a fetch/resume command if the cache is incomplete.
+An unrelated one-band mask therefore cannot be mistaken for the multiband stack.
 
-The spatial sample uses the first band assigned the TOML `reference` role as a binary
-class, with `1` representing a reference site and `0` representing a non-reference
-site. Copies of that reference band from additional years are excluded from the
-predictor table. Eligible pixels are assigned to analysis-defined square blocks in an
-equal-area coordinate system, then the configured maximum number of pixels from each
-reference-site class are selected independently from every block. The table records
-source coordinates, block IDs, pixel area, sampling probabilities, sampling weights,
-area weights, and every non-reference raster band. Missing predictor values remain
-missing.
+Tiles are read one at a time. Edge tiles are clipped to pixel centers inside the
+configured AOI, and no AOI-sized value or validity cube is allocated. A first pass
+counts source populations and assigns every eligible pixel a deterministic seeded
+priority. The lowest priorities are retained for each global sampling-block and
+reference-class combination. This merge is global, so a 25 km sampling block crossing
+one or more 64 km cache-tile boundaries still receives only one configured per-class
+cap. A second pass rereads only tiles containing retained candidates and extracts
+their raster values.
 
-Sampling is reproducible with the seed in the analysis TOML. The Parquet destination
-remains an operational command-line option:
+The sample uses the band assigned the TOML `reference` role as a binary class, with
+`1` representing a reference site and every other eligible pixel representing
+background. The table records globally stable grid coordinates, cache-tile and block
+IDs, longitude, latitude, pixel area, sampling probabilities, sampling weights, area
+weights, and every non-reference raster band. Missing values remain missing. The
+compressed Parquet schema embeds the analysis hashes, stack identifier, cache
+manifest, tile-set fingerprint, and sampling settings.
+
+By default, the command writes
+`outputs/samples/<analysis-name>_spatial_sample.parquet` and a 300 DPI AOI locator map
+to `outputs/figures/<analysis-name>_world_location.png`. Output destinations remain
+operational options:
 
 ```powershell
-python -m scripts.load_ecoregion_geotiff `
+python -m scripts.build_spatial_sample `
   config\south_africa_reference_condition_analysis.toml `
-  data\raster_stacks\example.tif `
-  --sample-output outputs\samples\example.parquet
+  --sample-output outputs\samples\south_africa.parquet `
+  --location-figure outputs\figures\south_africa.png
 ```
 
-The command prints progress bars plus class counts and areas, block occupancy,
-retention rates, weight reconstruction checks, predictor missingness, and verified
-Parquet metadata. Use `--no-sampling` when only the raster report and location figure
-are needed.
-
-The map label comes from `analysis.display_name`. Supply an explicit PNG, PDF, or SVG
-path when vector output or a different destination is needed:
-
-```powershell
-python -m scripts.load_ecoregion_geotiff `
-  config\south_africa_reference_condition_analysis.toml `
-  data\raster_stacks\example.tif `
-  --location-figure outputs\figures\northern_shortgrass_prairie.svg
-```
-
-Use `--no-location-figure` when only the in-memory data and text report are needed.
+Validation, scanning, selected-pixel extraction, Parquet writing, and figure creation
+have separate tqdm stages. Reports include cache size, the largest source-tile memory
+allocation, AOI and band coverage, retained class counts, represented area, block
+occupancy, weight reconstruction, missingness, and verified Parquet metadata. Use
+`--no-band-report`, `--no-location-figure`, or `--no-progress` to suppress optional
+output.
 
 ## Convert a numeric raster to a binary mask
 
@@ -182,7 +180,7 @@ predictors.
 ```powershell
 python -m scripts.fit_grassland_integrity_parameters `
   config\south_africa_reference_condition_analysis.toml `
-  outputs\samples\example_spatial_sample.parquet
+  outputs\samples\south_africa_reference_condition_2018_spatial_sample.parquet
 ```
 
 The model-run metadata and each serialized model record the analysis identity, year,
@@ -238,8 +236,8 @@ display name live only in the analysis TOML rather than being repeated as CLI op
 
 Shared reference-condition preparation lives in
 `scripts/reference_condition_utils.py`. It is an imported library module rather than a
-runnable command. The GeoTIFF loader and response-model script use it for consistent
-ecoregion naming, equal-area spatial configuration, predictor screening, fold
+runnable command. The cache-backed sampler and response-model script use it for
+consistent analysis naming, equal-area spatial configuration, predictor screening, fold
 assignment, training-only imputation, weighted quantiles, and spatial-fold figures.
 
 ## Apply reference-condition models to a raster
@@ -251,7 +249,7 @@ ecoregion raster stack:
 python -m scripts.apply_reference_condition_models `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
-  outputs\integrity_parameters\example_spatial_sample
+  outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 ```
 
 The command processes fixed raster windows rather than loading all inference products
@@ -334,7 +332,7 @@ other values, nodata, and pixels outside the mask extent are excluded:
 python -m scripts.apply_reference_condition_models `
   config\south_africa_reference_condition_analysis.toml `
   data\raster_stacks\example.tif `
-  outputs\integrity_parameters\example_spatial_sample
+  outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 ```
 
 Without `inference.application_mask_path`, the script infers across the usable

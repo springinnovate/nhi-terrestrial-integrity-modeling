@@ -14,18 +14,17 @@
 #   python -m scripts.fetch_gee_raster_tiles `
 #     config\south_africa_reference_condition_analysis.toml
 #
-#   python -m scripts.load_ecoregion_geotiff `
-#     config\south_africa_reference_condition_analysis.toml `
-#     data\raster_stacks\example.tif
+#   python -m scripts.build_spatial_sample `
+#     config\south_africa_reference_condition_analysis.toml
 #
 #   python -m scripts.fit_grassland_integrity_parameters `
 #     config\south_africa_reference_condition_analysis.toml `
-#     outputs\samples\example_spatial_sample.parquet
+#     outputs\samples\south_africa_reference_condition_2018_spatial_sample.parquet
 #
 #   python -m scripts.apply_reference_condition_models `
 #     config\south_africa_reference_condition_analysis.toml `
 #     data\raster_stacks\example.tif `
-#     outputs\integrity_parameters\example_spatial_sample
+#     outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 #
 # Data that goes into the pipeline:
 #
@@ -44,10 +43,11 @@
 # Earth Engine evaluates every configured layer on the common output [grid], which
 # gives every band the same CRS, pixel size, tile dimensions, and alignment.
 #
-# The fetch command writes these reusable multiband tiles and a cache manifest. It
-# does not currently mosaic them into the single multiband GeoTIFF consumed by the
-# remaining commands. That GeoTIFF must follow the same ordered [[bands]] contract,
-# including its band descriptions.
+# The fetch command writes these reusable multiband tiles and a cache manifest.
+# build_spatial_sample reads that cache directly, clips every edge tile to this
+# analysis's AOI, and processes one tile at a time. It does not require or create a
+# monolithic AOI GeoTIFF. Raster inference currently still accepts a separately
+# assembled multiband GeoTIFF following the same ordered [[bands]] contract.
 #
 # In this project, dNN means "data layer NN," not "physical band NN." The stable
 # data-layer ID follows a variable into sample columns, model artifacts, reports,
@@ -80,9 +80,11 @@
 #     raster band or alter Earth Engine pixel calculations.
 #   display_name: Human-readable label for reports and figures. Change it for the
 #     audience; it does not alter fetched pixels.
-#   aoi_path: WGS84 Polygon or MultiPolygon GeoJSON, resolved relative to this file.
-#     It selects complete Earth Engine cache tiles. It does not identify an
-#     ecoregion or decide which pixels receive inference.
+#   aoi_path: Polygon or MultiPolygon in any single-layer GDAL-readable vector
+#     dataset, such as GeoJSON, GeoPackage, or Shapefile. The layer must define
+#     its CRS and the path is resolved relative to this file. It selects complete
+#     Earth Engine cache tiles; it does not identify an ecoregion or decide which
+#     pixels receive inference.
 #   year: Calendar year used for d02-d39. d01 instead uses the reference period in
 #     [stack]. The year must fall between minimum_year and maximum_year.
 #
@@ -644,9 +646,11 @@ sources = ["smap"]
 # -----------------------------------------------------------------------------
 # Spatial sampling
 # -----------------------------------------------------------------------------
-# Used by load_ecoregion_geotiff.py when it creates the Parquet sample. Pixels are
-# grouped into square blocks, then up to samples_per_class_per_block are retained
-# separately for reference (d01=1) and background (d01=0) pixels in each block.
+# Used by build_spatial_sample.py when it creates the Parquet sample directly from
+# the validated Earth Engine tile cache. Pixels are grouped into globally anchored
+# square blocks, then up to samples_per_class_per_block are retained separately for
+# reference (d01=1) and background (not selected by d01) pixels in each block. The
+# cap applies once even when a sampling block crosses cache-tile boundaries.
 #
 # Change this section to trade spatial representation and class balance against
 # sample-table size and model runtime. It changes which rows are sampled but does not
