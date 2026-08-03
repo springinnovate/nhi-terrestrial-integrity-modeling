@@ -505,10 +505,16 @@ def scan_cached_tiles(
                     sampled_band_offset
                 ]
             sampled_data_footprint &= aoi_pixel_mask
+            # Validity excludes masked/nodata cells; equality assigns the
+            # reference class. Both are required because a masked cell's hidden
+            # data-buffer value can still happen to equal the reference code.
             reference_site_mask = (
                 aoi_pixel_mask
                 & tile_validity[reference_band_offset]
-                & (tile_values[reference_band_offset] == 1)
+                & (
+                    tile_values[reference_band_offset]
+                    == REFERENCE_SITE_CLASS
+                )
             )
             excluded_reference_pixel_count += int(
                 np.count_nonzero(reference_site_mask & ~sampled_data_footprint)
