@@ -825,6 +825,8 @@ def assemble_spatial_sample(
         "sampling_weight": np.empty(sampled_row_count, dtype=np.float64),
         "area_weight_m2": np.empty(sampled_row_count, dtype=np.float64),
     }
+    # Start raster-data columns as NaN so a selected source pixel that is
+    # masked/nodata in a particular band remains missing in the sample table.
     for sampled_band_name in sampling_scan.sampled_band_names:
         table_columns[sampled_band_name] = np.full(
             sampled_row_count,
