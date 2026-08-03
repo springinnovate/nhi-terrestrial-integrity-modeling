@@ -22,6 +22,9 @@ from tqdm.auto import tqdm
 from .analysis_config import AnalysisConfiguration, RasterCacheGrid
 
 
+# Increment this when the manifest's JSON structure or interpretation changes.
+# Readers reject another version instead of silently reusing incompatible cache
+# records or assigning the wrong metadata to existing raster tiles.
 MANIFEST_SCHEMA_VERSION = 1
 
 
