@@ -59,7 +59,6 @@ class SamplingCandidate:
 
     Attributes:
         tile_sequence: Position of the source tile in deterministic AOI order.
-        tile_id: Stable global cache-tile identifier.
         local_pixel_index: Row-major pixel position inside the cache tile.
         sampling_block_column: Global equal-area sampling-block column.
         sampling_block_row: Global equal-area sampling-block row.
@@ -68,7 +67,6 @@ class SamplingCandidate:
     """
 
     tile_sequence: int
-    tile_id: str
     local_pixel_index: int
     sampling_block_column: int
     sampling_block_row: int
@@ -85,13 +83,12 @@ class SamplingStratumState:
     are calculated independently from every other such group.
 
     Attributes:
-        available_pixel_count: Eligible source pixels encountered in the stratum.
-        available_area_m2: Eligible source area encountered in the stratum.
+        available_pixel_count: Eligible source pixels encountered in the
+            stratum.
         candidates: Lowest-priority pixels retained up to the configured cap.
     """
 
     available_pixel_count: int = 0
-    available_area_m2: float = 0.0
     candidates: list[SamplingCandidate] = field(default_factory=list)
 
 
@@ -532,15 +529,13 @@ def scan_cached_tiles(
             tile_height, tile_width = sampled_data_footprint.shape
             local_rows = eligible_local_pixel_indices // tile_width
             local_columns = eligible_local_pixel_indices % tile_width
-            projected_x = (
-                tile_transform.c
-                + (local_columns.astype(np.float64) + 0.5) * tile_transform.a
-                + (local_rows.astype(np.float64) + 0.5) * tile_transform.b
-            )
-            projected_y = (
-                tile_transform.f
-                + (local_columns.astype(np.float64) + 0.5) * tile_transform.d
-                + (local_rows.astype(np.float64) + 0.5) * tile_transform.e
+            # Rasterio applies the complete affine transform at each pixel
+            # center, including rotation or shear terms when present.
+            projected_x, projected_y = rasterio.transform.xy(
+                tile_transform,
+                local_rows,
+                local_columns,
+                offset="center",
             )
             equal_area_x, equal_area_y = cache_to_equal_area.transform(
                 projected_x,
@@ -622,9 +617,6 @@ def scan_cached_tiles(
                     SamplingStratumState(),
                 )
                 stratum_state.available_pixel_count += available_in_tile
-                stratum_state.available_area_m2 += (
-                    available_in_tile * pixel_area_m2
-                )
                 retained_from_tile = min(
                     sampling_settings.samples_per_class_per_block,
                     available_in_tile,
@@ -642,7 +634,6 @@ def scan_cached_tiles(
                 new_candidates = [
                     SamplingCandidate(
                         tile_sequence=tile_sequence,
-                        tile_id=cached_tile.tile.tile_id,
                         local_pixel_index=int(
                             eligible_local_pixel_indices[position]
                         ),
@@ -669,10 +660,14 @@ def scan_cached_tiles(
                     len(stratum_state.candidates) - previous_candidate_count
                 )
                 retained_candidate_count += retained_candidate_delta
-                if stratum_key[2] == 1:
-                    retained_reference_candidate_count += retained_candidate_delta
+                if stratum_key[2] == REFERENCE_SITE_CLASS:
+                    retained_reference_candidate_count += (
+                        retained_candidate_delta
+                    )
                 else:
-                    retained_background_candidate_count += retained_candidate_delta
+                    retained_background_candidate_count += (
+                        retained_candidate_delta
+                    )
 
             tile_progress.set_postfix(
                 aoi=f"{aoi_pixel_count:,}",
@@ -881,19 +876,13 @@ def assemble_spatial_sample(
             tile_width = tile_values.shape[2]
             local_rows = local_pixel_indices // tile_width
             local_columns = local_pixel_indices % tile_width
-            # Candidate addresses are tile-local row and column indices. Apply
-            # the tile's affine transform at each pixel center to recover cache-
-            # CRS coordinates, which are then converted to the longitude and
-            # latitude stored with each sampled row.
-            projected_x = (
-                tile_transform.c
-                + (local_columns.astype(np.float64) + 0.5) * tile_transform.a
-                + (local_rows.astype(np.float64) + 0.5) * tile_transform.b
-            )
-            projected_y = (
-                tile_transform.f
-                + (local_columns.astype(np.float64) + 0.5) * tile_transform.d
-                + (local_rows.astype(np.float64) + 0.5) * tile_transform.e
+            # Convert tile-local addresses to cache-CRS pixel centers before
+            # transforming the selected coordinates to longitude and latitude.
+            projected_x, projected_y = rasterio.transform.xy(
+                tile_transform,
+                local_rows,
+                local_columns,
+                offset="center",
             )
             longitudes, latitudes = geographic_transformer.transform(
                 projected_x,
@@ -956,18 +945,19 @@ def assemble_spatial_sample(
                     * sampling_weight
                 )
 
-            # np.newaxis reshapes the band offsets to (bands, 1) and the paired
-            # row and column offsets to (1, pixels). NumPy then broadcasts these
-            # indices to return one (bands, pixels) matrix without a Python loop.
-            sampled_band_values = tile_values[
+            # np.newaxis reshapes band offsets to (bands, 1) and pixel offsets
+            # to (1, pixels). NumPy broadcasts the shared index tuple into one
+            # (bands, pixels) matrix for both values and validity flags.
+            sampled_band_pixel_indices = (
                 np.asarray(sampling_scan.sampled_band_offsets)[:, np.newaxis],
                 local_rows[np.newaxis, :],
                 local_columns[np.newaxis, :],
+            )
+            sampled_band_values = tile_values[
+                sampled_band_pixel_indices
             ].astype(np.float64)
             sampled_band_validity = tile_validity[
-                np.asarray(sampling_scan.sampled_band_offsets)[:, np.newaxis],
-                local_rows[np.newaxis, :],
-                local_columns[np.newaxis, :],
+                sampled_band_pixel_indices
             ]
             sampled_band_values[~sampled_band_validity] = np.nan
             for sampled_band_offset, sampled_band_name in enumerate(
@@ -1006,17 +996,20 @@ def assemble_spatial_sample(
             / len(stratum_state.candidates)
             for stratum_state in class_strata
         ]
+        class_available_pixel_count = sum(
+            stratum_state.available_pixel_count
+            for stratum_state in class_strata
+        )
         class_summaries.append(
             SamplingClassSummary(
                 reference_site_class=reference_site_class,
-                available_pixels=sum(
-                    stratum.available_pixel_count for stratum in class_strata
-                ),
+                available_pixels=class_available_pixel_count,
                 sampled_pixels=sum(
                     len(stratum.candidates) for stratum in class_strata
                 ),
-                available_area_m2=sum(
-                    stratum.available_area_m2 for stratum in class_strata
+                available_area_m2=(
+                    class_available_pixel_count
+                    * sampling_scan.raster_summary.pixel_area_m2
                 ),
                 weighted_pixels=float(
                     sum(
