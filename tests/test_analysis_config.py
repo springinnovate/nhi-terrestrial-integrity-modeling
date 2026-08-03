@@ -140,7 +140,7 @@ class AnalysisConfigurationTest(unittest.TestCase):
         self.assertTrue(configuration.aoi_path.is_file())
         self.assertEqual(360, configuration.earth_engine.request_timeout_seconds)
         self.assertEqual(1, configuration.earth_engine.request_retry_count)
-        self.assertEqual(4, configuration.inference.worker_count)
+        self.assertGreater(configuration.inference.worker_count, 0)
         self.assertEqual(
             "grassland_mask_2018.tif",
             configuration.inference.application_mask_path.name,

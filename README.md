@@ -260,11 +260,14 @@ calibration invalidates that checkpoint. Operational changes to
 `inference.worker_count` or `inference.window_size_pixels` retain compatible completed
 tiles because they do not change pixel values.
 
-Tile calculations use the bounded thread pool configured by
-`inference.worker_count`. Workers read source and application-mask data and calculate
-model outputs concurrently. Stitched GeoTIFF writes and checkpoint updates stay on
-the main thread, and at most one completed result tile per worker is retained in
-memory.
+When `inference.worker_count` is greater than one, tile calculations use a bounded
+process pool. Each worker process loads the reusable model context once, reads source
+and application-mask data, and calculates model outputs independently. Numerical
+libraries are limited to one internal thread per worker so tile-level parallelism
+does not oversubscribe the CPU. A worker count of one calculates in the parent process
+and avoids process-startup overhead. Stitched GeoTIFF writes and checkpoint updates
+stay in the parent process, and at most one completed result tile per worker is
+retained in memory.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized

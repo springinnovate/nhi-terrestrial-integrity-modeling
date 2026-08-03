@@ -9,6 +9,7 @@ matplotlib>=3.8
 cartopy>=0.24
 tqdm>=4.66
 joblib>=1.4
+threadpoolctl>=3.4
 earthengine-api>=1.7
 httplib2>=0.22
 shapely>=2.0

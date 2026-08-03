@@ -9,10 +9,10 @@ import math
 import os
 import re
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import ExitStack
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 import joblib
@@ -32,6 +32,8 @@ from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window, transform as window_transform
 from shapely.geometry import mapping
+from shapely.geometry.base import BaseGeometry
+from threadpoolctl import threadpool_limits
 from tqdm.auto import tqdm
 
 from .analysis_config import AnalysisConfiguration, load_analysis_configuration
@@ -522,10 +524,50 @@ class InferenceWindowResult:
 
 @dataclass(frozen=True)
 class ComputedInferenceTile:
-    """Hold one cache tile's calculated windows until serialized output."""
+    """Hold one cache tile's calculated windows until serialized output.
+
+    Attributes:
+        tile_id: Stable cache-grid tile identifier.
+        windows: Calculated output arrays and destination windows.
+        worker_process_id: Operating-system process that calculated the tile.
+    """
 
     tile_id: str
     windows: tuple[InferenceWindowResult, ...]
+    worker_process_id: int
+
+
+@dataclass(frozen=True)
+class InferenceWorkerContext:
+    """Immutable model and raster context initialized once in each worker.
+
+    Attributes:
+        application_mask_path: Optional raster selecting inference pixels.
+        window_size_pixels: Maximum processing-window width and height.
+        projected_aoi: Analysis AOI transformed to the cache-grid CRS.
+        output_grid: Stitched output dimensions and tile placement.
+        required_band_indices: Ordered one-based source raster bands to read.
+        predictor_names: Ordered predictor columns expected by the models.
+        response_models: Fitted ecological-response model bundles.
+        reference_calibration: Reference distribution for percentiles.
+        maximum_predictor_missing_fraction: Allowed predictor missingness.
+        reference_band_offset: Reference layer offset in each source read.
+    """
+
+    application_mask_path: Path | None
+    window_size_pixels: int
+    projected_aoi: BaseGeometry
+    output_grid: InferenceOutputGrid
+    required_band_indices: tuple[int, ...]
+    predictor_names: tuple[str, ...]
+    response_models: tuple[ResponseModel, ...]
+    reference_calibration: ReferenceDepartureCalibration
+    maximum_predictor_missing_fraction: float
+    reference_band_offset: int
+
+
+_INFERENCE_WORKER_CONTEXT: InferenceWorkerContext | None = None
+_INFERENCE_NUMERICAL_THREAD_LIMIT = None
 
 
 def build_inference_output_grid(
@@ -1744,8 +1786,9 @@ def output_artifacts_are_compatible(
 
 def calculate_inference_tile(
     cached_tile: CachedRasterTile,
-    analysis_configuration: AnalysisConfiguration,
-    analysis_cache_tiles: AnalysisCacheTiles,
+    application_mask_path: Path | None,
+    window_size_pixels: int,
+    projected_aoi: BaseGeometry,
     output_grid: InferenceOutputGrid,
     required_band_indices: tuple[int, ...],
     predictor_names: tuple[str, ...],
@@ -1758,8 +1801,9 @@ def calculate_inference_tile(
 
     Args:
         cached_tile: Validated multiband source tile.
-        analysis_configuration: AOI, mask, and inference settings.
-        analysis_cache_tiles: Projected AOI geometry and cache identity.
+        application_mask_path: Optional raster selecting inference pixels.
+        window_size_pixels: Maximum width and height processed at once.
+        projected_aoi: Analysis AOI transformed to the cache-grid CRS.
         output_grid: Stitched output placement.
         required_band_indices: Ordered source bands to read.
         predictor_names: Ordered model predictor names.
@@ -1777,7 +1821,6 @@ def calculate_inference_tile(
 
     predictor_count = len(predictor_names)
     calculated_windows = []
-    application_mask_path = analysis_configuration.inference.application_mask_path
     with ExitStack() as stack:
         tile_source = stack.enter_context(rasterio.open(cached_tile.path))
         if application_mask_path is None:
@@ -1800,7 +1843,7 @@ def calculate_inference_tile(
         for source_window, destination_window in iter_cached_tile_windows(
             cached_tile,
             output_grid,
-            analysis_configuration.inference.window_size_pixels,
+            window_size_pixels,
         ):
             masked_window_values = tile_source.read(
                 required_band_indices,
@@ -1820,7 +1863,7 @@ def calculate_inference_tile(
                 int(destination_window.width),
             )
             aoi_pixel_mask = geometry_mask(
-                [mapping(analysis_cache_tiles.projected_aoi)],
+                [mapping(projected_aoi)],
                 out_shape=window_shape,
                 transform=window_transform(
                     destination_window,
@@ -1979,7 +2022,136 @@ def calculate_inference_tile(
     return ComputedInferenceTile(
         tile_id=cached_tile.tile.tile_id,
         windows=tuple(calculated_windows),
+        worker_process_id=os.getpid(),
     )
+
+
+def initialize_inference_worker(context: InferenceWorkerContext) -> None:
+    """Initialize one process with reusable models and one BLAS thread.
+
+    Args:
+        context: Models, calibration, AOI, and raster settings shared by every
+            tile assigned to this worker process.
+
+    Returns:
+        None: The context and numerical-library limit are process globals.
+    """
+
+    global _INFERENCE_WORKER_CONTEXT
+    global _INFERENCE_NUMERICAL_THREAD_LIMIT
+    _INFERENCE_WORKER_CONTEXT = context
+    # Tile-level processes provide the parallelism. Allowing NumPy or
+    # scikit-learn to create another thread pool inside every process would
+    # oversubscribe the machine and can make inference substantially slower.
+    _INFERENCE_NUMERICAL_THREAD_LIMIT = threadpool_limits(limits=1)
+
+
+def calculate_inference_tile_in_worker(
+    cached_tile: CachedRasterTile,
+) -> ComputedInferenceTile:
+    """Calculate one tile using the process-global initialized context.
+
+    Args:
+        cached_tile: Validated multiband source tile assigned to this process.
+
+    Returns:
+        Calculated tile arrays returned to the parent process for writing.
+    """
+
+    context = _INFERENCE_WORKER_CONTEXT
+    if context is None:
+        raise RuntimeError("Inference worker context was not initialized.")
+    return calculate_inference_tile_from_context(cached_tile, context)
+
+
+def calculate_inference_tile_from_context(
+    cached_tile: CachedRasterTile,
+    context: InferenceWorkerContext,
+) -> ComputedInferenceTile:
+    """Apply a reusable worker context to one source tile.
+
+    Args:
+        cached_tile: Validated multiband source tile.
+        context: Models, calibration, AOI, and raster calculation settings.
+
+    Returns:
+        Calculated tile arrays ready for serialized output.
+    """
+
+    return calculate_inference_tile(
+        cached_tile,
+        application_mask_path=context.application_mask_path,
+        window_size_pixels=context.window_size_pixels,
+        projected_aoi=context.projected_aoi,
+        output_grid=context.output_grid,
+        required_band_indices=context.required_band_indices,
+        predictor_names=context.predictor_names,
+        response_models=context.response_models,
+        reference_calibration=context.reference_calibration,
+        maximum_predictor_missing_fraction=(
+            context.maximum_predictor_missing_fraction
+        ),
+        reference_band_offset=context.reference_band_offset,
+    )
+
+
+def iter_calculated_inference_tiles(
+    cached_tiles: tuple[CachedRasterTile, ...],
+    worker_context: InferenceWorkerContext,
+    worker_count: int,
+) -> Iterator[ComputedInferenceTile]:
+    """Yield calculated tiles from the parent or a bounded process pool.
+
+    Args:
+        cached_tiles: Source tiles requiring inference.
+        worker_context: Reusable model and raster calculation context.
+        worker_count: Number of tile calculations allowed concurrently.
+
+    Yields:
+        Completed tile results in completion order.
+    """
+
+    if worker_count == 1:
+        for cached_tile in cached_tiles:
+            yield calculate_inference_tile_from_context(
+                cached_tile,
+                worker_context,
+            )
+        return
+
+    tile_iterator = iter(cached_tiles)
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        initializer=initialize_inference_worker,
+        initargs=(worker_context,),
+    ) as executor:
+        pending_futures: set[Future[ComputedInferenceTile]] = set()
+        for _ in range(worker_count):
+            pending_futures.add(
+                executor.submit(
+                    calculate_inference_tile_in_worker,
+                    next(tile_iterator),
+                )
+            )
+
+        while pending_futures:
+            completed_futures, _ = wait(
+                tuple(pending_futures),
+                return_when=FIRST_COMPLETED,
+            )
+            for completed_future in completed_futures:
+                pending_futures.remove(completed_future)
+                yield completed_future.result()
+                try:
+                    cached_tile = next(tile_iterator)
+                except StopIteration:
+                    continue
+                pending_futures.add(
+                    executor.submit(
+                        calculate_inference_tile_in_worker,
+                        cached_tile,
+                    )
+                )
 
 
 def write_computed_inference_tile(
@@ -2375,11 +2547,12 @@ def write_inference_tiles(
                 failed=0,
             )
             if tiles_to_process:
-                tile_iterator = iter(tiles_to_process)
-                tile_calculator = partial(
-                    calculate_inference_tile,
-                    analysis_configuration=analysis_configuration,
-                    analysis_cache_tiles=analysis_cache_tiles,
+                worker_context = InferenceWorkerContext(
+                    application_mask_path=application_mask_path,
+                    window_size_pixels=(
+                        analysis_configuration.inference.window_size_pixels
+                    ),
+                    projected_aoi=analysis_cache_tiles.projected_aoi,
                     output_grid=output_grid,
                     required_band_indices=tuple(required_band_indices),
                     predictor_names=predictor_names,
@@ -2390,85 +2563,56 @@ def write_inference_tiles(
                     ),
                     reference_band_offset=reference_band_offset,
                 )
-                with ThreadPoolExecutor(
-                    max_workers=active_worker_count,
-                    thread_name_prefix="inference-tile",
-                ) as executor:
-                    pending_futures: set[Future[ComputedInferenceTile]] = set()
-                    for _ in range(active_worker_count):
-                        cached_tile = next(tile_iterator)
-                        future = executor.submit(
-                            tile_calculator,
-                            cached_tile,
+                try:
+                    for computed_tile in iter_calculated_inference_tiles(
+                        tiles_to_process,
+                        worker_context,
+                        active_worker_count,
+                    ):
+                        write_computed_inference_tile(
+                            computed_tile,
+                            artifact_paths,
                         )
-                        pending_futures.add(future)
-
-                    while pending_futures:
-                        completed_futures, _ = wait(
-                            tuple(pending_futures),
-                            return_when=FIRST_COMPLETED,
+                        completed_tile_ids.add(computed_tile.tile_id)
+                        newly_processed_tile_count += 1
+                        checkpoint_metadata["completed_tile_ids"] = sorted(
+                            completed_tile_ids
                         )
-                        for completed_future in completed_futures:
-                            pending_futures.remove(completed_future)
-                            try:
-                                computed_tile = completed_future.result()
-                                write_computed_inference_tile(
-                                    computed_tile,
-                                    artifact_paths,
-                                )
-                            except Exception:
-                                failed_tile_count += 1
-                                for pending_future in pending_futures:
-                                    pending_future.cancel()
-                                tile_progress.set_postfix(
-                                    workers=active_worker_count,
-                                    cached=(
-                                        len(completed_tile_ids)
-                                        - newly_processed_tile_count
-                                    ),
-                                    processed=newly_processed_tile_count,
-                                    failed=failed_tile_count,
-                                )
-                                raise
-
-                            completed_tile_ids.add(computed_tile.tile_id)
-                            newly_processed_tile_count += 1
-                            checkpoint_metadata["completed_tile_ids"] = sorted(
-                                completed_tile_ids
+                        temporary_checkpoint_path.write_text(
+                            json.dumps(
+                                checkpoint_metadata,
+                                indent=2,
+                                sort_keys=True,
                             )
-                            temporary_checkpoint_path.write_text(
-                                json.dumps(
-                                    checkpoint_metadata,
-                                    indent=2,
-                                    sort_keys=True,
-                                )
-                                + "\n",
-                                encoding="utf-8",
-                            )
-                            os.replace(
-                                temporary_checkpoint_path,
-                                artifact_paths.checkpoint,
-                            )
-                            tile_progress.update(1)
-                            tile_progress.set_postfix(
-                                workers=active_worker_count,
-                                cached=(
-                                    len(completed_tile_ids)
-                                    - newly_processed_tile_count
-                                ),
-                                processed=newly_processed_tile_count,
-                                failed=failed_tile_count,
-                            )
-
-                            try:
-                                cached_tile = next(tile_iterator)
-                            except StopIteration:
-                                continue
-                            future = executor.submit(
-                                tile_calculator,
-                                cached_tile,
-                            )
-                            pending_futures.add(future)
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                        os.replace(
+                            temporary_checkpoint_path,
+                            artifact_paths.checkpoint,
+                        )
+                        tile_progress.update(1)
+                        tile_progress.set_postfix(
+                            workers=active_worker_count,
+                            cached=(
+                                len(completed_tile_ids)
+                                - newly_processed_tile_count
+                            ),
+                            processed=newly_processed_tile_count,
+                            failed=failed_tile_count,
+                        )
+                except Exception:
+                    failed_tile_count += 1
+                    tile_progress.set_postfix(
+                        workers=active_worker_count,
+                        cached=(
+                            len(completed_tile_ids)
+                            - newly_processed_tile_count
+                        ),
+                        processed=newly_processed_tile_count,
+                        failed=failed_tile_count,
+                    )
+                    raise
 
     return (
         application_mask_metadata,

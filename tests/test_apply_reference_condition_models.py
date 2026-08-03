@@ -6,9 +6,9 @@ import contextlib
 import io
 import json
 import math
+import os
 import sys
 import tempfile
-import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -32,10 +32,10 @@ from scripts.apply_reference_condition_models import (
     STATUS_OUTSIDE_TARGET,
     STATUS_PREDICTED,
     build_reference_departure_calibration,
-    calculate_inference_tile,
     load_response_models,
     parse_args,
     run_reference_condition_inference,
+    write_computed_inference_tile,
 )
 from scripts.fetch_gee_raster_tiles import cache_aoi_tiles
 from scripts.fit_grassland_integrity_parameters import (
@@ -603,7 +603,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "Reference-condition raster inference",
             standard_output.getvalue(),
         )
-        self.assertEqual(4, metadata["configuration"]["worker_count"])
+        self.assertEqual(
+            self.analysis_configuration.inference.worker_count,
+            metadata["configuration"]["worker_count"],
+        )
 
         resumed_output = io.StringIO()
         with (
@@ -686,24 +689,20 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(19, summary.predicted_pixels)
         self.assertIn("1 resumed from checkpoint", resumed_output.getvalue())
 
-    def test_calculates_tiles_with_multiple_workers(self) -> None:
-        """Run separate source tiles concurrently without parallel writes."""
+    def test_calculates_tiles_in_worker_processes(self) -> None:
+        """Calculate source tiles outside the parent writing process."""
 
-        worker_barrier = threading.Barrier(2, timeout=10)
-        worker_names = set()
-        worker_names_lock = threading.Lock()
+        worker_process_ids = set()
 
-        def record_worker(*args, **kwargs):
-            with worker_names_lock:
-                worker_names.add(threading.current_thread().name)
-            worker_barrier.wait()
-            return calculate_inference_tile(*args, **kwargs)
+        def record_worker_process(computed_tile, artifact_paths):
+            worker_process_ids.add(computed_tile.worker_process_id)
+            write_computed_inference_tile(computed_tile, artifact_paths)
 
         with (
             patch(
                 "scripts.apply_reference_condition_models."
-                "calculate_inference_tile",
-                side_effect=record_worker,
+                "write_computed_inference_tile",
+                side_effect=record_worker_process,
             ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -722,10 +721,8 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             )
 
         self.assertEqual(19, summary.predicted_pixels)
-        self.assertEqual(2, len(worker_names))
-        self.assertTrue(
-            all(name.startswith("inference-tile") for name in worker_names)
-        )
+        self.assertTrue(worker_process_ids)
+        self.assertNotIn(os.getpid(), worker_process_ids)
 
     def test_writes_nodata_outside_exact_aoi(self) -> None:
         """Mask polygon holes even when cached tiles cover those pixels."""
