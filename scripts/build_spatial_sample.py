@@ -45,6 +45,11 @@ MEBIBYTE = 1024**2
 LOCATION_FIGURE_DPI = 300
 SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
 PARQUET_PROVENANCE_KEY = b"nhi_spatial_sample_provenance"
+# The d01 reference label is binary: background pixels are 0 and reference
+# pixels are 1. Sampling and weight summaries treat those classes separately.
+BACKGROUND_SITE_CLASS = 0
+REFERENCE_SITE_CLASS = 1
+REFERENCE_SITE_CLASSES = (BACKGROUND_SITE_CLASS, REFERENCE_SITE_CLASS)
 
 
 @dataclass(frozen=True)
@@ -955,7 +960,7 @@ def assemble_spatial_sample(
             )
 
     class_summaries = []
-    for reference_site_class in (0, 1):
+    for reference_site_class in REFERENCE_SITE_CLASSES:
         class_strata = [
             stratum_state
             for (
