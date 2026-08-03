@@ -17,6 +17,11 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import Ridge
+from sklearn.metrics import (
+    mean_absolute_error,
+    r2_score,
+    root_mean_squared_error,
+)
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
@@ -274,21 +279,35 @@ def calculate_regression_metrics(
     expected = expected[valid]
     weights = weights[valid]
     residuals = observed - expected
-    weighted_mean = float(np.average(observed, weights=weights))
-    mean_squared_error = float(np.average(residuals**2, weights=weights))
-    total_variation = float(np.sum(weights * (observed - weighted_mean) ** 2))
-    residual_variation = float(np.sum(weights * residuals**2))
-    weighted_r2 = (
-        1.0 - residual_variation / total_variation
-        if total_variation > 0
-        else float("nan")
+    # R2 is undefined for a constant observed response. Scikit-learn otherwise
+    # replaces that undefined value with a finite convenience score.
+    if np.ptp(observed) > 0:
+        weighted_r2 = float(
+            r2_score(
+                observed,
+                expected,
+                sample_weight=weights,
+                force_finite=False,
+            )
+        )
+    else:
+        weighted_r2 = float("nan")
+    weighted_rmse = root_mean_squared_error(
+        observed,
+        expected,
+        sample_weight=weights,
+    )
+    weighted_mae = mean_absolute_error(
+        observed,
+        expected,
+        sample_weight=weights,
     )
     observed_ranks = pd.Series(observed).rank(method="average").to_numpy()
     expected_ranks = pd.Series(expected).rank(method="average").to_numpy()
     return {
-        "weighted_r2": float(weighted_r2),
-        "weighted_rmse": float(np.sqrt(mean_squared_error)),
-        "weighted_mae": float(np.average(np.abs(residuals), weights=weights)),
+        "weighted_r2": weighted_r2,
+        "weighted_rmse": float(weighted_rmse),
+        "weighted_mae": float(weighted_mae),
         "weighted_spearman": weighted_correlation(
             observed_ranks,
             expected_ranks,

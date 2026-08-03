@@ -152,7 +152,35 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
 
         self.assertAlmostEqual(np.sqrt(3.2), metrics["weighted_rmse"])
         self.assertAlmostEqual(1.6, metrics["weighted_mae"])
-        self.assertLess(metrics["weighted_r2"], 0.0)
+        self.assertAlmostEqual(1.0 - 32.0 / 4.1, metrics["weighted_r2"])
+
+    def test_filters_invalid_and_zero_weight_regression_pairs(self) -> None:
+        """Exclude unusable pairs before passing arrays to metric APIs."""
+
+        metrics = calculate_regression_metrics(
+            np.array([0.0, 1.0, 2.0, 3.0, np.nan]),
+            np.array([0.0, 0.0, 2.0, 10.0, 1.0]),
+            np.array([1.0, 3.0, 0.0, np.nan, 5.0]),
+        )
+
+        self.assertAlmostEqual(np.sqrt(0.75), metrics["weighted_rmse"])
+        self.assertAlmostEqual(0.75, metrics["weighted_mae"])
+        self.assertAlmostEqual(-3.0, metrics["weighted_r2"])
+        self.assertAlmostEqual(0.75, metrics["weighted_bias"])
+        self.assertTrue(np.isnan(metrics["weighted_spearman"]))
+
+    def test_reports_constant_observation_r2_as_undefined(self) -> None:
+        """Preserve NaN R2 instead of forcing a finite convenience score."""
+
+        metrics = calculate_regression_metrics(
+            np.array([2.0, 2.0, 2.0]),
+            np.array([2.0, 1.0, 3.0]),
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+        self.assertTrue(np.isnan(metrics["weighted_r2"]))
+        self.assertAlmostEqual(np.sqrt(5.0 / 6.0), metrics["weighted_rmse"])
+        self.assertAlmostEqual(5.0 / 6.0, metrics["weighted_mae"])
 
     def test_marks_missing_and_constant_reference_responses_unfit(self) -> None:
         """Explain why unusable response bands are skipped."""
