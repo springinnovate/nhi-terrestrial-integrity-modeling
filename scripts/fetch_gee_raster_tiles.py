@@ -451,10 +451,7 @@ def build_earth_engine_stack(
             strict=True,
         )
     ]
-    raster_stack = configured_band_images[0]
-    for configured_band_image in configured_band_images[1:]:
-        raster_stack = raster_stack.addBands(configured_band_image)
-    return raster_stack.toFloat()
+    return ee.Image.cat(*configured_band_images).toFloat()
 
 
 def fetch_tile_bytes(

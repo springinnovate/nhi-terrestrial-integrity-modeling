@@ -8,6 +8,7 @@ import json
 import math
 import textwrap
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -417,7 +418,9 @@ def scan_cached_tiles(
     # Each dictionary key identifies one (global block column, global block row,
     # reference class) stratum. Reusing that key merges counts and retained
     # candidates when the same sampling group crosses cache-tile boundaries.
-    strata: dict[tuple[int, int, int], SamplingStratumState] = {}
+    strata: dict[tuple[int, int, int], SamplingStratumState] = defaultdict(
+        SamplingStratumState
+    )
     aoi_pixel_count = 0
     any_band_defined_pixel_count = 0
     every_band_defined_pixel_count = 0
@@ -612,10 +615,7 @@ def scan_cached_tiles(
                     int(unique_stratum["block_row"]),
                     int(unique_stratum["reference_class"]),
                 )
-                stratum_state = strata.setdefault(
-                    stratum_key,
-                    SamplingStratumState(),
-                )
+                stratum_state = strata[stratum_key]
                 stratum_state.available_pixel_count += available_in_tile
                 retained_from_tile = min(
                     sampling_settings.samples_per_class_per_block,
@@ -772,11 +772,9 @@ def assemble_spatial_sample(
         ),
     )
     sampled_row_count = len(all_candidates)
-    candidates_by_tile: dict[int, list[SamplingCandidate]] = {}
+    candidates_by_tile: dict[int, list[SamplingCandidate]] = defaultdict(list)
     for candidate in all_candidates:
-        candidates_by_tile.setdefault(candidate.tile_sequence, []).append(
-            candidate
-        )
+        candidates_by_tile[candidate.tile_sequence].append(candidate)
 
     block_keys = sorted(
         {

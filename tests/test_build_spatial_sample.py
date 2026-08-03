@@ -19,7 +19,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from pyproj import Transformer
 from rasterio.io import MemoryFile
-from rasterio.transform import Affine
+from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
@@ -122,13 +122,11 @@ class BuildSpatialSampleTest(unittest.TestCase):
                 + local_rows * 0.01
             )
         values[-1, 0, 0] = np.nan
-        tile_transform = Affine(
-            cache_grid.pixel_size_meters,
-            0,
+        tile_transform = from_origin(
             tile.left,
-            0,
-            -cache_grid.pixel_size_meters,
             tile.top,
+            cache_grid.pixel_size_meters,
+            cache_grid.pixel_size_meters,
         )
         with MemoryFile() as memory_file:
             with memory_file.open(

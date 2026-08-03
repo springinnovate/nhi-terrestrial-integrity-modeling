@@ -14,11 +14,11 @@ import pyogrio
 import rasterio
 from pyproj import Transformer
 from rasterio.crs import CRS
-from rasterio.transform import Affine
-from shapely import from_wkb
+from rasterio.transform import from_origin
+from shapely import from_wkb, union_all
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import transform, unary_union
+from shapely.ops import transform
 from tqdm.auto import tqdm
 
 from .analysis_config import AnalysisConfiguration, RasterCacheGrid
@@ -124,27 +124,15 @@ def load_wgs84_aoi(aoi_path: Path) -> BaseGeometry:
         layer=layer_names[0],
         columns=[],
     )
-    geometry_column_offsets = tuple(
-        column_offset
-        for column_offset, field in enumerate(geometry_table.schema)
-        if (field.metadata or {}).get(b"ARROW:extension:name")
-        == b"geoarrow.wkb"
-    )
-    if len(geometry_column_offsets) != 1:
+    # columns=[] excludes attributes, so the one remaining Arrow column is the
+    # geometry for both named-column datasets and bare GeoJSON geometries.
+    if geometry_table.num_columns != 1:
         raise ValueError("AOI vector layer must contain one geometry column.")
     source_crs = vector_metadata.get("crs")
     if not source_crs:
         raise ValueError("AOI vector layer must define its coordinate system.")
 
-    aoi_geometry = unary_union(
-        [
-            from_wkb(geometry_wkb)
-            for geometry_wkb in geometry_table.column(
-                geometry_column_offsets[0]
-            ).to_pylist()
-            if geometry_wkb is not None
-        ]
-    )
+    aoi_geometry = union_all(from_wkb(geometry_table.column(0)))
     to_wgs84 = Transformer.from_crs(
         source_crs,
         "EPSG:4326",
@@ -328,11 +316,8 @@ def calculate_file_sha256(path: Path) -> str:
         Lowercase hexadecimal SHA-256 digest.
     """
 
-    checksum = hashlib.sha256()
     with path.open("rb") as file_handle:
-        for file_block in iter(lambda: file_handle.read(1024 * 1024), b""):
-            checksum.update(file_block)
-    return checksum.hexdigest()
+        return hashlib.file_digest(file_handle, "sha256").hexdigest()
 
 
 def validate_cached_tile(
@@ -364,13 +349,11 @@ def validate_cached_tile(
     if expected_file_size is not None and actual_file_size != expected_file_size:
         raise ValueError("Cached tile file size differs from its manifest record.")
 
-    expected_transform = Affine(
-        cache_grid.pixel_size_meters,
-        0,
+    expected_transform = from_origin(
         tile.left,
-        0,
-        -cache_grid.pixel_size_meters,
         tile.top,
+        cache_grid.pixel_size_meters,
+        cache_grid.pixel_size_meters,
     )
     with rasterio.open(tile_path) as cached_raster:
         if cached_raster.width != cache_grid.tile_size_pixels:

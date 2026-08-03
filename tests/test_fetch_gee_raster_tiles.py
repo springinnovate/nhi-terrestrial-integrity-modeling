@@ -15,7 +15,7 @@ import numpy as np
 import pyogrio
 from pyproj import Transformer
 from rasterio.io import MemoryFile
-from rasterio.transform import Affine
+from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
@@ -123,6 +123,33 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         ):
             self.assertAlmostEqual(expected_bound, loaded_bound, places=9)
 
+    def test_unions_multiple_features_in_one_aoi_layer(self) -> None:
+        """Combine every geometry in the configured AOI layer."""
+
+        projected_geometries = (
+            box(0, 0, 1_000, 1_000),
+            box(2_000, 0, 3_000, 1_000),
+        )
+        geopackage_path = self.workspace / "multiple_aoi_features.gpkg"
+        pyogrio.raw.write(
+            geopackage_path,
+            np.asarray(
+                [geometry.wkb for geometry in projected_geometries],
+                dtype=object,
+            ),
+            [],
+            [],
+            layer="analysis_aoi",
+            driver="GPKG",
+            geometry_type="Polygon",
+            crs=self.test_grid.crs,
+        )
+
+        loaded_aoi = load_wgs84_aoi(geopackage_path)
+
+        self.assertEqual("MultiPolygon", loaded_aoi.geom_type)
+        self.assertEqual(2, len(loaded_aoi.geoms))
+
     def test_rejects_multilayer_vector_aoi(self) -> None:
         """Require one unambiguous AOI layer in a vector dataset."""
 
@@ -163,13 +190,11 @@ class FetchGeeRasterTilesTest(unittest.TestCase):
         """
 
         del raster_stack
-        transform_matrix = Affine(
-            cache_grid.pixel_size_meters,
-            0,
+        transform_matrix = from_origin(
             tile.left,
-            0,
-            -cache_grid.pixel_size_meters,
             tile.top,
+            cache_grid.pixel_size_meters,
+            cache_grid.pixel_size_meters,
         )
         with MemoryFile() as memory_file:
             with memory_file.open(
