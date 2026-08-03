@@ -114,7 +114,7 @@ operational options:
 python -m scripts.build_spatial_sample `
   config\south_africa_reference_condition_analysis.toml `
   --sample-output outputs\samples\south_africa.parquet `
-  --location-figure outputs\figures\south_africa.svg
+  --location-figure outputs\figures\south_africa.png
 ```
 
 Validation, scanning, selected-pixel extraction, Parquet writing, and figure creation

@@ -43,7 +43,6 @@ from .reference_condition_utils import EQUAL_AREA_CRS
 
 MEBIBYTE = 1024**2
 LOCATION_FIGURE_DPI = 300
-SUPPORTED_FIGURE_SUFFIXES = {".pdf", ".png", ".svg"}
 # Arrow schema metadata uses byte-string keys. This key stores the analysis,
 # cache, and sampling provenance that is verified after the Parquet write.
 PARQUET_PROVENANCE_KEY = b"nhi_spatial_sample_provenance"
@@ -303,7 +302,7 @@ def parse_args() -> argparse.Namespace:
         "--location-figure",
         type=Path,
         help=(
-            "Destination .png, .pdf, or .svg locator map. Defaults to "
+            "Destination .png locator map. Defaults to "
             "outputs/figures/<analysis-name>_world_location.png."
         ),
     )
@@ -1259,25 +1258,22 @@ def create_analysis_location_figure(
     Args:
         wgs84_aoi: Configured Polygon or MultiPolygon in EPSG:4326.
         analysis_name: Human-readable label for the map callout.
-        figure_path: PNG, PDF, or SVG output path.
+        figure_path: PNG output path.
         show_progress: Whether to display figure-generation progress.
 
     Returns:
         Saved path, AOI bounds, and basemap availability.
 
     Raises:
-        ValueError: If the name is empty or figure suffix is unsupported.
+        ValueError: If the name is empty or the output path is not a PNG.
     """
 
     cleaned_analysis_name = analysis_name.strip()
     if not cleaned_analysis_name:
         raise ValueError("The analysis display name cannot be empty.")
     resolved_figure_path = figure_path.expanduser().resolve()
-    if resolved_figure_path.suffix.lower() not in SUPPORTED_FIGURE_SUFFIXES:
-        supported_suffixes = ", ".join(sorted(SUPPORTED_FIGURE_SUFFIXES))
-        raise ValueError(
-            f"Location figure must use one of: {supported_suffixes}."
-        )
+    if resolved_figure_path.suffix.lower() != ".png":
+        raise ValueError("Location figure output must use the .png suffix.")
 
     minimum_x, minimum_y, maximum_x, maximum_y = wgs84_aoi.bounds
     geographic_bounds = BoundingBox(

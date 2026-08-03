@@ -409,6 +409,17 @@ class BuildSpatialSampleTest(unittest.TestCase):
         self.assertGreater(figure_path.stat().st_size, 1_000)
         self.assertLess(figure_summary.bounds.left, figure_summary.bounds.right)
 
+    def test_rejects_non_png_location_figure(self) -> None:
+        """Keep the locator-map output contract limited to PNG."""
+
+        with self.assertRaisesRegex(ValueError, "must use the .png suffix"):
+            create_analysis_location_figure(
+                self.wgs84_aoi,
+                "Two Tile Test",
+                self.workspace / "location.svg",
+                show_progress=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
