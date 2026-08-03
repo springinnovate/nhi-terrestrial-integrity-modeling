@@ -80,9 +80,11 @@
 #     raster band or alter Earth Engine pixel calculations.
 #   display_name: Human-readable label for reports and figures. Change it for the
 #     audience; it does not alter fetched pixels.
-#   aoi_path: WGS84 Polygon or MultiPolygon GeoJSON, resolved relative to this file.
-#     It selects complete Earth Engine cache tiles. It does not identify an
-#     ecoregion or decide which pixels receive inference.
+#   aoi_path: Polygon or MultiPolygon in any single-layer GDAL-readable vector
+#     dataset, such as GeoJSON, GeoPackage, or Shapefile. The layer must define
+#     its CRS and the path is resolved relative to this file. It selects complete
+#     Earth Engine cache tiles; it does not identify an ecoregion or decide which
+#     pixels receive inference.
 #   year: Calendar year used for d02-d39. d01 instead uses the reference period in
 #     [stack]. The year must fall between minimum_year and maximum_year.
 #

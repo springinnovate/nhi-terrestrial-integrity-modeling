@@ -35,10 +35,12 @@ suffix, display name, pipeline role (`reference`, `response`, or `predictor`), d
 type, and source aliases. Python still implements calculations such as phenology and
 growing-season aggregation; TOML selects and orders those implementations.
 
-The TOML-defined AOI is a general-purpose WGS84 polygon or multipolygon and is the
-only project boundary used to select cache tiles. Edge tiles are stored in full so
-later overlapping AOIs can reuse them. The `d01` reference criteria are evaluated
-without a possible-grassland ecoregion boundary, and no project boundary masks the
+The TOML-defined AOI may be a GeoJSON, GeoPackage, Shapefile, or another
+GDAL-readable vector dataset. It must contain exactly one polygonal layer with a
+defined CRS; the loader transforms that layer to WGS84. This AOI is the only project
+boundary used to select cache tiles. Edge tiles are stored in full so later
+overlapping AOIs can reuse them. The `d01` reference criteria are evaluated without a
+possible-grassland ecoregion boundary, and no project boundary masks the
 ecological-response or environmental bands in `d02-d39`. Exact AOI clipping can be
 applied when cached tiles are assembled without changing the shared cache contents.
 

@@ -10,11 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import pyogrio
 import rasterio
 from pyproj import Transformer
 from rasterio.crs import CRS
 from rasterio.transform import Affine
-from shapely.geometry import box, shape
+from shapely import from_wkb
+from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
 from tqdm.auto import tqdm
@@ -90,33 +92,65 @@ class AnalysisCacheTiles:
 
 
 def load_wgs84_aoi(aoi_path: Path) -> BaseGeometry:
-    """Load one polygonal AOI from a GeoJSON file.
+    """Load one polygonal AOI from a single-layer GDAL vector dataset.
 
     Args:
-        aoi_path: GeoJSON path containing WGS84 coordinates.
+        aoi_path: GDAL-readable vector path containing exactly one layer.
 
     Returns:
         Valid, nonempty Polygon or MultiPolygon geometry.
 
     Raises:
-        FileNotFoundError: If the AOI file does not exist.
-        ValueError: If the GeoJSON does not contain a valid polygonal AOI.
+        FileNotFoundError: If the AOI vector does not exist.
+        ValueError: If the dataset does not contain exactly one layer with a
+            defined CRS and valid polygonal geometry.
     """
 
     resolved_path = aoi_path.expanduser().resolve()
-    geojson_object = json.loads(resolved_path.read_text(encoding="utf-8"))
-    geojson_type = geojson_object.get("type")
-    if geojson_type == "FeatureCollection":
-        aoi_geometry = unary_union(
-            [
-                shape(feature["geometry"])
-                for feature in geojson_object["features"]
-            ]
+    if not resolved_path.is_file():
+        raise FileNotFoundError(f"AOI vector does not exist: {resolved_path}")
+
+    layer_names = tuple(
+        str(layer_description[0])
+        for layer_description in pyogrio.list_layers(resolved_path)
+    )
+    if len(layer_names) != 1:
+        raise ValueError(
+            "AOI vector must contain exactly one layer; "
+            f"found {len(layer_names):,}."
         )
-    elif geojson_type == "Feature":
-        aoi_geometry = shape(geojson_object["geometry"])
-    else:
-        aoi_geometry = shape(geojson_object)
+    vector_metadata, geometry_table = pyogrio.read_arrow(
+        resolved_path,
+        layer=layer_names[0],
+        columns=[],
+    )
+    geometry_column_offsets = tuple(
+        column_offset
+        for column_offset, field in enumerate(geometry_table.schema)
+        if (field.metadata or {}).get(b"ARROW:extension:name")
+        == b"geoarrow.wkb"
+    )
+    if len(geometry_column_offsets) != 1:
+        raise ValueError("AOI vector layer must contain one geometry column.")
+    source_crs = vector_metadata.get("crs")
+    if not source_crs:
+        raise ValueError("AOI vector layer must define its coordinate system.")
+
+    aoi_geometry = unary_union(
+        [
+            from_wkb(geometry_wkb)
+            for geometry_wkb in geometry_table.column(
+                geometry_column_offsets[0]
+            ).to_pylist()
+            if geometry_wkb is not None
+        ]
+    )
+    to_wgs84 = Transformer.from_crs(
+        source_crs,
+        "EPSG:4326",
+        always_xy=True,
+    )
+    aoi_geometry = transform(to_wgs84.transform, aoi_geometry)
 
     if (
         aoi_geometry.is_empty

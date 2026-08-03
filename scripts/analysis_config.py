@@ -161,7 +161,7 @@ class AnalysisConfiguration:
         raster_configuration_sha256: Hash of settings affecting fetched pixels.
         analysis_name: File-safe analysis identifier.
         display_name: Human-readable AOI or ecoregion name.
-        aoi_path: Resolved local WGS84 GeoJSON AOI.
+        aoi_path: Resolved local single-layer GDAL-compatible vector AOI.
         year: Source-data year used throughout the analysis.
         earth_engine: Earth Engine project and local cache settings.
         stack_name: File-safe raster-stack name.
