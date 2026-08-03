@@ -269,8 +269,13 @@ Windows process startup. This lets all requested processes start promptly while 
 workers begin calculating tiles. Numerical libraries are limited to one internal
 thread per worker so tile-level parallelism does not oversubscribe the CPU. A worker
 count of one calculates in the parent process and avoids process-startup overhead.
-Stitched GeoTIFF writes and checkpoint updates stay in the parent process, and at most
-one completed result tile per worker is retained in memory.
+The scheduler assigns a replacement tile as soon as a worker result arrives, before
+the parent writes that result, so serialized output cannot leave the corresponding
+worker idle. Stitched GeoTIFF writes and checkpoint updates stay in the parent process
+for file safety. Completed results are flushed and checkpointed in batches no larger
+than the active worker count, which avoids reopening five rasters and recompressing
+shared output blocks after every 128-pixel source tile. The bounded pipeline retains
+at most one write batch plus one in-flight result per worker.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized

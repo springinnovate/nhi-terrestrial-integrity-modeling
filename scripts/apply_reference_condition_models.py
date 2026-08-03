@@ -10,10 +10,11 @@ import multiprocessing
 import os
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import ExitStack
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -2153,31 +2154,35 @@ def iter_calculated_inference_tiles(
                 )
                 for completed_future in completed_futures:
                     pending_futures.remove(completed_future)
-                    yield completed_future.result()
+                    computed_tile = completed_future.result()
+                    # Replenish this process before the parent writes its
+                    # result so serialized output never holds a worker idle.
                     try:
                         cached_tile = next(tile_iterator)
                     except StopIteration:
-                        continue
-                    pending_futures.add(
-                        executor.submit(
-                            calculate_inference_tile_in_worker,
-                            cached_tile,
+                        pass
+                    else:
+                        pending_futures.add(
+                            executor.submit(
+                                calculate_inference_tile_in_worker,
+                                cached_tile,
+                            )
                         )
-                    )
+                    yield computed_tile
 
 
-def write_computed_inference_tile(
-    computed_tile: ComputedInferenceTile,
+def write_computed_inference_tiles(
+    computed_tiles: Sequence[ComputedInferenceTile],
     artifact_paths: InferenceArtifactPaths,
 ) -> None:
-    """Persist one calculated tile and flush every raster before checkpointing.
+    """Persist one calculated tile batch and flush before checkpointing.
 
     Args:
-        computed_tile: Tile arrays returned by an inference worker.
+        computed_tiles: Tile arrays returned by inference workers.
         artifact_paths: Shared stitched output rasters.
 
     Returns:
-        None: Every tile window is written and all datasets are closed.
+        None: Every tile window is written and all datasets are closed once.
     """
 
     with ExitStack() as stack:
@@ -2196,29 +2201,30 @@ def write_computed_inference_tile(
         status_destination = stack.enter_context(
             rasterio.open(artifact_paths.inference_status, "r+")
         )
-        for window_result in computed_tile.windows:
-            destination_window = window_result.destination_window
-            expected_destination.write(
-                window_result.expected_reference,
-                window=destination_window,
-            )
-            deviation_destination.write(
-                window_result.observed_minus_expected,
-                window=destination_window,
-            )
-            standardized_destination.write(
-                window_result.standardized_deviation,
-                window=destination_window,
-            )
-            percentile_destination.write(
-                window_result.departure_percentile,
-                1,
-                window=destination_window,
-            )
-            status_destination.write(
-                window_result.inference_status,
-                window=destination_window,
-            )
+        for computed_tile in computed_tiles:
+            for window_result in computed_tile.windows:
+                destination_window = window_result.destination_window
+                expected_destination.write(
+                    window_result.expected_reference,
+                    window=destination_window,
+                )
+                deviation_destination.write(
+                    window_result.observed_minus_expected,
+                    window=destination_window,
+                )
+                standardized_destination.write(
+                    window_result.standardized_deviation,
+                    window=destination_window,
+                )
+                percentile_destination.write(
+                    window_result.departure_percentile,
+                    1,
+                    window=destination_window,
+                )
+                status_destination.write(
+                    window_result.inference_status,
+                    window=destination_window,
+                )
 
 
 def write_inference_tiles(
@@ -2521,9 +2527,9 @@ def write_inference_tiles(
         )
         os.replace(temporary_checkpoint_path, artifact_paths.checkpoint)
         # Closing after initialization persists headers and band metadata. Each
-        # completed tile below reopens and closes all outputs before its ID is
-        # checkpointed, so a recorded tile never depends on GDAL write buffers
-        # that were still in memory when the process stopped.
+        # completed batch below reopens and closes all outputs before its tile
+        # IDs are checkpointed, so a recorded tile never depends on GDAL write
+        # buffers that were still in memory when the process stopped.
         expected_destination.close()
         deviation_destination.close()
         standardized_destination.close()
@@ -2578,20 +2584,27 @@ def write_inference_tiles(
                     reference_band_offset=reference_band_offset,
                 )
                 try:
-                    for computed_tile in iter_calculated_inference_tiles(
+                    calculated_tiles = iter_calculated_inference_tiles(
                         tiles_to_process,
                         worker_context,
                         active_worker_count,
+                    )
+                    while computed_tile_batch := tuple(
+                        islice(calculated_tiles, active_worker_count)
                     ):
-                        utilized_worker_process_ids.add(
+                        utilized_worker_process_ids.update(
                             computed_tile.worker_process_id
+                            for computed_tile in computed_tile_batch
                         )
-                        write_computed_inference_tile(
-                            computed_tile,
+                        write_computed_inference_tiles(
+                            computed_tile_batch,
                             artifact_paths,
                         )
-                        completed_tile_ids.add(computed_tile.tile_id)
-                        newly_processed_tile_count += 1
+                        completed_tile_ids.update(
+                            computed_tile.tile_id
+                            for computed_tile in computed_tile_batch
+                        )
+                        newly_processed_tile_count += len(computed_tile_batch)
                         checkpoint_metadata["completed_tile_ids"] = sorted(
                             completed_tile_ids
                         )
@@ -2608,7 +2621,7 @@ def write_inference_tiles(
                             temporary_checkpoint_path,
                             artifact_paths.checkpoint,
                         )
-                        tile_progress.update(1)
+                        tile_progress.update(len(computed_tile_batch))
                         tile_progress.set_postfix(
                             workers=active_worker_count,
                             processes=len(utilized_worker_process_ids),

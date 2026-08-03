@@ -35,7 +35,7 @@ from scripts.apply_reference_condition_models import (
     load_response_models,
     parse_args,
     run_reference_condition_inference,
-    write_computed_inference_tile,
+    write_computed_inference_tiles,
 )
 from scripts.fetch_gee_raster_tiles import cache_aoi_tiles
 from scripts.fit_grassland_integrity_parameters import (
@@ -694,15 +694,18 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         worker_process_ids = set()
 
-        def record_worker_process(computed_tile, artifact_paths):
-            worker_process_ids.add(computed_tile.worker_process_id)
-            write_computed_inference_tile(computed_tile, artifact_paths)
+        def record_worker_processes(computed_tiles, artifact_paths):
+            worker_process_ids.update(
+                computed_tile.worker_process_id
+                for computed_tile in computed_tiles
+            )
+            write_computed_inference_tiles(computed_tiles, artifact_paths)
 
         with (
             patch(
                 "scripts.apply_reference_condition_models."
-                "write_computed_inference_tile",
-                side_effect=record_worker_process,
+                "write_computed_inference_tiles",
+                side_effect=record_worker_processes,
             ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
