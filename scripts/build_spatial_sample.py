@@ -857,6 +857,10 @@ def assemble_spatial_sample(
             tile_width = tile_values.shape[2]
             local_rows = local_pixel_indices // tile_width
             local_columns = local_pixel_indices % tile_width
+            # Candidate addresses are tile-local row and column indices. Apply
+            # the tile's affine transform at each pixel center to recover cache-
+            # CRS coordinates, which are then converted to the longitude and
+            # latitude stored with each sampled row.
             projected_x = (
                 tile_transform.c
                 + (local_columns.astype(np.float64) + 0.5) * tile_transform.a
