@@ -1,10 +1,12 @@
-"""Apply fitted reference-condition response models to an ecoregion raster."""
+"""Apply fitted reference-condition response models to cached analysis tiles."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import re
 import time
 from contextlib import ExitStack
@@ -23,12 +25,21 @@ from matplotlib.patches import Patch
 from rasterio.coords import BoundingBox
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
+from rasterio.features import geometry_mask
+from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
-from rasterio.windows import Window
+from rasterio.windows import Window, transform as window_transform
+from shapely.geometry import mapping
 from tqdm.auto import tqdm
 
 from .analysis_config import AnalysisConfiguration, load_analysis_configuration
 from .fit_grassland_integrity_parameters import predict_expected_response
+from .raster_cache_utils import (
+    AnalysisCacheTiles,
+    CachedRasterTile,
+    calculate_file_sha256,
+    resolve_analysis_cache_tiles,
+)
 from .reference_condition_utils import FIGURE_DPI
 
 
@@ -37,7 +48,7 @@ DISPLAY_COLOR_MAXIMUM = 10.0
 DISPLAY_YELLOW_GREEN_VALUE = 3.0
 DISPLAY_COLOR_TICKS = (0.0, 1.0, 3.0, 5.0, 7.0, 10.0)
 PERCENTILE_COLOR_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-REFERENCE_SITE_COLOR = "#5E2B97"
+REFERENCE_SITE_COLOR = "#0072B2"
 REFERENCE_SITE_OUTLINE_COLOR = "#FFFFFF"
 REFERENCE_SITE_OUTLINE_WIDTH = 0.4
 FLOAT_NODATA = -9999.0
@@ -45,6 +56,7 @@ STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
 STATUS_INSUFFICIENT_PREDICTORS = 1
 STATUS_PREDICTED = 2
+INFERENCE_CHECKPOINT_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -396,6 +408,7 @@ class InferenceRunSummary:
     metadata_path: Path
     response_count: int
     raster_pixels: int
+    aoi_pixels: int
     target_pixels: int
     predicted_pixels: int
     departure_percentile_pixels: int
@@ -404,17 +417,232 @@ class InferenceRunSummary:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True)
+class InferenceOutputGrid:
+    """Describe the pixel-aligned stitched grid and cache-tile placement.
+
+    Attributes:
+        crs: Cache-grid coordinate reference system.
+        transform: Affine transform for the stitched output grid.
+        bounds: Pixel-aligned output bounds around the configured AOI.
+        width: Output columns.
+        height: Output rows.
+        pixel_size: Square output pixel size in projected units.
+    """
+
+    crs: CRS
+    transform: rasterio.Affine
+    bounds: BoundingBox
+    width: int
+    height: int
+    pixel_size: float
+
+    def overlapping_windows(
+        self,
+        cached_tile: CachedRasterTile,
+    ) -> tuple[Window, Window]:
+        """Return matching source-tile and stitched-output windows.
+
+        Args:
+            cached_tile: Cache tile to place on this output grid.
+
+        Returns:
+            Source and destination windows covering their shared bounds.
+        """
+
+        tile = cached_tile.tile
+        shared_left = max(self.bounds.left, tile.left)
+        shared_bottom = max(self.bounds.bottom, tile.bottom)
+        shared_right = min(self.bounds.right, tile.right)
+        shared_top = min(self.bounds.top, tile.top)
+        shared_width = round((shared_right - shared_left) / self.pixel_size)
+        shared_height = round((shared_top - shared_bottom) / self.pixel_size)
+        source_window = Window(
+            round((shared_left - tile.left) / self.pixel_size),
+            round((tile.top - shared_top) / self.pixel_size),
+            shared_width,
+            shared_height,
+        )
+        destination_window = Window(
+            round((shared_left - self.bounds.left) / self.pixel_size),
+            round((self.bounds.top - shared_top) / self.pixel_size),
+            shared_width,
+            shared_height,
+        )
+        return source_window, destination_window
+
+
+@dataclass(frozen=True)
+class InferenceArtifactPaths:
+    """Name every persistent raster, figure, report, and checkpoint artifact."""
+
+    expected_reference: Path
+    observed_minus_expected: Path
+    standardized_deviation: Path
+    departure_percentile: Path
+    inference_status: Path
+    aggregate_deviation_figure: Path
+    departure_percentile_figure: Path
+    report: Path
+    metadata: Path
+    checkpoint: Path
+
+
+@dataclass(frozen=True)
+class InferenceOutputStatistics:
+    """Store the streaming summaries reconstructed from stitched outputs."""
+
+    response_statistics: dict[str, ResponseStatistics]
+    departure_percentile_statistics: DeparturePercentileStatistics
+    aggregate_value_sums: np.ndarray
+    aggregate_value_counts: np.ndarray
+    percentile_value_sums: np.ndarray
+    percentile_value_counts: np.ndarray
+    reference_pixel_counts: np.ndarray
+    aoi_pixels: int
+    target_pixels: int
+    predicted_pixels: int
+    insufficient_predictor_pixels: int
+    imputed_pixels: int
+
+
+def build_inference_output_grid(
+    analysis_configuration: AnalysisConfiguration,
+    analysis_cache_tiles: AnalysisCacheTiles,
+) -> InferenceOutputGrid:
+    """Build the smallest cache-aligned rectangle containing the AOI.
+
+    Args:
+        analysis_configuration: Analysis grid definition.
+        analysis_cache_tiles: Validated tiles and projected AOI geometry.
+
+    Returns:
+        Pixel-aligned stitched output grid in the cache CRS.
+    """
+
+    cache_grid = analysis_configuration.grid
+    pixel_size = float(cache_grid.pixel_size_meters)
+    minimum_x, minimum_y, maximum_x, maximum_y = (
+        analysis_cache_tiles.projected_aoi.bounds
+    )
+    # CRS round trips can place a boundary a few floating-point units beyond an
+    # exact grid line. The pixel-relative tolerance prevents that numerical
+    # noise from adding a full row or column to the stitched rectangle.
+    grid_line_tolerance = 1e-9
+    output_left = cache_grid.origin_x + math.floor(
+        (minimum_x - cache_grid.origin_x) / pixel_size
+        + grid_line_tolerance
+    ) * pixel_size
+    output_bottom = cache_grid.origin_y + math.floor(
+        (minimum_y - cache_grid.origin_y) / pixel_size
+        + grid_line_tolerance
+    ) * pixel_size
+    output_right = cache_grid.origin_x + math.ceil(
+        (maximum_x - cache_grid.origin_x) / pixel_size
+        - grid_line_tolerance
+    ) * pixel_size
+    output_top = cache_grid.origin_y + math.ceil(
+        (maximum_y - cache_grid.origin_y) / pixel_size
+        - grid_line_tolerance
+    ) * pixel_size
+    output_width = round((output_right - output_left) / pixel_size)
+    output_height = round((output_top - output_bottom) / pixel_size)
+    return InferenceOutputGrid(
+        crs=CRS.from_string(cache_grid.crs),
+        transform=from_origin(
+            output_left,
+            output_top,
+            pixel_size,
+            pixel_size,
+        ),
+        bounds=BoundingBox(
+            output_left,
+            output_bottom,
+            output_right,
+            output_top,
+        ),
+        width=output_width,
+        height=output_height,
+        pixel_size=pixel_size,
+    )
+
+
+def build_inference_fingerprint(
+    analysis_configuration: AnalysisConfiguration,
+    analysis_cache_tiles: AnalysisCacheTiles,
+    model_run_directory: Path,
+    response_models: tuple[ResponseModel, ...],
+    reference_prediction_table_path: Path,
+) -> str:
+    """Hash every input that can change completed inference pixels.
+
+    Args:
+        analysis_configuration: Complete effective analysis configuration.
+        analysis_cache_tiles: Validated source tiles and checksums.
+        model_run_directory: Model run containing metadata and fitted models.
+        response_models: Ordered fitted response models.
+        reference_prediction_table_path: Calibration table used for percentiles.
+
+    Returns:
+        Hexadecimal SHA-256 digest for checkpoint compatibility.
+    """
+
+    application_mask_path = analysis_configuration.inference.application_mask_path
+    application_mask_identity = None
+    if application_mask_path is not None:
+        application_mask_statistics = application_mask_path.stat()
+        application_mask_identity = {
+            "path": str(application_mask_path),
+            "file_size_bytes": application_mask_statistics.st_size,
+            "modified_time_ns": application_mask_statistics.st_mtime_ns,
+        }
+    fingerprint_inputs = {
+        "checkpoint_schema_version": INFERENCE_CHECKPOINT_SCHEMA_VERSION,
+        "analysis_configuration_sha256": (
+            analysis_configuration.configuration_sha256
+        ),
+        "stack_identifier": analysis_cache_tiles.stack_identifier,
+        "projected_aoi_sha256": hashlib.sha256(
+            analysis_cache_tiles.projected_aoi.wkb
+        ).hexdigest(),
+        "application_mask": application_mask_identity,
+        "source_tiles": {
+            cached_tile.tile.tile_id: cached_tile.sha256
+            for cached_tile in analysis_cache_tiles.tiles
+        },
+        "run_metadata_sha256": calculate_file_sha256(
+            model_run_directory / "run_metadata.json"
+        ),
+        "reference_prediction_table_sha256": calculate_file_sha256(
+            reference_prediction_table_path
+        ),
+        "response_models": {
+            response_model.response_band: calculate_file_sha256(
+                response_model.path
+            )
+            for response_model in response_models
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(
+            fingerprint_inputs,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
     Returns:
-        Parsed analysis, raster, model, output, and progress arguments.
+        Parsed analysis, model, output, and progress arguments.
     """
 
     parser = argparse.ArgumentParser(
         description=(
-            "Apply final reference-condition models to an aligned ecoregion "
-            "raster stack without constructing an integrity score."
+            "Apply final reference-condition models to the configured AOI "
+            "using validated Earth Engine raster-cache tiles."
         )
     )
     parser.add_argument(
@@ -425,7 +653,6 @@ def parse_args() -> argparse.Namespace:
             "and the raster-band contract."
         ),
     )
-    parser.add_argument("raster_stack", type=Path, help="Multiband GeoTIFF to score.")
     parser.add_argument(
         "model_run_directory",
         type=Path,
@@ -439,7 +666,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Output directory. Defaults to "
-            "outputs/reference_condition_inference/<ecoregion>."
+            "outputs/reference_condition_inference/<analysis_name>."
         ),
     )
     parser.add_argument(
@@ -720,7 +947,7 @@ def write_inference_report(
         report_lines.extend(
             [
                 "> **Important:** No application mask was supplied. These outputs "
-                "cover the usable ecoregion predictor footprint and must not be "
+                "cover the usable AOI predictor footprint and must not be "
                 "interpreted as grassland integrity maps.",
                 "",
             ]
@@ -729,7 +956,12 @@ def write_inference_report(
         [
             "## Inputs",
             "",
-            f"- Raster stack: `{inference_metadata['input_raster']}`",
+            "- Raster cache manifest: "
+            f"`{inference_metadata['input_raster_cache']['manifest']}`",
+            "- Raster cache stack: "
+            f"`{inference_metadata['input_raster_cache']['stack_identifier']}`",
+            "- Validated source tiles: "
+            f"{inference_metadata['input_raster_cache']['source_tiles']:,}",
             f"- Model run: `{inference_metadata['model_run_directory']}`",
             f"- Application mask: `{application_mask_path_text}`",
             "- Application mask selection: "
@@ -745,10 +977,16 @@ def write_inference_report(
                 "- Covariance diagonal shrinkage: "
                 f"{inference_configuration['covariance_shrinkage']:.1%}"
             ),
+            "- Inference tiles processed in this run: "
+            f"{inference_metadata['tile_processing']['processed_tiles']:,}",
+            "- Inference tiles resumed from checkpoint: "
+            f"{inference_metadata['tile_processing']['resumed_tiles']:,}",
             "",
             "## Pixel coverage",
             "",
-            f"- Raster pixels: {coverage_statistics['raster_pixels']:,}",
+            "- Stitched bounding-grid pixels: "
+            f"{coverage_statistics['raster_pixels']:,}",
+            f"- Pixels inside exact AOI: {coverage_statistics['aoi_pixels']:,}",
             f"- Target pixels: {coverage_statistics['target_pixels']:,}",
             f"- Predicted pixels: {coverage_statistics['predicted_pixels']:,}",
             (
@@ -810,7 +1048,7 @@ def write_inference_report(
             "",
             (
                 "The percentile PNG uses a fixed 0–1 scale, with 0 in green and 1 "
-                "in red. Violet display cells contain reference sites and are "
+                "in red. Blue display cells contain reference sites and are "
                 "excluded from the colored surface. `P_i` measures multivariate "
                 "departure from the sampled reference distribution; it does not "
                 "prove degradation or constitute an ecological integrity score."
@@ -1102,7 +1340,7 @@ def create_aggregate_deviation_figure(
         )
         warning = (
             " No application mask was supplied, so the modeled surface includes "
-            "the usable ecoregion predictor footprint."
+            "the usable AOI predictor footprint."
             if not application_mask_supplied
             else ""
         )
@@ -1335,7 +1573,7 @@ def create_departure_percentile_figure(
         )
         missing_application_mask_warning = (
             " No application mask was supplied, so the modeled surface includes "
-            "the usable ecoregion predictor footprint."
+            "the usable AOI predictor footprint."
             if not application_mask_supplied
             else ""
         )
@@ -1384,24 +1622,1036 @@ def create_departure_percentile_figure(
     }
 
 
+def iter_cached_tile_windows(
+    cached_tile: CachedRasterTile,
+    output_grid: InferenceOutputGrid,
+    window_size_pixels: int,
+):
+    """Yield matching bounded source and stitched-output windows for one tile.
+
+    Args:
+        cached_tile: Validated source tile.
+        output_grid: Stitched AOI output grid.
+        window_size_pixels: Maximum processing-window width and height.
+
+    Yields:
+        Matching source and destination windows no larger than the configured
+        processing size.
+    """
+
+    source_overlap, destination_overlap = output_grid.overlapping_windows(
+        cached_tile
+    )
+    for local_row_offset in range(0, int(source_overlap.height), window_size_pixels):
+        for local_column_offset in range(
+            0,
+            int(source_overlap.width),
+            window_size_pixels,
+        ):
+            window_width = min(
+                window_size_pixels,
+                int(source_overlap.width) - local_column_offset,
+            )
+            window_height = min(
+                window_size_pixels,
+                int(source_overlap.height) - local_row_offset,
+            )
+            yield (
+                Window(
+                    int(source_overlap.col_off) + local_column_offset,
+                    int(source_overlap.row_off) + local_row_offset,
+                    window_width,
+                    window_height,
+                ),
+                Window(
+                    int(destination_overlap.col_off) + local_column_offset,
+                    int(destination_overlap.row_off) + local_row_offset,
+                    window_width,
+                    window_height,
+                ),
+            )
+
+
+def output_artifacts_are_compatible(
+    artifact_paths: InferenceArtifactPaths,
+    output_grid: InferenceOutputGrid,
+    response_count: int,
+) -> bool:
+    """Check whether existing rasters can safely resume tile writes.
+
+    Args:
+        artifact_paths: Expected inference artifact paths.
+        output_grid: Required stitched raster grid.
+        response_count: Number of fitted ecological responses.
+
+    Returns:
+        Whether all five raster artifacts have compatible dimensions, CRS,
+        transform, band count, and data type.
+    """
+
+    expected_layouts = (
+        (artifact_paths.expected_reference, response_count, "float32"),
+        (artifact_paths.observed_minus_expected, response_count, "float32"),
+        (artifact_paths.standardized_deviation, response_count, "float32"),
+        (artifact_paths.departure_percentile, 1, "float32"),
+        (artifact_paths.inference_status, 2, "uint8"),
+    )
+    try:
+        for raster_path, expected_band_count, expected_dtype in expected_layouts:
+            with rasterio.open(raster_path) as source:
+                if (
+                    source.width != output_grid.width
+                    or source.height != output_grid.height
+                    or source.count != expected_band_count
+                    or source.crs != output_grid.crs
+                    or not source.transform.almost_equals(output_grid.transform)
+                    or any(dtype != expected_dtype for dtype in source.dtypes)
+                ):
+                    return False
+    except (OSError, rasterio.errors.RasterioError):
+        return False
+    return True
+
+
+def write_inference_tiles(
+    analysis_configuration: AnalysisConfiguration,
+    analysis_cache_tiles: AnalysisCacheTiles,
+    output_grid: InferenceOutputGrid,
+    artifact_paths: InferenceArtifactPaths,
+    response_models: tuple[ResponseModel, ...],
+    reference_calibration: ReferenceDepartureCalibration,
+    maximum_predictor_missing_fraction: float,
+    inference_fingerprint: str,
+    ecoregion_name: str,
+    model_run_directory: Path,
+    show_progress: bool,
+) -> tuple[dict[str, object] | None, int, int]:
+    """Write resumable model results from cache tiles into stitched rasters.
+
+    A cache tile is recorded as complete only after all of its output windows
+    have been written to all five destination rasters. A rerun with identical
+    effective inputs skips those completed tiles and reconstructs reports and
+    figures from the stitched outputs.
+
+    Args:
+        analysis_configuration: Complete analysis and inference contract.
+        analysis_cache_tiles: Validated source tiles and projected AOI.
+        output_grid: Stitched destination grid.
+        artifact_paths: Raster and checkpoint destinations.
+        response_models: Ordered fitted ecological-response models.
+        reference_calibration: Reference distribution for departure percentiles.
+        maximum_predictor_missing_fraction: Training-time missingness limit.
+        inference_fingerprint: Hash of source, model, and configuration inputs.
+        ecoregion_name: Model-run name stored in output tags.
+        model_run_directory: Resolved model run directory.
+        show_progress: Whether to render tqdm progress.
+
+    Returns:
+        Application-mask metadata, resumed tile count, and newly processed tile
+        count.
+
+    Raises:
+        ValueError: If model bands are absent from the configured raster stack.
+        RuntimeError: If a fitted model produces a nonfinite prediction.
+    """
+
+    configured_band_names = analysis_configuration.band_names()
+    configured_band_indices = {
+        band_name: band_index
+        for band_index, band_name in enumerate(configured_band_names, start=1)
+    }
+    predictor_names = response_models[0].predictor_names
+    response_names = tuple(model.response_name for model in response_models)
+    required_band_names = (*predictor_names, *response_names)
+    missing_band_names = [
+        band_name
+        for band_name in required_band_names
+        if band_name not in configured_band_indices
+    ]
+    if missing_band_names:
+        raise ValueError(
+            "Configured raster stack is missing model bands: "
+            + ", ".join(missing_band_names)
+        )
+    reference_band_name = next(
+        band_name
+        for band_name, band_definition in zip(
+            configured_band_names,
+            analysis_configuration.bands,
+            strict=True,
+        )
+        if band_definition.role == "reference"
+    )
+    required_band_indices = [
+        configured_band_indices[band_name] for band_name in required_band_names
+    ]
+    required_band_indices.append(configured_band_indices[reference_band_name])
+    predictor_count = len(predictor_names)
+    reference_band_offset = len(required_band_names)
+
+    checkpoint_metadata: dict[str, object] = {}
+    if artifact_paths.checkpoint.is_file():
+        try:
+            checkpoint_metadata = json.loads(
+                artifact_paths.checkpoint.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            checkpoint_metadata = {}
+    can_resume = (
+        checkpoint_metadata.get("schema_version")
+        == INFERENCE_CHECKPOINT_SCHEMA_VERSION
+        and checkpoint_metadata.get("inference_fingerprint")
+        == inference_fingerprint
+        and output_artifacts_are_compatible(
+            artifact_paths,
+            output_grid,
+            len(response_models),
+        )
+    )
+    completed_tile_ids = (
+        set(checkpoint_metadata.get("completed_tile_ids", []))
+        if can_resume
+        else set()
+    )
+    expected_tile_ids = {
+        cached_tile.tile.tile_id for cached_tile in analysis_cache_tiles.tiles
+    }
+    completed_tile_ids.intersection_update(expected_tile_ids)
+
+    float_profile = {
+        "driver": "GTiff",
+        "width": output_grid.width,
+        "height": output_grid.height,
+        "count": len(response_models),
+        "dtype": "float32",
+        "crs": output_grid.crs,
+        "transform": output_grid.transform,
+        "nodata": FLOAT_NODATA,
+        "compress": "deflate",
+        "predictor": 3,
+        "tiled": True,
+        "blockxsize": 256,
+        "blockysize": 256,
+        "interleave": "band",
+        "BIGTIFF": "IF_SAFER",
+        "SPARSE_OK": True,
+    }
+    status_profile = {
+        **float_profile,
+        "count": 2,
+        "dtype": "uint8",
+        "nodata": STATUS_NODATA,
+        "predictor": 2,
+    }
+    percentile_profile = {**float_profile, "count": 1}
+    output_mode = "r+" if can_resume else "w"
+
+    application_mask_path = analysis_configuration.inference.application_mask_path
+    application_mask_metadata = None
+    with ExitStack() as stack:
+        if application_mask_path is None:
+            aligned_application_mask = None
+        else:
+            application_mask_source = stack.enter_context(
+                rasterio.open(application_mask_path)
+            )
+            application_mask_metadata = {
+                "path": str(application_mask_path),
+                "selected_value": 1,
+                "resampling": "nearest",
+                "source_width": application_mask_source.width,
+                "source_height": application_mask_source.height,
+                "source_crs": (
+                    str(application_mask_source.crs)
+                    if application_mask_source.crs
+                    else None
+                ),
+                "source_transform": list(application_mask_source.transform),
+            }
+            aligned_application_mask = stack.enter_context(
+                WarpedVRT(
+                    application_mask_source,
+                    crs=output_grid.crs,
+                    transform=output_grid.transform,
+                    width=output_grid.width,
+                    height=output_grid.height,
+                    resampling=Resampling.nearest,
+                )
+            )
+
+        expected_destination = stack.enter_context(
+            rasterio.open(
+                artifact_paths.expected_reference,
+                output_mode,
+                **(float_profile if output_mode == "w" else {}),
+            )
+        )
+        deviation_destination = stack.enter_context(
+            rasterio.open(
+                artifact_paths.observed_minus_expected,
+                output_mode,
+                **(float_profile if output_mode == "w" else {}),
+            )
+        )
+        standardized_destination = stack.enter_context(
+            rasterio.open(
+                artifact_paths.standardized_deviation,
+                output_mode,
+                **(float_profile if output_mode == "w" else {}),
+            )
+        )
+        percentile_destination = stack.enter_context(
+            rasterio.open(
+                artifact_paths.departure_percentile,
+                output_mode,
+                **(percentile_profile if output_mode == "w" else {}),
+            )
+        )
+        status_destination = stack.enter_context(
+            rasterio.open(
+                artifact_paths.inference_status,
+                output_mode,
+                **(status_profile if output_mode == "w" else {}),
+            )
+        )
+
+        if output_mode == "w":
+            shared_output_tags = {
+                "analysis_name": analysis_configuration.analysis_name,
+                "ecoregion_name": ecoregion_name,
+                "input_raster_cache": str(analysis_cache_tiles.manifest_path),
+                "stack_identifier": analysis_cache_tiles.stack_identifier,
+                "model_run_directory": str(model_run_directory),
+                "application_mask": str(application_mask_path or "not_supplied"),
+                "application_mask_selected_value": "1",
+                "application_mask_resampling": "nearest",
+            }
+            expected_destination.update_tags(
+                artifact_type="expected_reference_condition",
+                **shared_output_tags,
+            )
+            deviation_destination.update_tags(
+                artifact_type="observed_minus_expected_reference_condition",
+                **shared_output_tags,
+            )
+            standardized_destination.update_tags(
+                artifact_type="standardized_reference_condition_deviation",
+                interpretation=(
+                    "observed minus expected divided by pooled out-of-fold "
+                    "reference RMSE"
+                ),
+                **shared_output_tags,
+            )
+            percentile_destination.update_tags(
+                artifact_type="reference_condition_departure_percentile",
+                interpretation=(
+                    "area-weighted empirical percentile of covariance-aware "
+                    "distance among complete out-of-fold reference vectors"
+                ),
+                response_bands=",".join(reference_calibration.response_bands),
+                covariance_shrinkage=str(
+                    analysis_configuration.inference.covariance_shrinkage
+                ),
+                value_minimum="0",
+                value_maximum="1",
+                reference_pixels="nodata",
+                **shared_output_tags,
+            )
+            percentile_destination.set_band_description(
+                1,
+                "reference_departure_percentile",
+            )
+            status_destination.update_tags(
+                artifact_type="reference_condition_inference_status",
+                status_0="inside AOI but outside inference target",
+                status_1="target pixel with excessive predictor missingness",
+                status_2="reference-condition predictions written",
+                **shared_output_tags,
+            )
+            status_destination.set_band_description(1, "inference_status")
+            status_destination.set_band_description(2, "imputed_predictor_count")
+            for output_band_index, response_model in enumerate(
+                response_models,
+                start=1,
+            ):
+                expected_destination.set_band_description(
+                    output_band_index,
+                    f"{response_model.response_band}_expected_reference",
+                )
+                deviation_destination.set_band_description(
+                    output_band_index,
+                    f"{response_model.response_band}_observed_minus_expected",
+                )
+                standardized_destination.set_band_description(
+                    output_band_index,
+                    f"{response_model.response_band}_standardized_deviation",
+                )
+                response_tags = {
+                    "response_band": response_model.response_band,
+                    "display_name": response_model.display_name,
+                    "source_response_band": response_model.response_name,
+                    "reference_residual_rmse_oof": str(
+                        response_model.reference_rmse
+                    ),
+                    "model_path": str(response_model.path),
+                }
+                expected_destination.update_tags(
+                    output_band_index,
+                    **response_tags,
+                )
+                deviation_destination.update_tags(
+                    output_band_index,
+                    **response_tags,
+                )
+                standardized_destination.update_tags(
+                    output_band_index,
+                    **response_tags,
+                )
+
+        checkpoint_metadata = {
+            "schema_version": INFERENCE_CHECKPOINT_SCHEMA_VERSION,
+            "inference_fingerprint": inference_fingerprint,
+            "analysis_name": analysis_configuration.analysis_name,
+            "stack_identifier": analysis_cache_tiles.stack_identifier,
+            "tile_count": len(analysis_cache_tiles.tiles),
+            "completed_tile_ids": sorted(completed_tile_ids),
+        }
+        temporary_checkpoint_path = artifact_paths.checkpoint.with_suffix(
+            ".json.tmp"
+        )
+        temporary_checkpoint_path.write_text(
+            json.dumps(checkpoint_metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_checkpoint_path, artifact_paths.checkpoint)
+        # Closing after initialization persists headers and band metadata. Each
+        # completed tile below reopens and closes all outputs before its ID is
+        # checkpointed, so a recorded tile never depends on GDAL write buffers
+        # that were still in memory when the process stopped.
+        expected_destination.close()
+        deviation_destination.close()
+        standardized_destination.close()
+        percentile_destination.close()
+        status_destination.close()
+
+        newly_processed_tile_count = 0
+        failed_tile_count = 0
+        with tqdm(
+            analysis_cache_tiles.tiles,
+            total=len(analysis_cache_tiles.tiles),
+            desc="Applying response models",
+            unit="tile",
+            dynamic_ncols=True,
+            disable=not show_progress,
+        ) as tile_progress:
+            tile_progress.set_postfix(
+                cached=len(completed_tile_ids),
+                processed=0,
+                failed=0,
+            )
+            for cached_tile in tile_progress:
+                if cached_tile.tile.tile_id in completed_tile_ids:
+                    continue
+                try:
+                    with ExitStack() as tile_stack:
+                        tile_source = tile_stack.enter_context(
+                            rasterio.open(cached_tile.path)
+                        )
+                        expected_destination = tile_stack.enter_context(
+                            rasterio.open(
+                                artifact_paths.expected_reference,
+                                "r+",
+                            )
+                        )
+                        deviation_destination = tile_stack.enter_context(
+                            rasterio.open(
+                                artifact_paths.observed_minus_expected,
+                                "r+",
+                            )
+                        )
+                        standardized_destination = tile_stack.enter_context(
+                            rasterio.open(
+                                artifact_paths.standardized_deviation,
+                                "r+",
+                            )
+                        )
+                        percentile_destination = tile_stack.enter_context(
+                            rasterio.open(
+                                artifact_paths.departure_percentile,
+                                "r+",
+                            )
+                        )
+                        status_destination = tile_stack.enter_context(
+                            rasterio.open(
+                                artifact_paths.inference_status,
+                                "r+",
+                            )
+                        )
+                        for source_window, destination_window in (
+                            iter_cached_tile_windows(
+                                cached_tile,
+                                output_grid,
+                                analysis_configuration.inference.window_size_pixels,
+                            )
+                        ):
+                            masked_window_values = tile_source.read(
+                                required_band_indices,
+                                window=source_window,
+                                masked=True,
+                            )
+                            window_values = np.asarray(
+                                np.ma.getdata(masked_window_values),
+                                dtype=np.float64,
+                            )
+                            window_value_validity = ~np.ma.getmaskarray(
+                                masked_window_values
+                            )
+                            window_value_validity &= np.isfinite(window_values)
+                            window_values[~window_value_validity] = np.nan
+
+                            destination_transform = window_transform(
+                                destination_window,
+                                output_grid.transform,
+                            )
+                            window_shape = (
+                                int(destination_window.height),
+                                int(destination_window.width),
+                            )
+                            aoi_pixel_mask = geometry_mask(
+                                [mapping(analysis_cache_tiles.projected_aoi)],
+                                out_shape=window_shape,
+                                transform=destination_transform,
+                                invert=True,
+                            )
+                            predictor_values = window_values[:predictor_count]
+                            predictor_value_validity = window_value_validity[
+                                :predictor_count
+                            ]
+                            missing_predictor_counts = np.count_nonzero(
+                                ~predictor_value_validity,
+                                axis=0,
+                            ).astype(np.uint8)
+                            if aligned_application_mask is None:
+                                target_pixel_mask = aoi_pixel_mask & np.any(
+                                    predictor_value_validity,
+                                    axis=0,
+                                )
+                            else:
+                                masked_application_values = (
+                                    aligned_application_mask.read(
+                                        1,
+                                        window=destination_window,
+                                        masked=True,
+                                    )
+                                )
+                                application_mask_values = np.asarray(
+                                    np.ma.getdata(masked_application_values)
+                                )
+                                target_pixel_mask = (
+                                    aoi_pixel_mask
+                                    & ~np.ma.getmaskarray(
+                                        masked_application_values
+                                    )
+                                    & np.isfinite(application_mask_values)
+                                    & (application_mask_values == 1)
+                                )
+                            usable_pixel_mask = target_pixel_mask & (
+                                missing_predictor_counts / predictor_count
+                                <= maximum_predictor_missing_fraction
+                            )
+                            reference_pixel_mask = (
+                                aoi_pixel_mask
+                                & window_value_validity[reference_band_offset]
+                                & (window_values[reference_band_offset] != 0)
+                            )
+                            complete_response_pixel_mask = usable_pixel_mask.copy()
+                            for response_model_offset in range(
+                                len(response_models)
+                            ):
+                                complete_response_pixel_mask &= (
+                                    window_value_validity[
+                                        predictor_count + response_model_offset
+                                    ]
+                                )
+
+                            expected_output = np.full(
+                                (len(response_models), *window_shape),
+                                FLOAT_NODATA,
+                                dtype=np.float32,
+                            )
+                            deviation_output = np.full_like(
+                                expected_output,
+                                FLOAT_NODATA,
+                            )
+                            standardized_output = np.full_like(
+                                expected_output,
+                                FLOAT_NODATA,
+                            )
+                            percentile_output = np.full(
+                                window_shape,
+                                FLOAT_NODATA,
+                                dtype=np.float32,
+                            )
+                            status_output = np.full(
+                                window_shape,
+                                STATUS_NODATA,
+                                dtype=np.uint8,
+                            )
+                            status_output[aoi_pixel_mask] = STATUS_OUTSIDE_TARGET
+                            status_output[target_pixel_mask] = (
+                                STATUS_INSUFFICIENT_PREDICTORS
+                            )
+                            status_output[usable_pixel_mask] = STATUS_PREDICTED
+                            imputation_output = np.full(
+                                window_shape,
+                                STATUS_NODATA,
+                                dtype=np.uint8,
+                            )
+                            imputation_output[target_pixel_mask] = (
+                                missing_predictor_counts[target_pixel_mask]
+                            )
+
+                            predicted_pixel_count = int(
+                                np.count_nonzero(usable_pixel_mask)
+                            )
+                            usable_pixel_mask_flat = usable_pixel_mask.ravel()
+                            if predicted_pixel_count > 0:
+                                predictor_table = pd.DataFrame(
+                                    predictor_values.reshape(
+                                        predictor_count,
+                                        -1,
+                                    ).T[usable_pixel_mask_flat],
+                                    columns=predictor_names,
+                                )
+                                for response_model_offset, response_model in enumerate(
+                                    response_models
+                                ):
+                                    expected_reference_values = (
+                                        predict_expected_response(
+                                            response_model.bundle,
+                                            predictor_table,
+                                        )
+                                    )
+                                    if not np.isfinite(
+                                        expected_reference_values
+                                    ).all():
+                                        raise RuntimeError(
+                                            f"{response_model.response_band} "
+                                            "produced a nonfinite prediction."
+                                        )
+                                    expected_output_flat = expected_output[
+                                        response_model_offset
+                                    ].ravel()
+                                    expected_output_flat[usable_pixel_mask_flat] = (
+                                        expected_reference_values.astype(np.float32)
+                                    )
+                                    response_offset = (
+                                        predictor_count + response_model_offset
+                                    )
+                                    observed_values = window_values[
+                                        response_offset
+                                    ].ravel()
+                                    deviation_pixel_mask = (
+                                        usable_pixel_mask_flat
+                                        & window_value_validity[
+                                            response_offset
+                                        ].ravel()
+                                    )
+                                    deviation_values = (
+                                        observed_values[deviation_pixel_mask]
+                                        - expected_output_flat[deviation_pixel_mask]
+                                    )
+                                    standardized_values = (
+                                        deviation_values
+                                        / response_model.reference_rmse
+                                    )
+                                    deviation_output[
+                                        response_model_offset
+                                    ].ravel()[deviation_pixel_mask] = (
+                                        deviation_values.astype(np.float32)
+                                    )
+                                    standardized_output[
+                                        response_model_offset
+                                    ].ravel()[deviation_pixel_mask] = (
+                                        standardized_values.astype(np.float32)
+                                    )
+
+                            complete_non_reference_pixel_mask = (
+                                complete_response_pixel_mask
+                                & ~reference_pixel_mask
+                            )
+                            standardized_departure_vectors = standardized_output[
+                                :, complete_non_reference_pixel_mask
+                            ].T.astype(np.float64)
+                            mahalanobis_distances = (
+                                reference_calibration.calculate_mahalanobis_distances(
+                                    standardized_departure_vectors
+                                )
+                            )
+                            departure_percentiles = (
+                                reference_calibration
+                                .calculate_reference_departure_percentiles(
+                                    mahalanobis_distances
+                                )
+                            )
+                            percentile_output[
+                                complete_non_reference_pixel_mask
+                            ] = departure_percentiles.astype(np.float32)
+
+                            expected_destination.write(
+                                expected_output,
+                                window=destination_window,
+                            )
+                            deviation_destination.write(
+                                deviation_output,
+                                window=destination_window,
+                            )
+                            standardized_destination.write(
+                                standardized_output,
+                                window=destination_window,
+                            )
+                            percentile_destination.write(
+                                percentile_output,
+                                1,
+                                window=destination_window,
+                            )
+                            status_destination.write(
+                                np.stack(
+                                    [status_output, imputation_output]
+                                ),
+                                window=destination_window,
+                            )
+
+                    completed_tile_ids.add(cached_tile.tile.tile_id)
+                    newly_processed_tile_count += 1
+                    checkpoint_metadata["completed_tile_ids"] = sorted(
+                        completed_tile_ids
+                    )
+                    temporary_checkpoint_path.write_text(
+                        json.dumps(
+                            checkpoint_metadata,
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(
+                        temporary_checkpoint_path,
+                        artifact_paths.checkpoint,
+                    )
+                except Exception:
+                    failed_tile_count += 1
+                    tile_progress.set_postfix(
+                        cached=len(completed_tile_ids) - newly_processed_tile_count,
+                        processed=newly_processed_tile_count,
+                        failed=failed_tile_count,
+                    )
+                    raise
+                tile_progress.set_postfix(
+                    cached=len(completed_tile_ids) - newly_processed_tile_count,
+                    processed=newly_processed_tile_count,
+                    failed=failed_tile_count,
+                )
+
+    return (
+        application_mask_metadata,
+        len(completed_tile_ids) - newly_processed_tile_count,
+        newly_processed_tile_count,
+    )
+
+
+def summarize_inference_outputs(
+    analysis_configuration: AnalysisConfiguration,
+    analysis_cache_tiles: AnalysisCacheTiles,
+    output_grid: InferenceOutputGrid,
+    artifact_paths: InferenceArtifactPaths,
+    response_models: tuple[ResponseModel, ...],
+    show_progress: bool,
+) -> InferenceOutputStatistics:
+    """Reconstruct reports and display arrays from completed stitched outputs.
+
+    Re-reading outputs makes summaries deterministic after either a fresh run or
+    a resumed run and avoids persisting fragile partial statistics in the tile
+    checkpoint.
+
+    Args:
+        analysis_configuration: Complete raster-band and window contract.
+        analysis_cache_tiles: Validated source tiles containing reference labels.
+        output_grid: Stitched destination grid.
+        artifact_paths: Completed raster artifacts.
+        response_models: Ordered fitted ecological-response models.
+        show_progress: Whether to render tqdm progress.
+
+    Returns:
+        Streaming coverage, response, percentile, and display summaries.
+    """
+
+    reference_band_index = next(
+        band_index
+        for band_index, band_definition in enumerate(
+            analysis_configuration.bands,
+            start=1,
+        )
+        if band_definition.role == "reference"
+    )
+    display_scale = min(
+        1.0,
+        MAXIMUM_DISPLAY_DIMENSION / max(output_grid.width, output_grid.height),
+    )
+    display_width = max(1, round(output_grid.width * display_scale))
+    display_height = max(1, round(output_grid.height * display_scale))
+    aggregate_value_sums = np.zeros(
+        (display_height, display_width),
+        dtype=np.float64,
+    )
+    aggregate_value_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    percentile_value_sums = np.zeros(
+        (display_height, display_width),
+        dtype=np.float64,
+    )
+    percentile_value_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    reference_pixel_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    response_statistics = {
+        model.response_band: ResponseStatistics() for model in response_models
+    }
+    departure_percentile_statistics = DeparturePercentileStatistics()
+    aoi_pixel_count = 0
+    target_pixel_count = 0
+    predicted_pixel_count = 0
+    insufficient_predictor_pixel_count = 0
+    imputed_pixel_count = 0
+
+    with (
+        rasterio.open(artifact_paths.expected_reference) as expected_source,
+        rasterio.open(artifact_paths.standardized_deviation) as standardized_source,
+        rasterio.open(artifact_paths.departure_percentile) as percentile_source,
+        rasterio.open(artifact_paths.inference_status) as status_source,
+    ):
+        for cached_tile in tqdm(
+            analysis_cache_tiles.tiles,
+            total=len(analysis_cache_tiles.tiles),
+            desc="Summarizing inference outputs",
+            unit="tile",
+            dynamic_ncols=True,
+            disable=not show_progress,
+        ):
+            with rasterio.open(cached_tile.path) as tile_source:
+                for source_window, destination_window in iter_cached_tile_windows(
+                    cached_tile,
+                    output_grid,
+                    analysis_configuration.inference.window_size_pixels,
+                ):
+                    masked_status_values = status_source.read(
+                        1,
+                        window=destination_window,
+                        masked=True,
+                    )
+                    status_values = np.asarray(
+                        np.ma.getdata(masked_status_values)
+                    )
+                    aoi_pixel_mask = ~np.ma.getmaskarray(masked_status_values)
+                    insufficient_pixel_mask = (
+                        aoi_pixel_mask
+                        & (status_values == STATUS_INSUFFICIENT_PREDICTORS)
+                    )
+                    predicted_pixel_mask = (
+                        aoi_pixel_mask & (status_values == STATUS_PREDICTED)
+                    )
+                    aoi_pixel_count += int(np.count_nonzero(aoi_pixel_mask))
+                    insufficient_predictor_pixel_count += int(
+                        np.count_nonzero(insufficient_pixel_mask)
+                    )
+                    window_predicted_pixel_count = int(
+                        np.count_nonzero(predicted_pixel_mask)
+                    )
+                    predicted_pixel_count += window_predicted_pixel_count
+                    target_pixel_count += (
+                        window_predicted_pixel_count
+                        + int(np.count_nonzero(insufficient_pixel_mask))
+                    )
+                    masked_imputation_values = status_source.read(
+                        2,
+                        window=destination_window,
+                        masked=True,
+                    )
+                    imputed_pixel_count += int(
+                        np.count_nonzero(
+                            predicted_pixel_mask
+                            & ~np.ma.getmaskarray(masked_imputation_values)
+                            & (np.ma.getdata(masked_imputation_values) > 0)
+                        )
+                    )
+
+                    masked_expected_values = expected_source.read(
+                        window=destination_window,
+                        masked=True,
+                    )
+                    masked_standardized_values = standardized_source.read(
+                        window=destination_window,
+                        masked=True,
+                    )
+                    standardized_values = np.asarray(
+                        np.ma.getdata(masked_standardized_values),
+                        dtype=np.float64,
+                    )
+                    standardized_validity = ~np.ma.getmaskarray(
+                        masked_standardized_values
+                    )
+                    for response_offset, response_model in enumerate(
+                        response_models
+                    ):
+                        expected_pixel_count = int(
+                            np.count_nonzero(
+                                ~np.ma.getmaskarray(masked_expected_values)[
+                                    response_offset
+                                ]
+                            )
+                        )
+                        response_statistics[
+                            response_model.response_band
+                        ].update(
+                            expected_pixel_count,
+                            standardized_values[response_offset][
+                                standardized_validity[response_offset]
+                            ],
+                        )
+
+                    masked_percentile_values = percentile_source.read(
+                        1,
+                        window=destination_window,
+                        masked=True,
+                    )
+                    percentile_validity = ~np.ma.getmaskarray(
+                        masked_percentile_values
+                    )
+                    departure_percentile_statistics.update(
+                        np.asarray(np.ma.getdata(masked_percentile_values))[
+                            percentile_validity
+                        ]
+                    )
+                    masked_reference_values = tile_source.read(
+                        reference_band_index,
+                        window=source_window,
+                        masked=True,
+                    )
+                    reference_values = np.asarray(
+                        np.ma.getdata(masked_reference_values)
+                    )
+                    reference_pixel_mask = (
+                        aoi_pixel_mask
+                        & ~np.ma.getmaskarray(masked_reference_values)
+                        & np.isfinite(reference_values)
+                        & (reference_values != 0)
+                    )
+                    complete_non_reference_pixel_mask = (
+                        np.all(standardized_validity, axis=0)
+                        & ~reference_pixel_mask
+                    )
+                    total_absolute_standardized_departures = np.sum(
+                        np.abs(standardized_values),
+                        axis=0,
+                    )
+                    output_rows = np.arange(
+                        int(destination_window.row_off),
+                        int(
+                            destination_window.row_off
+                            + destination_window.height
+                        ),
+                    )
+                    output_columns = np.arange(
+                        int(destination_window.col_off),
+                        int(
+                            destination_window.col_off
+                            + destination_window.width
+                        ),
+                    )
+                    display_rows = np.minimum(
+                        output_rows * display_height // output_grid.height,
+                        display_height - 1,
+                    )
+                    display_columns = np.minimum(
+                        output_columns * display_width // output_grid.width,
+                        display_width - 1,
+                    )
+                    display_cell_indices = (
+                        display_rows[:, np.newaxis] * display_width
+                        + display_columns[np.newaxis, :]
+                    )
+                    np.add.at(
+                        aggregate_value_sums.ravel(),
+                        display_cell_indices[complete_non_reference_pixel_mask],
+                        total_absolute_standardized_departures[
+                            complete_non_reference_pixel_mask
+                        ],
+                    )
+                    np.add.at(
+                        aggregate_value_counts.ravel(),
+                        display_cell_indices[complete_non_reference_pixel_mask],
+                        1,
+                    )
+                    np.add.at(
+                        percentile_value_sums.ravel(),
+                        display_cell_indices[percentile_validity],
+                        np.asarray(np.ma.getdata(masked_percentile_values))[
+                            percentile_validity
+                        ],
+                    )
+                    np.add.at(
+                        percentile_value_counts.ravel(),
+                        display_cell_indices[percentile_validity],
+                        1,
+                    )
+                    np.add.at(
+                        reference_pixel_counts.ravel(),
+                        display_cell_indices[reference_pixel_mask],
+                        1,
+                    )
+
+    return InferenceOutputStatistics(
+        response_statistics=response_statistics,
+        departure_percentile_statistics=departure_percentile_statistics,
+        aggregate_value_sums=aggregate_value_sums,
+        aggregate_value_counts=aggregate_value_counts,
+        percentile_value_sums=percentile_value_sums,
+        percentile_value_counts=percentile_value_counts,
+        reference_pixel_counts=reference_pixel_counts,
+        aoi_pixels=aoi_pixel_count,
+        target_pixels=target_pixel_count,
+        predicted_pixels=predicted_pixel_count,
+        insufficient_predictor_pixels=insufficient_predictor_pixel_count,
+        imputed_pixels=imputed_pixel_count,
+    )
+
+
 def run_reference_condition_inference(
     analysis_configuration: AnalysisConfiguration,
-    raster_stack_path: Path,
     model_run_directory: Path,
     output_directory: Path | None = None,
     show_progress: bool = True,
+    analysis_cache_tiles: AnalysisCacheTiles | None = None,
 ) -> InferenceRunSummary:
-    """Apply final response models to aligned raster pixels in bounded windows.
+    """Apply final response models to cached AOI tiles in bounded windows.
 
     Args:
         analysis_configuration: Authoritative analysis identity, mask, window,
             covariance, and raster-band settings.
-        raster_stack_path: Multiband ecoregion GeoTIFF containing every model
-            predictor and observed response band.
         model_run_directory: Output directory from the response-model workflow.
         output_directory: Destination directory. ``None`` uses an ecoregion-
             specific directory under ``outputs/reference_condition_inference``.
         show_progress: Whether to display tqdm window progress.
+        analysis_cache_tiles: Prevalidated cache resolution used by tests and
+            callers that already resolved the configured cache. ``None`` loads
+            and validates the analysis tiles from the cache manifest.
 
     Returns:
         Paths, counts, and elapsed time for the completed inference run.
@@ -1414,9 +2664,17 @@ def run_reference_condition_inference(
     started = time.perf_counter()
     window_size_pixels = analysis_configuration.inference.window_size_pixels
     covariance_shrinkage = analysis_configuration.inference.covariance_shrinkage
-    resolved_raster_path = raster_stack_path.expanduser().resolve()
     resolved_model_run_directory = model_run_directory.expanduser().resolve()
     application_mask_path = analysis_configuration.inference.application_mask_path
+    if analysis_cache_tiles is None:
+        analysis_cache_tiles = resolve_analysis_cache_tiles(
+            analysis_configuration,
+            show_progress=show_progress,
+        )
+    output_grid = build_inference_output_grid(
+        analysis_configuration,
+        analysis_cache_tiles,
+    )
     (
         run_metadata,
         response_models,
@@ -1430,65 +2688,65 @@ def run_reference_condition_inference(
         covariance_shrinkage,
     )
     ecoregion_name = str(run_metadata["ecoregion_name"])
-    ecoregion_slug = re.sub(r"[^a-z0-9]+", "_", ecoregion_name.lower()).strip("_")
-    ecoregion_slug = ecoregion_slug or "ecoregion"
+    analysis_slug = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        analysis_configuration.analysis_name.lower(),
+    ).strip("_")
+    analysis_slug = analysis_slug or "analysis"
     resolved_output_directory = (
         output_directory.expanduser().resolve()
         if output_directory is not None
         else (
             Path("outputs")
             / "reference_condition_inference"
-            / ecoregion_slug
+            / analysis_slug
         ).resolve()
     )
     resolved_output_directory.mkdir(parents=True, exist_ok=True)
 
-    expected_reference_path = (
-        resolved_output_directory / f"{ecoregion_slug}_expected_reference.tif"
+    artifact_paths = InferenceArtifactPaths(
+        expected_reference=(
+            resolved_output_directory / f"{analysis_slug}_expected_reference.tif"
+        ),
+        observed_minus_expected=(
+            resolved_output_directory
+            / f"{analysis_slug}_observed_minus_expected.tif"
+        ),
+        standardized_deviation=(
+            resolved_output_directory
+            / f"{analysis_slug}_standardized_deviation.tif"
+        ),
+        departure_percentile=(
+            resolved_output_directory
+            / f"{analysis_slug}_reference_departure_percentile.tif"
+        ),
+        inference_status=(
+            resolved_output_directory / f"{analysis_slug}_inference_status.tif"
+        ),
+        aggregate_deviation_figure=(
+            resolved_output_directory
+            / f"{analysis_slug}_aggregate_standardized_deviation.png"
+        ),
+        departure_percentile_figure=(
+            resolved_output_directory
+            / f"{analysis_slug}_reference_departure_percentile.png"
+        ),
+        report=(
+            resolved_output_directory / f"{analysis_slug}_inference_report.md"
+        ),
+        metadata=(
+            resolved_output_directory / f"{analysis_slug}_inference_metadata.json"
+        ),
+        checkpoint=(
+            resolved_output_directory / f"{analysis_slug}_inference_checkpoint.json"
+        ),
     )
-    observed_minus_expected_path = (
-        resolved_output_directory
-        / f"{ecoregion_slug}_observed_minus_expected.tif"
-    )
-    standardized_deviation_path = (
-        resolved_output_directory
-        / f"{ecoregion_slug}_standardized_deviation.tif"
-    )
-    departure_percentile_path = (
-        resolved_output_directory
-        / f"{ecoregion_slug}_reference_departure_percentile.tif"
-    )
-    inference_status_path = (
-        resolved_output_directory / f"{ecoregion_slug}_inference_status.tif"
-    )
-    aggregate_deviation_figure_path = (
-        resolved_output_directory
-        / f"{ecoregion_slug}_aggregate_standardized_deviation.png"
-    )
-    departure_percentile_figure_path = (
-        resolved_output_directory
-        / f"{ecoregion_slug}_reference_departure_percentile.png"
-    )
-    report_path = resolved_output_directory / f"{ecoregion_slug}_inference_report.md"
-    metadata_path = (
-        resolved_output_directory / f"{ecoregion_slug}_inference_metadata.json"
-    )
-
-    predictor_names = response_models[0].predictor_names
-    response_names = tuple(model.response_name for model in response_models)
-    required_band_names = (*predictor_names, *response_names)
-    response_statistics = {
-        model.response_band: ResponseStatistics() for model in response_models
-    }
-    departure_percentile_statistics = DeparturePercentileStatistics()
-    raster_pixel_count = 0
-    target_pixel_count = 0
-    predicted_pixel_count = 0
-    insufficient_predictor_pixel_count = 0
-    imputed_pixel_count = 0
 
     print("Reference-condition raster inference")
-    print(f"Raster stack: {resolved_raster_path}")
+    print(f"Analysis: {analysis_configuration.analysis_name}")
+    print(f"Raster cache: {analysis_cache_tiles.manifest_path}")
+    print(f"Validated source tiles: {len(analysis_cache_tiles.tiles):,}")
     print(f"Model run: {resolved_model_run_directory}")
     print(f"Ecoregion: {ecoregion_name}")
     print(f"Responses: {len(response_models)}")
@@ -1510,508 +2768,77 @@ def run_reference_condition_inference(
         f"after {covariance_shrinkage:.1%} diagonal shrinkage"
     )
     print(f"Output directory: {resolved_output_directory}")
+    print(
+        "Stitched grid: "
+        f"{output_grid.width:,} columns x {output_grid.height:,} rows, "
+        f"{output_grid.pixel_size:g} m pixels, {output_grid.crs}"
+    )
     if application_mask_path is None:
         print(
-            "Application mask: not supplied; inferring across the usable ecoregion "
+            "Application mask: not supplied; inferring across the usable AOI "
             "predictor footprint"
         )
     else:
         print(f"Application mask: {application_mask_path}")
         print("Application mask target: defined first-band pixels equal to 1")
 
-    with ExitStack() as stack:
-        raster_stack_source = stack.enter_context(
-            rasterio.open(resolved_raster_path)
-        )
-        application_mask_metadata = None
-        if application_mask_path is None:
-            aligned_application_mask = None
-        else:
-            application_mask_source = stack.enter_context(
-                rasterio.open(application_mask_path)
-            )
-            application_mask_metadata = {
-                "path": str(application_mask_path),
-                "selected_value": 1,
-                "resampling": "nearest",
-                "source_width": application_mask_source.width,
-                "source_height": application_mask_source.height,
-                "source_crs": (
-                    str(application_mask_source.crs)
-                    if application_mask_source.crs
-                    else None
-                ),
-                "source_transform": list(application_mask_source.transform),
-            }
-            print(
-                "Application mask source grid: "
-                f"{application_mask_source.width:,} columns x "
-                f"{application_mask_source.height:,} rows, "
-                f"{application_mask_source.crs}"
-            )
-            print(
-                "Application mask alignment: nearest neighbor to the inference "
-                f"grid ({raster_stack_source.width:,} columns x "
-                f"{raster_stack_source.height:,} rows, "
-                f"{raster_stack_source.crs})"
-            )
-            aligned_application_mask = stack.enter_context(
-                WarpedVRT(
-                    application_mask_source,
-                    crs=raster_stack_source.crs,
-                    transform=raster_stack_source.transform,
-                    width=raster_stack_source.width,
-                    height=raster_stack_source.height,
-                    resampling=Resampling.nearest,
-                )
-            )
+    inference_fingerprint = build_inference_fingerprint(
+        analysis_configuration,
+        analysis_cache_tiles,
+        resolved_model_run_directory,
+        response_models,
+        reference_calibration.prediction_table_path,
+    )
+    (
+        application_mask_metadata,
+        resumed_tile_count,
+        processed_tile_count,
+    ) = write_inference_tiles(
+        analysis_configuration,
+        analysis_cache_tiles,
+        output_grid,
+        artifact_paths,
+        response_models,
+        reference_calibration,
+        maximum_predictor_missing_fraction,
+        inference_fingerprint,
+        ecoregion_name,
+        resolved_model_run_directory,
+        show_progress,
+    )
+    print(
+        "Inference tile results: "
+        f"{processed_tile_count:,} processed, "
+        f"{resumed_tile_count:,} resumed from checkpoint, 0 failed"
+    )
 
-        source_band_indices = {}
-        for band_index, description in enumerate(
-            raster_stack_source.descriptions,
-            start=1,
-        ):
-            if description is not None:
-                source_band_indices[description] = band_index
-        missing_band_names = [
-            band_name
-            for band_name in required_band_names
-            if band_name not in source_band_indices
-        ]
-        if missing_band_names:
-            raise ValueError(
-                "Raster stack is missing model bands: " + ", ".join(missing_band_names)
-            )
-        reference_band_name = next(
-            iter(
-                analysis_configuration.columns_with_role(
-                    source_band_indices,
-                    "reference",
-                ).values()
-            )
-        )
-        reference_band_index = source_band_indices[reference_band_name]
-        required_band_indices = [
-            source_band_indices[band_name] for band_name in required_band_names
-        ]
-        required_band_indices.append(reference_band_index)
-        reference_band_offset = len(required_band_names)
-
-        display_scale = min(
-            1.0,
-            MAXIMUM_DISPLAY_DIMENSION
-            / max(raster_stack_source.width, raster_stack_source.height),
-        )
-        display_width = max(1, round(raster_stack_source.width * display_scale))
-        display_height = max(
-            1,
-            round(raster_stack_source.height * display_scale),
-        )
-        aggregate_value_sums = np.zeros(
-            (display_height, display_width),
-            dtype=np.float64,
-        )
-        aggregate_value_counts = np.zeros(
-            (display_height, display_width),
-            dtype=np.int64,
-        )
-        percentile_value_sums = np.zeros(
-            (display_height, display_width),
-            dtype=np.float64,
-        )
-        percentile_value_counts = np.zeros(
-            (display_height, display_width),
-            dtype=np.int64,
-        )
-        reference_pixel_counts = np.zeros(
-            (display_height, display_width),
-            dtype=np.int64,
-        )
-        source_bounds = raster_stack_source.bounds
-        source_crs = raster_stack_source.crs
-        print(f"Reference-site band: {reference_band_name}")
-        print(
-            "Aggregate map display grid: "
-            f"{display_width:,} columns x {display_height:,} rows"
-        )
-
-        float_profile = raster_stack_source.profile.copy()
-        float_profile.update(
-            driver="GTiff",
-            count=len(response_models),
-            dtype="float32",
-            nodata=FLOAT_NODATA,
-            compress="deflate",
-            predictor=3,
-            tiled=True,
-            blockxsize=256,
-            blockysize=256,
-            interleave="band",
-            BIGTIFF="IF_SAFER",
-        )
-        status_profile = float_profile.copy()
-        status_profile.update(
-            count=2,
-            dtype="uint8",
-            nodata=STATUS_NODATA,
-            predictor=2,
-        )
-        percentile_profile = float_profile.copy()
-        percentile_profile.update(count=1)
-        expected_destination = stack.enter_context(
-            rasterio.open(expected_reference_path, "w", **float_profile)
-        )
-        deviation_destination = stack.enter_context(
-            rasterio.open(observed_minus_expected_path, "w", **float_profile)
-        )
-        standardized_destination = stack.enter_context(
-            rasterio.open(standardized_deviation_path, "w", **float_profile)
-        )
-        percentile_destination = stack.enter_context(
-            rasterio.open(departure_percentile_path, "w", **percentile_profile)
-        )
-        status_destination = stack.enter_context(
-            rasterio.open(inference_status_path, "w", **status_profile)
-        )
-
-        shared_output_tags = {
-            "ecoregion_name": ecoregion_name,
-            "input_raster": str(resolved_raster_path),
-            "model_run_directory": str(resolved_model_run_directory),
-            "application_mask": str(application_mask_path or "not_supplied"),
-            "application_mask_selected_value": "1",
-            "application_mask_resampling": "nearest",
-        }
-        expected_destination.update_tags(
-            artifact_type="expected_reference_condition",
-            **shared_output_tags,
-        )
-        deviation_destination.update_tags(
-            artifact_type="observed_minus_expected_reference_condition",
-            **shared_output_tags,
-        )
-        standardized_destination.update_tags(
-            artifact_type="standardized_reference_condition_deviation",
-            interpretation=(
-                "observed minus expected divided by pooled out-of-fold reference RMSE"
-            ),
-            **shared_output_tags,
-        )
-        percentile_destination.update_tags(
-            artifact_type="reference_condition_departure_percentile",
-            interpretation=(
-                "area-weighted empirical percentile of covariance-aware distance "
-                "among complete out-of-fold reference vectors"
-            ),
-            response_bands=",".join(reference_calibration.response_bands),
-            covariance_shrinkage=str(covariance_shrinkage),
-            value_minimum="0",
-            value_maximum="1",
-            reference_pixels="nodata",
-            **shared_output_tags,
-        )
-        percentile_destination.set_band_description(
-            1,
-            "reference_departure_percentile",
-        )
-        status_destination.update_tags(
-            artifact_type="reference_condition_inference_status",
-            status_0="outside inference target",
-            status_1="target pixel with excessive predictor missingness",
-            status_2="reference-condition predictions written",
-            **shared_output_tags,
-        )
-        status_destination.set_band_description(1, "inference_status")
-        status_destination.set_band_description(2, "imputed_predictor_count")
-        for output_band_index, response_model in enumerate(
-            response_models,
-            start=1,
-        ):
-            expected_destination.set_band_description(
-                output_band_index,
-                f"{response_model.response_band}_expected_reference",
-            )
-            deviation_destination.set_band_description(
-                output_band_index,
-                f"{response_model.response_band}_observed_minus_expected",
-            )
-            standardized_destination.set_band_description(
-                output_band_index,
-                f"{response_model.response_band}_standardized_deviation",
-            )
-            response_tags = {
-                "response_band": response_model.response_band,
-                "display_name": response_model.display_name,
-                "source_response_band": response_model.response_name,
-                "reference_residual_rmse_oof": str(
-                    response_model.reference_rmse
-                ),
-                "model_path": str(response_model.path),
-            }
-            expected_destination.update_tags(output_band_index, **response_tags)
-            deviation_destination.update_tags(output_band_index, **response_tags)
-            standardized_destination.update_tags(output_band_index, **response_tags)
-
-        window_rows = math.ceil(raster_stack_source.height / window_size_pixels)
-        window_columns = math.ceil(raster_stack_source.width / window_size_pixels)
-        window_iterator = (
-            Window(
-                column_offset,
-                row_offset,
-                min(
-                    window_size_pixels,
-                    raster_stack_source.width - column_offset,
-                ),
-                min(
-                    window_size_pixels,
-                    raster_stack_source.height - row_offset,
-                ),
-            )
-            for row_offset in range(
-                0,
-                raster_stack_source.height,
-                window_size_pixels,
-            )
-            for column_offset in range(
-                0,
-                raster_stack_source.width,
-                window_size_pixels,
-            )
-        )
-        for window in tqdm(
-            window_iterator,
-            total=window_rows * window_columns,
-            desc="Applying response models",
-            unit="window",
-            disable=not show_progress,
-        ):
-            masked_window_values = raster_stack_source.read(
-                required_band_indices,
-                window=window,
-                masked=True,
-            )
-            window_values = np.asarray(
-                np.ma.getdata(masked_window_values),
-                dtype=np.float64,
-            )
-            window_value_validity = ~np.ma.getmaskarray(masked_window_values)
-            window_value_validity &= np.isfinite(window_values)
-            window_values[~window_value_validity] = np.nan
-
-            predictor_count = len(predictor_names)
-            predictor_values = window_values[:predictor_count]
-            predictor_value_validity = window_value_validity[:predictor_count]
-            missing_predictor_counts = np.count_nonzero(
-                ~predictor_value_validity,
-                axis=0,
-            ).astype(np.uint8)
-            if aligned_application_mask is None:
-                target_pixel_mask = np.any(predictor_value_validity, axis=0)
-            else:
-                masked_application_values = aligned_application_mask.read(
-                    1,
-                    window=window,
-                    masked=True,
-                )
-                application_mask_values = np.asarray(
-                    np.ma.getdata(masked_application_values)
-                )
-                target_pixel_mask = (
-                    ~np.ma.getmaskarray(masked_application_values)
-                    & np.isfinite(application_mask_values)
-                    & (application_mask_values == 1)
-                )
-            missing_predictor_fraction = missing_predictor_counts / predictor_count
-            usable_pixel_mask = target_pixel_mask & (
-                missing_predictor_fraction
-                <= maximum_predictor_missing_fraction
-            )
-            reference_pixel_mask = (
-                window_value_validity[reference_band_offset]
-                & (window_values[reference_band_offset] != 0)
-            )
-            complete_response_pixel_mask = usable_pixel_mask.copy()
-            for response_model_offset in range(len(response_models)):
-                response_band_offset = predictor_count + response_model_offset
-                complete_response_pixel_mask &= window_value_validity[
-                    response_band_offset
-                ]
-
-            window_height = int(window.height)
-            window_width = int(window.width)
-            window_shape = (window_height, window_width)
-            expected_output = np.full(
-                (len(response_models), *window_shape),
-                FLOAT_NODATA,
-                dtype=np.float32,
-            )
-            deviation_output = np.full_like(expected_output, FLOAT_NODATA)
-            standardized_output = np.full_like(expected_output, FLOAT_NODATA)
-            percentile_output = np.full(window_shape, FLOAT_NODATA, dtype=np.float32)
-            status_output = np.zeros(window_shape, dtype=np.uint8)
-            status_output[target_pixel_mask] = STATUS_INSUFFICIENT_PREDICTORS
-            status_output[usable_pixel_mask] = STATUS_PREDICTED
-            imputation_output = np.full(window_shape, STATUS_NODATA, dtype=np.uint8)
-            imputation_output[target_pixel_mask] = missing_predictor_counts[
-                target_pixel_mask
-            ]
-
-            raster_pixel_count += target_pixel_mask.size
-            window_target_pixel_count = int(
-                np.count_nonzero(target_pixel_mask)
-            )
-            window_predicted_pixel_count = int(
-                np.count_nonzero(usable_pixel_mask)
-            )
-            target_pixel_count += window_target_pixel_count
-            predicted_pixel_count += window_predicted_pixel_count
-            insufficient_predictor_pixel_count += (
-                window_target_pixel_count - window_predicted_pixel_count
-            )
-            imputed_pixel_count += int(
-                np.count_nonzero(
-                    usable_pixel_mask & (missing_predictor_counts > 0)
-                )
-            )
-
-            usable_pixel_mask_flat = usable_pixel_mask.ravel()
-            if window_predicted_pixel_count > 0:
-                predictor_matrix = predictor_values.reshape(
-                    predictor_count,
-                    -1,
-                ).T[usable_pixel_mask_flat]
-                predictor_table = pd.DataFrame(
-                    predictor_matrix,
-                    columns=predictor_names,
-                )
-                for response_model_offset, response_model in enumerate(
-                    response_models
-                ):
-                    expected_reference_values = predict_expected_response(
-                        response_model.bundle,
-                        predictor_table,
-                    )
-                    if not np.isfinite(expected_reference_values).all():
-                        raise RuntimeError(
-                            f"{response_model.response_band} produced a nonfinite "
-                            "prediction."
-                        )
-                    expected_output_flat = expected_output[
-                        response_model_offset
-                    ].ravel()
-                    expected_output_flat[usable_pixel_mask_flat] = (
-                        expected_reference_values.astype(np.float32)
-                    )
-
-                    response_band_offset = predictor_count + response_model_offset
-                    observed_values = window_values[
-                        response_band_offset
-                    ].ravel()
-                    observed_value_validity = window_value_validity[
-                        response_band_offset
-                    ].ravel()
-                    deviation_pixel_mask = (
-                        usable_pixel_mask_flat & observed_value_validity
-                    )
-                    deviation_values = (
-                        observed_values[deviation_pixel_mask]
-                        - expected_output_flat[deviation_pixel_mask]
-                    )
-                    standardized_deviation_values = (
-                        deviation_values / response_model.reference_rmse
-                    )
-                    deviation_output[response_model_offset].ravel()[
-                        deviation_pixel_mask
-                    ] = deviation_values.astype(np.float32)
-                    standardized_output[response_model_offset].ravel()[
-                        deviation_pixel_mask
-                    ] = standardized_deviation_values.astype(np.float32)
-                    response_statistics[response_model.response_band].update(
-                        window_predicted_pixel_count,
-                        standardized_deviation_values,
-                    )
-
-            complete_non_reference_pixel_mask = (
-                complete_response_pixel_mask & ~reference_pixel_mask
-            )
-            standardized_departure_vectors = standardized_output[
-                :, complete_non_reference_pixel_mask
-            ].T.astype(np.float64)
-            mahalanobis_distances = (
-                reference_calibration.calculate_mahalanobis_distances(
-                    standardized_departure_vectors
-                )
-            )
-            departure_percentiles = (
-                reference_calibration.calculate_reference_departure_percentiles(
-                    mahalanobis_distances
-                )
-            )
-            percentile_output[complete_non_reference_pixel_mask] = (
-                departure_percentiles.astype(np.float32)
-            )
-            departure_percentile_statistics.update(departure_percentiles)
-            total_absolute_standardized_departures = np.sum(
-                np.abs(standardized_output.astype(np.float64)),
-                axis=0,
-            )
-            source_rows = np.arange(
-                int(window.row_off),
-                int(window.row_off + window.height),
-            )
-            source_columns = np.arange(
-                int(window.col_off),
-                int(window.col_off + window.width),
-            )
-            display_rows = np.minimum(
-                source_rows * display_height // raster_stack_source.height,
-                display_height - 1,
-            )
-            display_columns = np.minimum(
-                source_columns * display_width // raster_stack_source.width,
-                display_width - 1,
-            )
-            display_cell_indices = (
-                display_rows[:, np.newaxis] * display_width
-                + display_columns[np.newaxis, :]
-            )
-            np.add.at(
-                aggregate_value_sums.ravel(),
-                display_cell_indices[complete_non_reference_pixel_mask],
-                total_absolute_standardized_departures[
-                    complete_non_reference_pixel_mask
-                ],
-            )
-            np.add.at(
-                aggregate_value_counts.ravel(),
-                display_cell_indices[complete_non_reference_pixel_mask],
-                1,
-            )
-            np.add.at(
-                percentile_value_sums.ravel(),
-                display_cell_indices[complete_non_reference_pixel_mask],
-                departure_percentiles,
-            )
-            np.add.at(
-                percentile_value_counts.ravel(),
-                display_cell_indices[complete_non_reference_pixel_mask],
-                1,
-            )
-            np.add.at(
-                reference_pixel_counts.ravel(),
-                display_cell_indices[reference_pixel_mask],
-                1,
-            )
-
-            expected_destination.write(expected_output, window=window)
-            deviation_destination.write(deviation_output, window=window)
-            standardized_destination.write(standardized_output, window=window)
-            percentile_destination.write(percentile_output, 1, window=window)
-            status_destination.write(
-                np.stack([status_output, imputation_output]),
-                window=window,
-            )
-
+    output_statistics = summarize_inference_outputs(
+        analysis_configuration,
+        analysis_cache_tiles,
+        output_grid,
+        artifact_paths,
+        response_models,
+        show_progress,
+    )
+    response_statistics = output_statistics.response_statistics
+    departure_percentile_statistics = (
+        output_statistics.departure_percentile_statistics
+    )
+    aggregate_value_sums = output_statistics.aggregate_value_sums
+    aggregate_value_counts = output_statistics.aggregate_value_counts
+    percentile_value_sums = output_statistics.percentile_value_sums
+    percentile_value_counts = output_statistics.percentile_value_counts
+    reference_pixel_counts = output_statistics.reference_pixel_counts
+    raster_pixel_count = output_grid.width * output_grid.height
+    aoi_pixel_count = output_statistics.aoi_pixels
+    target_pixel_count = output_statistics.target_pixels
+    predicted_pixel_count = output_statistics.predicted_pixels
+    insufficient_predictor_pixel_count = (
+        output_statistics.insufficient_predictor_pixels
+    )
+    imputed_pixel_count = output_statistics.imputed_pixels
+    source_bounds = output_grid.bounds
+    source_crs = output_grid.crs
     aggregate_figure_metadata = create_aggregate_deviation_figure(
         aggregate_value_sums,
         aggregate_value_counts,
@@ -2019,9 +2846,9 @@ def run_reference_condition_inference(
         source_bounds,
         source_crs,
         len(response_models),
-        ecoregion_name,
+        analysis_configuration.display_name,
         application_mask_path is not None,
-        aggregate_deviation_figure_path,
+        artifact_paths.aggregate_deviation_figure,
     )
     departure_percentile_figure_metadata = create_departure_percentile_figure(
         percentile_value_sums,
@@ -2030,9 +2857,9 @@ def run_reference_condition_inference(
         source_bounds,
         source_crs,
         len(response_models),
-        ecoregion_name,
+        analysis_configuration.display_name,
         application_mask_path is not None,
-        departure_percentile_figure_path,
+        artifact_paths.departure_percentile_figure,
     )
     elapsed_seconds = time.perf_counter() - started
     departure_percentile_summary = departure_percentile_statistics.summarize()
@@ -2070,23 +2897,26 @@ def run_reference_condition_inference(
                 ].summarize(),
             }
         )
-    artifact_paths = {
-        "expected_reference": str(expected_reference_path),
-        "observed_minus_expected": str(observed_minus_expected_path),
-        "standardized_deviation": str(standardized_deviation_path),
-        "reference_departure_percentile": str(departure_percentile_path),
-        "inference_status": str(inference_status_path),
+    artifact_path_records = {
+        "expected_reference": str(artifact_paths.expected_reference),
+        "observed_minus_expected": str(artifact_paths.observed_minus_expected),
+        "standardized_deviation": str(artifact_paths.standardized_deviation),
+        "reference_departure_percentile": str(
+            artifact_paths.departure_percentile
+        ),
+        "inference_status": str(artifact_paths.inference_status),
         "aggregate_standardized_deviation_figure": str(
-            aggregate_deviation_figure_path
+            artifact_paths.aggregate_deviation_figure
         ),
         "reference_departure_percentile_figure": str(
-            departure_percentile_figure_path
+            artifact_paths.departure_percentile_figure
         ),
-        "report": str(report_path),
-        "metadata": str(metadata_path),
+        "report": str(artifact_paths.report),
+        "metadata": str(artifact_paths.metadata),
+        "checkpoint": str(artifact_paths.checkpoint),
     }
     inference_metadata: dict[str, object] = {
-        "artifact_type": "grassland_reference_condition_raster_inference",
+        "artifact_type": "reference_condition_raster_inference",
         "format_version": 3,
         "ecoregion_name": ecoregion_name,
         "analysis_configuration": {
@@ -2097,13 +2927,26 @@ def run_reference_condition_inference(
             "year": analysis_configuration.year,
             "sha256": analysis_configuration.configuration_sha256,
         },
-        "input_raster": str(resolved_raster_path),
+        "input_raster_cache": {
+            "manifest": str(analysis_cache_tiles.manifest_path),
+            "stack_identifier": analysis_cache_tiles.stack_identifier,
+            "source_tiles": len(analysis_cache_tiles.tiles),
+            "source_bytes": analysis_cache_tiles.total_file_size_bytes,
+        },
         "model_run_directory": str(resolved_model_run_directory),
+        "tile_processing": {
+            "checkpoint": str(artifact_paths.checkpoint),
+            "inference_fingerprint": inference_fingerprint,
+            "source_tiles": len(analysis_cache_tiles.tiles),
+            "processed_tiles": processed_tile_count,
+            "resumed_tiles": resumed_tile_count,
+            "failed_tiles": 0,
+        },
         "application_mask": application_mask_metadata,
         "mask_interpretation": (
             "defined first-band pixels equal to 1 after nearest-neighbor alignment"
             if application_mask_path
-            else "unmasked usable ecoregion predictor footprint"
+            else "unmasked usable AOI predictor footprint"
         ),
         "response_count": len(response_models),
         "configuration": {
@@ -2115,17 +2958,16 @@ def run_reference_condition_inference(
             "imputation": "final-reference-training values stored in each model",
         },
         "source_grid": {
-            "width": raster_stack_source.width,
-            "height": raster_stack_source.height,
-            "crs": (
-                str(raster_stack_source.crs)
-                if raster_stack_source.crs
-                else None
-            ),
-            "transform": list(raster_stack_source.transform),
+            "width": output_grid.width,
+            "height": output_grid.height,
+            "crs": str(output_grid.crs),
+            "transform": list(output_grid.transform),
+            "bounds": list(output_grid.bounds),
+            "pixel_size": output_grid.pixel_size,
         },
         "coverage": {
             "raster_pixels": raster_pixel_count,
+            "aoi_pixels": aoi_pixel_count,
             "target_pixels": target_pixel_count,
             "predicted_pixels": predicted_pixel_count,
             "insufficient_predictor_pixels": (
@@ -2185,18 +3027,19 @@ def run_reference_condition_inference(
             "figure": departure_percentile_figure_metadata,
         },
         "aggregate_deviation_figure": aggregate_figure_metadata,
-        "artifacts": artifact_paths,
+        "artifacts": artifact_path_records,
         "elapsed_seconds": elapsed_seconds,
     }
-    metadata_path.write_text(
+    artifact_paths.metadata.write_text(
         json.dumps(inference_metadata, indent=2),
         encoding="utf-8",
     )
-    write_inference_report(report_path, inference_metadata)
+    write_inference_report(artifact_paths.report, inference_metadata)
 
     print()
     print("Inference coverage")
     print(f"  Raster pixels: {raster_pixel_count:,}")
+    print(f"  Pixels inside exact AOI: {aoi_pixel_count:,}")
     print(f"  Target pixels: {target_pixel_count:,}")
     print(f"  Predicted pixels: {predicted_pixel_count:,}")
     print(
@@ -2227,26 +3070,31 @@ def run_reference_condition_inference(
         f"{departure_percentile_summary['at_or_above_95_percent']:.1f}%"
     )
     print()
-    print(f"Inference report: {report_path}")
-    print(f"Metadata: {metadata_path}")
-    print(f"Aggregate deviation figure: {aggregate_deviation_figure_path}")
-    print(f"Departure percentile raster: {departure_percentile_path}")
-    print(f"Departure percentile figure: {departure_percentile_figure_path}")
+    print(f"Inference report: {artifact_paths.report}")
+    print(f"Metadata: {artifact_paths.metadata}")
+    print(f"Aggregate deviation figure: {artifact_paths.aggregate_deviation_figure}")
+    print(f"Departure percentile raster: {artifact_paths.departure_percentile}")
+    print(f"Departure percentile figure: {artifact_paths.departure_percentile_figure}")
     print(f"Completed in {elapsed_seconds:.1f} seconds")
 
     return InferenceRunSummary(
         output_directory=resolved_output_directory,
-        expected_reference_path=expected_reference_path,
-        observed_minus_expected_path=observed_minus_expected_path,
-        standardized_deviation_path=standardized_deviation_path,
-        departure_percentile_path=departure_percentile_path,
-        inference_status_path=inference_status_path,
-        aggregate_deviation_figure_path=aggregate_deviation_figure_path,
-        departure_percentile_figure_path=departure_percentile_figure_path,
-        report_path=report_path,
-        metadata_path=metadata_path,
+        expected_reference_path=artifact_paths.expected_reference,
+        observed_minus_expected_path=artifact_paths.observed_minus_expected,
+        standardized_deviation_path=artifact_paths.standardized_deviation,
+        departure_percentile_path=artifact_paths.departure_percentile,
+        inference_status_path=artifact_paths.inference_status,
+        aggregate_deviation_figure_path=(
+            artifact_paths.aggregate_deviation_figure
+        ),
+        departure_percentile_figure_path=(
+            artifact_paths.departure_percentile_figure
+        ),
+        report_path=artifact_paths.report,
+        metadata_path=artifact_paths.metadata,
         response_count=len(response_models),
         raster_pixels=raster_pixel_count,
+        aoi_pixels=aoi_pixel_count,
         target_pixels=target_pixel_count,
         predicted_pixels=predicted_pixel_count,
         departure_percentile_pixels=int(departure_percentile_summary["pixels"]),
@@ -2269,7 +3117,6 @@ def main() -> None:
     )
     run_reference_condition_inference(
         analysis_configuration,
-        args.raster_stack,
         args.model_run_directory,
         output_directory=args.output_directory,
         show_progress=not args.no_progress,
