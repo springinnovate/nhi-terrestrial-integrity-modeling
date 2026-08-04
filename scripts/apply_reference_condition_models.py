@@ -1666,8 +1666,9 @@ def create_reference_similarity_figure(
     raster_bounds: BoundingBox,
     response_count: int,
     analysis_name: str,
+    analysis_slug: str,
     application_mask_label: str | None,
-    output_path: Path,
+    artifact_paths: InferenceArtifactPaths,
 ) -> dict[str, object]:
     """Map reference similarity as one minus departure percentile.
 
@@ -1690,9 +1691,10 @@ def create_reference_similarity_figure(
         raster_bounds: Spatial bounds of the source raster.
         response_count: Number of responses in each multivariate distance.
         analysis_name: Human-readable label included in the title.
+        analysis_slug: File-safe prefix shared by inference artifacts.
         application_mask_label: Human-readable name for the externally selected
             inference extent, or ``None`` when no mask was supplied.
-        output_path: Destination path for the publication-resolution PNG.
+        artifact_paths: Figure destination and related GeoTIFF paths.
 
     Returns:
         JSON-ready display dimensions, similarity classes, and counts.
@@ -1743,8 +1745,32 @@ def create_reference_similarity_figure(
         r"$S_i=0.05$ means the pixel differs more than about 95% of "
         "reference-site area."
     )
+    geotiff_filename_prefix = f"{analysis_slug}_"
+    related_geotiffs = {
+        "reference_departure_percentile": artifact_paths.departure_percentile.name,
+        "expected_reference": artifact_paths.expected_reference.name,
+        "observed_minus_expected": artifact_paths.observed_minus_expected.name,
+        "standardized_deviation": artifact_paths.standardized_deviation.name,
+        "inference_status": artifact_paths.inference_status.name,
+    }
+    geotiff_suffixes = {
+        artifact_name: filename.removeprefix(geotiff_filename_prefix)
+        for artifact_name, filename in related_geotiffs.items()
+    }
+    geotiff_footer = (
+        "Machine-readable GeoTIFFs in this directory "
+        f"(filename prefix: {geotiff_filename_prefix})\n"
+        f"{geotiff_suffixes['reference_departure_percentile']} - departure "
+        f"percentile used for $S_i$ | {geotiff_suffixes['expected_reference']} - "
+        "modeled reference values\n"
+        f"{geotiff_suffixes['observed_minus_expected']} - raw differences | "
+        f"{geotiff_suffixes['standardized_deviation']} - standardized "
+        "differences\n"
+        f"{geotiff_suffixes['inference_status']} - prediction coverage and "
+        "exclusion status"
+    )
     with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
-        figure = Figure(figsize=(11.0, 7.5), facecolor="white")
+        figure = Figure(figsize=(11.0, 8.2), facecolor="white")
         FigureCanvasAgg(figure)
         axis = figure.subplots()
         context_handles, context_metadata = add_assessment_context(
@@ -1813,7 +1839,7 @@ def create_reference_similarity_figure(
             )
         figure.text(
             0.5,
-            0.01,
+            0.105,
             figure_caption,
             ha="center",
             va="bottom",
@@ -1821,9 +1847,26 @@ def create_reference_similarity_figure(
             color="#4B5459",
             wrap=True,
         )
-        figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
+        figure.text(
+            0.02,
+            0.01,
+            geotiff_footer,
+            ha="left",
+            va="bottom",
+            fontsize=6.5,
+            color="#4B5459",
+            linespacing=1.25,
+        )
+        figure.tight_layout(rect=(0.0, 0.18, 1.0, 1.0))
+        artifact_paths.reference_similarity_figure.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        figure.savefig(
+            artifact_paths.reference_similarity_figure,
+            dpi=FIGURE_DPI,
+            bbox_inches="tight",
+        )
 
     similarity_class_metadata = []
     class_lower_bounds = (0.0, *REFERENCE_SIMILARITY_THRESHOLDS)
@@ -1847,6 +1890,9 @@ def create_reference_similarity_figure(
         "metric": "reference similarity S_i = 1 - P_i",
         "color_bar_label": color_bar_label,
         "caption": figure_caption,
+        "geotiff_footer": geotiff_footer,
+        "geotiff_filename_prefix": geotiff_filename_prefix,
+        "related_geotiffs": related_geotiffs,
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
         ),
@@ -3426,8 +3472,9 @@ def run_reference_condition_inference(
         source_bounds,
         len(response_models),
         analysis_configuration.display_name,
+        analysis_slug,
         analysis_configuration.inference.application_mask_label,
-        artifact_paths.reference_similarity_figure,
+        artifact_paths,
     )
     elapsed_seconds = time.perf_counter() - started
     departure_percentile_summary = departure_percentile_statistics.summarize()

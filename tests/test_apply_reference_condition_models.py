@@ -643,6 +643,26 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             similarity_figure_metadata["color_bar_label"]
             + similarity_figure_metadata["caption"],
         )
+        self.assertIn(
+            "Machine-readable GeoTIFFs in this directory",
+            similarity_figure_metadata["geotiff_footer"],
+        )
+        self.assertEqual(
+            {
+                "reference_departure_percentile": (
+                    "synthetic_prairie_reference_departure_percentile.tif"
+                ),
+                "expected_reference": "synthetic_prairie_expected_reference.tif",
+                "observed_minus_expected": (
+                    "synthetic_prairie_observed_minus_expected.tif"
+                ),
+                "standardized_deviation": (
+                    "synthetic_prairie_standardized_deviation.tif"
+                ),
+                "inference_status": "synthetic_prairie_inference_status.tif",
+            },
+            similarity_figure_metadata["related_geotiffs"],
+        )
         self.assertEqual(
             ["0-0.01", "0.01-0.05", "0.05-0.10", "0.10-0.50", "0.50-1.00"],
             [
