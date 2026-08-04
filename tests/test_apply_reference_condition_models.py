@@ -1,4 +1,4 @@
-"""Tests for windowed reference-condition raster inference."""
+"""Tests for tile-backed reference-condition raster inference."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import math
+import os
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -16,8 +18,12 @@ import joblib
 import numpy as np
 import pandas as pd
 import rasterio
+from pyproj import Transformer
+from rasterio.io import MemoryFile
 from rasterio.transform import from_bounds, from_origin
 from rasterio.warp import transform_bounds
+from shapely.geometry import box, mapping
+from shapely.ops import transform
 
 from scripts.apply_reference_condition_models import (
     FLOAT_NODATA,
@@ -27,14 +33,18 @@ from scripts.apply_reference_condition_models import (
     STATUS_PREDICTED,
     build_reference_departure_calibration,
     load_response_models,
+    parse_args,
     run_reference_condition_inference,
+    write_computed_inference_tiles,
 )
+from scripts.fetch_gee_raster_tiles import cache_aoi_tiles
 from scripts.fit_grassland_integrity_parameters import (
     IntegrityConfiguration,
     fit_response_gam,
     predict_expected_response,
 )
-from scripts.analysis_config import load_analysis_configuration
+from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
+from scripts.raster_cache_utils import resolve_analysis_cache_tiles
 
 
 class ApplyReferenceConditionModelsTest(unittest.TestCase):
@@ -49,22 +59,57 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.model_run_directory = self.temporary_path / "model_run"
         self.model_directory = self.model_run_directory / "models"
         self.model_directory.mkdir(parents=True)
-        self.predictor_names = (
-            "y2018_d20_temperature",
-            "y2018_d21_precipitation",
-            "y2018_d22_soil",
-            "y2018_d23_topography",
-            "y2018_d35_landform",
+        base_configuration = load_analysis_configuration()
+        configured_band_names = base_configuration.band_names()
+        band_name_by_identifier = {
+            band_definition.identifier: band_name
+            for band_definition, band_name in zip(
+                base_configuration.bands,
+                configured_band_names,
+                strict=True,
+            )
+        }
+        self.predictor_names = tuple(
+            band_name_by_identifier[identifier]
+            for identifier in ("d20", "d21", "d22", "d23", "d35")
         )
         self.response_names = (
-            "y2018_d02_response",
-            "y2018_d11_response",
+            band_name_by_identifier["d02"],
+            band_name_by_identifier["d11"],
         )
+        self.reference_name = band_name_by_identifier["d01"]
         self.response_rmse = {"d02": 2.0, "d11": 4.0}
-        base_configuration = load_analysis_configuration()
+        self.aoi_path = self.temporary_path / "synthetic_aoi.geojson"
+        self.cache_directory = self.temporary_path / "raster_cache"
+        self.grid = RasterCacheGrid(
+            crs="EPSG:6933",
+            pixel_size_meters=1_000,
+            tile_size_pixels=4,
+        )
+        # Keep the vector just inside the outer pixel edges so projection round-
+        # trip noise cannot select neighboring cache rows or columns. Every
+        # output pixel center remains inside this AOI.
+        projected_aoi = box(100, 100, 4_900, 3_900)
+        to_wgs84 = Transformer.from_crs(
+            self.grid.crs,
+            "EPSG:4326",
+            always_xy=True,
+        )
+        self.aoi_path.write_text(
+            json.dumps(mapping(transform(to_wgs84.transform, projected_aoi))),
+            encoding="utf-8",
+        )
         self.analysis_configuration = replace(
             base_configuration,
+            analysis_name="synthetic_prairie",
             display_name="Synthetic Prairie",
+            aoi_path=self.aoi_path,
+            earth_engine=replace(
+                base_configuration.earth_engine,
+                project="offline-test-project",
+                cache_directory=self.cache_directory,
+            ),
+            grid=self.grid,
             inference=replace(
                 base_configuration.inference,
                 application_mask_path=None,
@@ -72,9 +117,19 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             ),
         )
         self.models = self._create_models()
-        self.raster_path = self.temporary_path / "synthetic_ecoregion.tif"
-        self.transform = from_origin(-110.0, 45.0, 0.01, 0.01)
-        self.source_values = self._create_raster_stack()
+        self.transform = from_origin(0, 4_000, 1_000, 1_000)
+        self.source_values = self._create_source_values(width=5)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cache_aoi_tiles(
+                self.analysis_configuration,
+                refresh=False,
+                show_progress=False,
+                tile_fetcher=self._create_tile_bytes,
+            )
+        self.analysis_cache_tiles = resolve_analysis_cache_tiles(
+            self.analysis_configuration,
+            show_progress=False,
+        )
         (self.model_run_directory / "run_metadata.json").write_text(
             json.dumps(
                 {
@@ -173,15 +228,17 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             models[response_band] = model
         return models
 
-    def _create_raster_stack(self) -> np.ndarray:
-        """Write observed responses and predictors with controlled gaps.
+    def _create_source_values(self, width: int) -> np.ndarray:
+        """Create observed responses and predictors with controlled gaps.
+
+        Args:
+            width: Number of source columns to generate.
 
         Returns:
             Source values in raster-band, row, and column order.
         """
 
         height = 4
-        width = 5
         row_grid, column_grid = np.indices((height, width), dtype=np.float32)
         predictor_values = np.stack(
             [
@@ -221,31 +278,72 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         source_values[3:7, 0, 0] = FLOAT_NODATA
         source_values[2, 0, 0] = predictor_values[0, 0, 0]
 
-        profile = {
-            "driver": "GTiff",
-            "width": width,
-            "height": height,
-            "count": len(source_values),
-            "dtype": "float32",
-            "crs": "EPSG:4326",
-            "transform": self.transform,
-            "nodata": FLOAT_NODATA,
-            "tiled": True,
-            "blockxsize": 16,
-            "blockysize": 16,
-        }
-        with rasterio.open(self.raster_path, "w", **profile) as destination:
-            destination.write(source_values)
-            for band_index, band_name in enumerate(
-                (
-                    *self.response_names,
-                    *self.predictor_names,
-                    "y2018_d01_grassland_reference_sites",
-                ),
-                start=1,
-            ):
-                destination.set_band_description(band_index, band_name)
+        source_values[source_values == FLOAT_NODATA] = np.nan
         return source_values
+
+    def _create_tile_bytes(
+        self,
+        raster_stack,
+        tile,
+        cache_grid,
+        band_names,
+    ) -> bytes:
+        """Encode one configured cache tile from deterministic source values."""
+
+        del raster_stack
+        full_source_values = self._create_source_values(width=8)
+        configured_values = np.zeros(
+            (
+                len(band_names),
+                cache_grid.tile_size_pixels,
+                cache_grid.tile_size_pixels,
+            ),
+            dtype=np.float32,
+        )
+        source_by_name = {
+            **{
+                response_name: full_source_values[response_offset]
+                for response_offset, response_name in enumerate(
+                    self.response_names
+                )
+            },
+            **{
+                predictor_name: full_source_values[2 + predictor_offset]
+                for predictor_offset, predictor_name in enumerate(
+                    self.predictor_names
+                )
+            },
+            self.reference_name: full_source_values[-1],
+        }
+        first_global_column = tile.column * cache_grid.tile_size_pixels
+        last_global_column = (
+            first_global_column + cache_grid.tile_size_pixels
+        )
+        for band_offset, band_name in enumerate(band_names):
+            if band_name in source_by_name:
+                configured_values[band_offset] = source_by_name[band_name][
+                    :,
+                    first_global_column:last_global_column,
+                ]
+            else:
+                configured_values[band_offset] = band_offset + 1
+        with MemoryFile() as memory_file:
+            with memory_file.open(
+                driver="GTiff",
+                width=cache_grid.tile_size_pixels,
+                height=cache_grid.tile_size_pixels,
+                count=len(band_names),
+                dtype="float32",
+                crs=cache_grid.crs,
+                transform=from_origin(
+                    tile.left,
+                    tile.top,
+                    cache_grid.pixel_size_meters,
+                    cache_grid.pixel_size_meters,
+                ),
+            ) as destination:
+                destination.write(configured_values)
+            return memory_file.read()
 
     def test_calibrates_weighted_reference_distance_and_percentile(self) -> None:
         """Use only weighted reference rows for covariance and empirical CDF."""
@@ -276,6 +374,25 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(5, calibration.complete_reference_row_count)
         self.assertEqual(6_000.0, calibration.complete_reference_area_m2)
 
+    def test_cli_rejects_legacy_positional_raster_stack(self) -> None:
+        """Require TOML cache inputs instead of a monolithic GeoTIFF."""
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "apply_reference_condition_models",
+                    str(self.analysis_configuration.path),
+                    "data/raster_stacks/obsolete.tif",
+                    str(self.model_run_directory),
+                ],
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
     def test_writes_aligned_response_stacks_and_streaming_report(self) -> None:
         """Calculate expected, raw, and standardized values in raster windows."""
 
@@ -291,10 +408,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         ):
             summary = run_reference_condition_inference(
                 self.analysis_configuration,
-                self.raster_path,
                 self.model_run_directory,
                 output_directory=output_directory,
                 show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
             )
 
         self.assertEqual(2, summary.response_count)
@@ -342,7 +459,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         with rasterio.open(summary.expected_reference_path) as expected_source:
             expected = expected_source.read(masked=True)
             self.assertEqual(self.transform, expected_source.transform)
-            self.assertEqual("EPSG:4326", str(expected_source.crs))
+            self.assertEqual("EPSG:6933", str(expected_source.crs))
             self.assertEqual(
                 ("d02_expected_reference", "d11_expected_reference"),
                 expected_source.descriptions,
@@ -421,9 +538,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 "complete_reference_rows"
             ],
         )
-        self.assertEqual(
+        self.assertAlmostEqual(
             1.0 / 3.0,
             metadata["reference_departure_percentile"]["statistics"]["mean"],
+            places=6,
         )
         self.assertEqual(
             1.0,
@@ -432,7 +550,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            "#5E2B97",
+            "#0072B2",
             metadata["reference_departure_percentile"]["figure"][
                 "reference_color"
             ],
@@ -485,6 +603,153 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             "Reference-condition raster inference",
             standard_output.getvalue(),
         )
+        self.assertEqual(
+            self.analysis_configuration.inference.worker_count,
+            metadata["configuration"]["worker_count"],
+        )
+
+        resumed_output = io.StringIO()
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "predict_expected_response",
+                side_effect=AssertionError(
+                    "A completed inference tile must not be modeled again."
+                ),
+            ),
+            contextlib.redirect_stdout(resumed_output),
+        ):
+            resumed_summary = run_reference_condition_inference(
+                replace(
+                    self.analysis_configuration,
+                    inference=replace(
+                        self.analysis_configuration.inference,
+                        worker_count=1,
+                    ),
+                ),
+                self.model_run_directory,
+                output_directory=output_directory,
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+        self.assertEqual(summary.predicted_pixels, resumed_summary.predicted_pixels)
+        self.assertIn("2 resumed from checkpoint", resumed_output.getvalue())
+
+    def test_resumes_after_a_tile_failure(self) -> None:
+        """Checkpoint the first tile and recompute only the interrupted tile."""
+
+        output_directory = self.temporary_path / "interrupted_output"
+        single_worker_configuration = replace(
+            self.analysis_configuration,
+            inference=replace(
+                self.analysis_configuration.inference,
+                worker_count=1,
+            ),
+        )
+        prediction_call_count = 0
+
+        def interrupt_second_tile(model_bundle, predictor_table):
+            nonlocal prediction_call_count
+            prediction_call_count += 1
+            if prediction_call_count == 9:
+                raise ConnectionError("synthetic interruption")
+            return predict_expected_response(model_bundle, predictor_table)
+
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "predict_expected_response",
+                side_effect=interrupt_second_tile,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(ConnectionError),
+        ):
+            run_reference_condition_inference(
+                single_worker_configuration,
+                self.model_run_directory,
+                output_directory=output_directory,
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+
+        checkpoint_path = (
+            output_directory / "synthetic_prairie_inference_checkpoint.json"
+        )
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, len(checkpoint["completed_tile_ids"]))
+        resumed_output = io.StringIO()
+        with contextlib.redirect_stdout(resumed_output):
+            summary = run_reference_condition_inference(
+                single_worker_configuration,
+                self.model_run_directory,
+                output_directory=output_directory,
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+        self.assertEqual(19, summary.predicted_pixels)
+        self.assertIn("1 resumed from checkpoint", resumed_output.getvalue())
+
+    def test_calculates_tiles_in_worker_processes(self) -> None:
+        """Calculate source tiles outside the parent writing process."""
+
+        worker_process_ids = set()
+
+        def record_worker_processes(computed_tiles, artifact_paths):
+            worker_process_ids.update(
+                computed_tile.worker_process_id
+                for computed_tile in computed_tiles
+            )
+            write_computed_inference_tiles(computed_tiles, artifact_paths)
+
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "write_computed_inference_tiles",
+                side_effect=record_worker_processes,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            summary = run_reference_condition_inference(
+                replace(
+                    self.analysis_configuration,
+                    inference=replace(
+                        self.analysis_configuration.inference,
+                        worker_count=2,
+                    ),
+                ),
+                self.model_run_directory,
+                output_directory=self.temporary_path / "parallel_output",
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+
+        self.assertEqual(19, summary.predicted_pixels)
+        self.assertEqual(2, len(worker_process_ids))
+        self.assertNotIn(os.getpid(), worker_process_ids)
+
+    def test_writes_nodata_outside_exact_aoi(self) -> None:
+        """Mask polygon holes even when cached tiles cover those pixels."""
+
+        analysis_cache_tiles = replace(
+            self.analysis_cache_tiles,
+            projected_aoi=(
+                box(0, 0, 5_000, 4_000)
+                .difference(box(2_000, 1_000, 3_000, 2_000))
+            ),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = run_reference_condition_inference(
+                self.analysis_configuration,
+                self.model_run_directory,
+                output_directory=self.temporary_path / "aoi_hole_output",
+                show_progress=False,
+                analysis_cache_tiles=analysis_cache_tiles,
+            )
+
+        self.assertEqual(19, summary.aoi_pixels)
+        with rasterio.open(summary.inference_status_path) as status_source:
+            masked_status = status_source.read(1, masked=True)
+        self.assertTrue(bool(masked_status.mask[2, 2]))
 
     def test_limits_inference_to_application_mask_value_one(self) -> None:
         """Select only defined first-band mask pixels equal to one."""
@@ -501,7 +766,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             height=4,
             count=1,
             dtype="uint8",
-            crs="EPSG:4326",
+            crs="EPSG:6933",
             transform=self.transform,
         ) as destination:
             destination.write(mask_values, 1)
@@ -516,10 +781,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                         window_size_pixels=3,
                     ),
                 ),
-                self.raster_path,
                 self.model_run_directory,
                 output_directory=self.temporary_path / "masked_output",
                 show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
             )
 
         self.assertEqual(18, summary.target_pixels)
@@ -552,7 +817,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         mask_path = self.temporary_path / "projected_application_mask.tif"
         source_bounds = rasterio.transform.array_bounds(4, 5, self.transform)
         projected_bounds = transform_bounds(
-            "EPSG:4326",
+            "EPSG:6933",
             "EPSG:3857",
             *source_bounds,
         )
@@ -578,10 +843,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                         application_mask_path=mask_path,
                     ),
                 ),
-                self.raster_path,
                 self.model_run_directory,
                 output_directory=self.temporary_path / "projected_mask_output",
                 show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
             )
 
         self.assertEqual(20, summary.target_pixels)

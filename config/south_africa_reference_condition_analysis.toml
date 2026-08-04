@@ -23,7 +23,6 @@
 #
 #   python -m scripts.apply_reference_condition_models `
 #     config\south_africa_reference_condition_analysis.toml `
-#     data\raster_stacks\example.tif `
 #     outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 #
 # Data that goes into the pipeline:
@@ -46,8 +45,8 @@
 # The fetch command writes these reusable multiband tiles and a cache manifest.
 # build_spatial_sample reads that cache directly, clips every edge tile to this
 # analysis's AOI, and processes one tile at a time. It does not require or create a
-# monolithic AOI GeoTIFF. Raster inference currently still accepts a separately
-# assembled multiband GeoTIFF following the same ordered [[bands]] contract.
+# monolithic AOI GeoTIFF. Raster inference reads the same validated tiles, writes
+# incrementally into stitched AOI GeoTIFFs, and can resume from completed tiles.
 #
 # In this project, dNN means "data layer NN," not "physical band NN." The stable
 # data-layer ID follows a variable into sample columns, model artifacts, reports,
@@ -742,10 +741,16 @@ responses = []
 #     to use every otherwise-eligible predictor-footprint pixel. Change it for a
 #     different assessment extent or mask year. CRS, resolution, grid, and extent
 #     may differ from the stack because nearest-neighbor alignment is windowed.
+#   worker_count: Maximum cache tiles calculated concurrently. Increase it when
+#     CPU and storage bandwidth are available; decrease it to reduce peak memory
+#     and concurrent reads. Each worker can retain one tile's five result arrays.
+#     GeoTIFF writes and checkpoint updates remain serialized for file safety.
 #   window_size_pixels: Width and height of each square processing window. The value
 #     256 processes at most 65,536 source pixels per window. Larger windows may
 #     improve sequential I/O but use more memory; smaller windows lower peak memory
-#     while increasing loop and file-I/O overhead. It does not change results.
+#     while increasing loop and file-I/O overhead. Each cache tile is checkpointed
+#     only after all of its windows and output rasters are written. It does not
+#     change results.
 #   covariance_shrinkage: Fraction used to replace off-diagonal reference covariance
 #     with zero before matrix inversion. At 0.10, inference uses 90% of the measured
 #     covariance plus 10% of its diagonal-only form while preserving variances.
@@ -755,5 +760,6 @@ responses = []
 #     not the individual expected-response or standardized-deviation rasters.
 [inference]
 application_mask_path = "../data/grassland_mask_2018.tif"
+worker_count = 8
 window_size_pixels = 256
 covariance_shrinkage = 0.10

@@ -62,6 +62,7 @@ responses = ["d02"]
 
 [inference]
 application_mask_path = "application_mask.tif"
+worker_count = 3
 window_size_pixels = 256
 covariance_shrinkage = 0.1
 
@@ -139,6 +140,7 @@ class AnalysisConfigurationTest(unittest.TestCase):
         self.assertTrue(configuration.aoi_path.is_file())
         self.assertEqual(360, configuration.earth_engine.request_timeout_seconds)
         self.assertEqual(1, configuration.earth_engine.request_retry_count)
+        self.assertGreater(configuration.inference.worker_count, 0)
         self.assertEqual(
             "grassland_mask_2018.tif",
             configuration.inference.application_mask_path.name,
@@ -173,6 +175,7 @@ class AnalysisConfigurationTest(unittest.TestCase):
             self.temporary_path / "application_mask.tif",
             configuration.inference.application_mask_path,
         )
+        self.assertEqual(3, configuration.inference.worker_count)
 
         self.assertEqual(
             (

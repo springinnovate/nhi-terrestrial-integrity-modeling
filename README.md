@@ -240,44 +240,70 @@ runnable command. The cache-backed sampler and response-model script use it for
 consistent analysis naming, equal-area spatial configuration, predictor screening, fold
 assignment, training-only imputation, weighted quantiles, and spatial-fold figures.
 
-## Apply reference-condition models to a raster
+## Apply reference-condition models to cached rasters
 
 Apply every final ecological-response model from one completed model run to its
-ecoregion raster stack:
+analysis AOI using the validated Earth Engine tiles selected by the TOML:
 
-```powershell
-python -m scripts.apply_reference_condition_models `
-  config\south_africa_reference_condition_analysis.toml `
-  data\raster_stacks\example.tif `
-  outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
+```text
+python -m scripts.apply_reference_condition_models config\south_africa_reference_condition_analysis.toml outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 ```
 
-The command processes fixed raster windows rather than loading all inference products
-into memory. For each fitted response it writes the final model's expected reference
+The command validates the configured cache manifest, processes each source tile in
+fixed windows, and writes directly into stitched GeoTIFFs without loading the AOI or
+outputs into memory. The output grid is the smallest cache-aligned rectangle around
+the AOI; pixels outside the exact AOI are nodata. A fingerprinted checkpoint records
+a tile only after all five raster products are written, so rerunning after an
+interruption skips compatible completed tiles. Changing raster-effective TOML values,
+covariance shrinkage, the AOI or mask, source-tile bytes, models, or reference
+calibration invalidates that checkpoint. Operational changes to
+`inference.worker_count` or `inference.window_size_pixels` retain compatible completed
+tiles because they do not change pixel values.
+
+When `inference.worker_count` is greater than one, tile calculations use a bounded
+process pool. Each worker process loads the reusable model context once, reads source
+and application-mask data, and calculates model outputs independently. The parent
+serializes the context once to a temporary Joblib artifact, and workers memory-map
+that shared artifact instead of receiving a separate serialized model copy during
+Windows process startup. This lets all requested processes start promptly while early
+workers begin calculating tiles. Numerical libraries are limited to one internal
+thread per worker so tile-level parallelism does not oversubscribe the CPU. A worker
+count of one calculates in the parent process and avoids process-startup overhead.
+The scheduler assigns a replacement tile as soon as a worker result arrives, before
+the parent writes that result, so serialized output cannot leave the corresponding
+worker idle. Stitched GeoTIFF writes and checkpoint updates stay in the parent process
+for file safety. Completed results are flushed and checkpointed in batches no larger
+than the active worker count, which avoids reopening five rasters and recompressing
+shared output blocks after every 128-pixel source tile. The bounded pipeline retains
+at most one write batch plus one in-flight result per worker.
+
+For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized
 deviation divides by the pooled out-of-fold reference RMSE stored with that response
 model. It also converts each complete standardized-departure vector into a
 covariance-aware Mahalanobis distance and an area-weighted reference percentile. No
 models are retrained during inference.
 
-Outputs under `outputs/reference_condition_inference/<ecoregion>` include:
+Outputs under `outputs/reference_condition_inference/<analysis_name>` include:
 
-- `<ecoregion>_expected_reference.tif`
-- `<ecoregion>_observed_minus_expected.tif`
-- `<ecoregion>_standardized_deviation.tif`
-- `<ecoregion>_reference_departure_percentile.tif`
-- `<ecoregion>_inference_status.tif`
-- `<ecoregion>_aggregate_standardized_deviation.png`
-- `<ecoregion>_reference_departure_percentile.png`
-- `<ecoregion>_inference_report.md`
-- `<ecoregion>_inference_metadata.json`
+- `<analysis_name>_expected_reference.tif`
+- `<analysis_name>_observed_minus_expected.tif`
+- `<analysis_name>_standardized_deviation.tif`
+- `<analysis_name>_reference_departure_percentile.tif`
+- `<analysis_name>_inference_status.tif`
+- `<analysis_name>_aggregate_standardized_deviation.png`
+- `<analysis_name>_reference_departure_percentile.png`
+- `<analysis_name>_inference_report.md`
+- `<analysis_name>_inference_metadata.json`
+- `<analysis_name>_inference_checkpoint.json`
 
 The expected, raw-deviation, and standardized-deviation GeoTIFFs contain one aligned
 band per fitted response. The percentile GeoTIFF contains one aligned band. The
 status GeoTIFF contains an inference-status band and a missing-predictor-count band.
-Status 0 is outside the inference target, status 1 exceeds the training missingness
-threshold, and status 2 received model predictions. Pixels within the threshold use
-the final reference-training imputation values stored in each model.
+Outside-AOI pixels are nodata. Within the AOI, status 0 is outside the inference
+target, status 1 exceeds the training missingness threshold, and status 2 received
+model predictions. Pixels within the threshold use the final reference-training
+imputation values stored in each model.
 
 The aggregate PNG makes the raster result visible at publication resolution. For
 each source pixel with every modeled response defined, it calculates
@@ -305,7 +331,7 @@ complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` mean
 pixel is farther from the reference center than 95% of represented calibration area.
 The aligned single-band GeoTIFF uses the fixed 0 to 1 scale. Reference pixels and pixels
 missing any fitted response are nodata. The corresponding PNG shows reference-site
-display cells in deep violet with white boundaries and mean non-reference `P_i` from
+display cells in blue with white boundaries and mean non-reference `P_i` from
 green at 0 through red at 1. The report records complete-reference coverage,
 covariance conditioning, reference distance quantiles, raster coverage, and
 upper-percentile frequencies.
@@ -317,7 +343,7 @@ departure.
 
 `analysis.aoi_path` and `inference.application_mask_path` have separate purposes.
 The vector AOI determines which Earth Engine data are fetched. The application mask
-determines which pixels in the supplied raster stack receive predictions, so it
+determines which pixels in the cached raster stack receive predictions, so it
 belongs to the inference section even though the complete TOML defines one analysis.
 Changing the mask does not redefine reference sites or require refetching or
 refitting.
@@ -328,15 +354,12 @@ resolution, transform, or global extent; it is aligned to each raster window wit
 nearest-neighbor resampling without loading the complete mask into memory. Zeros,
 other values, nodata, and pixels outside the mask extent are excluded:
 
-```powershell
-python -m scripts.apply_reference_condition_models `
-  config\south_africa_reference_condition_analysis.toml `
-  data\raster_stacks\example.tif `
-  outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
+```text
+python -m scripts.apply_reference_condition_models config\south_africa_reference_condition_analysis.toml outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample
 ```
 
 Without `inference.application_mask_path`, the script infers across the usable
-ecoregion predictor footprint and marks the report accordingly. Unmasked outputs are
+AOI predictor footprint and marks the report accordingly. Unmasked outputs are
 diagnostic reference-condition deviations, not grassland integrity maps. Positive
 standardized deviation means observed is above expected. The percentile combines
 multivariate departure without assigning ecological direction, so integrity
