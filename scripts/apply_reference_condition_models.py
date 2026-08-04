@@ -1805,7 +1805,10 @@ def calculate_inference_tile(
 
     Args:
         cached_tile: Validated multiband source tile.
-        application_mask_path: Optional raster selecting inference pixels.
+        application_mask_path: Raster configured by
+            ``[inference].application_mask_path``. Defined first-band pixels
+            equal to 1 are selected for inference. If the setting is omitted,
+            every otherwise eligible pixel inside the AOI is selected.
         window_size_pixels: Maximum width and height processed at once.
         projected_aoi: Analysis AOI transformed to the cache-grid CRS.
         output_grid: Stitched output placement.
