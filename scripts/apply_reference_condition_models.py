@@ -1735,6 +1735,14 @@ def create_reference_similarity_figure(
     )
     similarity_color_map = ListedColormap(REFERENCE_SIMILARITY_COLORS)
     similarity_color_map.set_bad((1.0, 1.0, 1.0, 0.0))
+    color_bar_label = r"Reference similarity ($S_i$)"
+    figure_caption = (
+        r"Reference similarity $S_i$ is the fraction of represented "
+        "reference-site area with a larger combined observed-versus-expected "
+        "vegetation difference than the mapped pixel. For example, "
+        r"$S_i=0.05$ means the pixel differs more than about 95% of "
+        "reference-site area."
+    )
     with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
         figure = Figure(figsize=(11.0, 7.5), facecolor="white")
         FigureCanvasAgg(figure)
@@ -1768,7 +1776,7 @@ def create_reference_similarity_figure(
             ticks=np.arange(len(REFERENCE_SIMILARITY_LABELS)),
         )
         color_bar.set_label(
-            r"Reference similarity ($S_i = 1 - P_i$)",
+            color_bar_label,
             rotation=90,
             labelpad=12,
         )
@@ -1806,12 +1814,7 @@ def create_reference_similarity_figure(
         figure.text(
             0.5,
             0.01,
-            (
-                f"Each colored display cell is mean $S_i$ across complete "
-                f"non-reference pixels using {response_count} responses. High "
-                "similarity means combined departures resemble reference "
-                "observations; it does not prove ecological integrity by itself."
-            ),
+            figure_caption,
             ha="center",
             va="bottom",
             fontsize=8.5,
@@ -1842,6 +1845,8 @@ def create_reference_similarity_figure(
         )
     return {
         "metric": "reference similarity S_i = 1 - P_i",
+        "color_bar_label": color_bar_label,
+        "caption": figure_caption,
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
         ),

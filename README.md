@@ -333,7 +333,9 @@ and pixels missing any fitted response are nodata. The primary PNG maps referenc
 similarity `S_i = 1 - P_i`, so larger values identify pixels whose combined response
 departures more closely resemble reference observations. Five fixed classes separate
 the central 50% of represented reference departures from the 50th-90th, 90th-95th,
-95th-99th, and beyond-99th percentile ranges.
+95th-99th, and beyond-99th percentile ranges. The figure defines `S_i` directly as
+the represented reference-site area with a larger combined observed-versus-expected
+vegetation difference than the mapped pixel; the report retains the `P_i` derivation.
 
 Both PNGs show reference calibration pixels in pale blue and exclude them from the
 colored assessment surface. Pale gray identifies pixels outside the configured

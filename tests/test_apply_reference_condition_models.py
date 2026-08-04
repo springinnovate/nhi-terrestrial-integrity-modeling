@@ -627,6 +627,22 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 "metric"
             ],
         )
+        similarity_figure_metadata = metadata["reference_departure_percentile"][
+            "similarity_figure"
+        ]
+        self.assertEqual(
+            r"Reference similarity ($S_i$)",
+            similarity_figure_metadata["color_bar_label"],
+        )
+        self.assertIn(
+            "fraction of represented reference-site area",
+            similarity_figure_metadata["caption"],
+        )
+        self.assertNotIn(
+            "P_i",
+            similarity_figure_metadata["color_bar_label"]
+            + similarity_figure_metadata["caption"],
+        )
         self.assertEqual(
             ["0-0.01", "0.01-0.05", "0.05-0.10", "0.10-0.50", "0.50-1.00"],
             [
