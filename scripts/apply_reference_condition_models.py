@@ -592,9 +592,9 @@ def build_inference_output_grid(
     minimum_x, minimum_y, maximum_x, maximum_y = (
         analysis_cache_tiles.projected_aoi.bounds
     )
-    # CRS round trips can place a boundary a few floating-point units beyond an
-    # exact grid line. The pixel-relative tolerance prevents that numerical
-    # noise from adding a full row or column to the stitched rectangle.
+    # Transforming the AOI coordinates into the cache CRS can place a boundary
+    # a few floating-point units beyond an exact pixel-grid line. This tolerance
+    # prevents that rounding error from adding a full output row or column.
     grid_line_tolerance = 1e-9
     output_left = cache_grid.origin_x + math.floor(
         (minimum_x - cache_grid.origin_x) / pixel_size
