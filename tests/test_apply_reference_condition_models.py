@@ -27,11 +27,14 @@ from shapely.ops import transform
 
 from scripts.apply_reference_condition_models import (
     FLOAT_NODATA,
+    INFERENCE_WRITE_BATCH_SIZE,
+    MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE,
     STATUS_INSUFFICIENT_PREDICTORS,
     STATUS_NODATA,
     STATUS_OUTSIDE_TARGET,
     STATUS_PREDICTED,
     build_reference_departure_calibration,
+    iter_calculated_inference_tiles,
     load_response_models,
     parse_args,
     run_reference_condition_inference,
@@ -457,10 +460,19 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             summary.reference_similarity_figure_path.stat().st_size,
             1_000,
         )
+        expected_output_block_size = min(
+            MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE,
+            max(16, self.grid.tile_size_pixels),
+        )
         with rasterio.open(summary.expected_reference_path) as expected_source:
             expected = expected_source.read(masked=True)
             self.assertEqual(self.transform, expected_source.transform)
             self.assertEqual("EPSG:6933", str(expected_source.crs))
+            self.assertTrue(expected_source.profile["tiled"])
+            self.assertEqual(
+                {(expected_output_block_size, expected_output_block_size)},
+                set(expected_source.block_shapes),
+            )
             self.assertEqual(
                 ("d02_expected_reference", "d11_expected_reference"),
                 expected_source.descriptions,
@@ -684,6 +696,10 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             self.analysis_configuration.inference.worker_count,
             metadata["configuration"]["worker_count"],
         )
+        self.assertEqual(
+            INFERENCE_WRITE_BATCH_SIZE,
+            metadata["configuration"]["write_batch_size"],
+        )
 
         resumed_output = io.StringIO()
         with (
@@ -713,7 +729,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertIn("2 resumed from checkpoint", resumed_output.getvalue())
 
     def test_resumes_after_a_tile_failure(self) -> None:
-        """Checkpoint the first tile and recompute only the interrupted tile."""
+        """Checkpoint complete write batches and retry an interrupted batch."""
 
         output_directory = self.temporary_path / "interrupted_output"
         single_worker_configuration = replace(
@@ -753,7 +769,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             output_directory / "synthetic_prairie_inference_checkpoint.json"
         )
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        self.assertEqual(1, len(checkpoint["completed_tile_ids"]))
+        self.assertEqual(0, len(checkpoint["completed_tile_ids"]))
         resumed_output = io.StringIO()
         with contextlib.redirect_stdout(resumed_output):
             summary = run_reference_condition_inference(
@@ -764,14 +780,16 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 analysis_cache_tiles=self.analysis_cache_tiles,
             )
         self.assertEqual(19, summary.predicted_pixels)
-        self.assertIn("1 resumed from checkpoint", resumed_output.getvalue())
+        self.assertIn("0 resumed from checkpoint", resumed_output.getvalue())
 
     def test_calculates_tiles_in_worker_processes(self) -> None:
         """Calculate source tiles outside the parent writing process."""
 
         worker_process_ids = set()
+        written_batch_sizes = []
 
         def record_worker_processes(computed_tiles, artifact_paths):
+            written_batch_sizes.append(len(computed_tiles))
             worker_process_ids.update(
                 computed_tile.worker_process_id
                 for computed_tile in computed_tiles
@@ -783,6 +801,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 "scripts.apply_reference_condition_models."
                 "write_computed_inference_tiles",
                 side_effect=record_worker_processes,
+            ),
+            patch(
+                "scripts.apply_reference_condition_models."
+                "INFERENCE_WRITE_BATCH_SIZE",
+                1,
             ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -803,6 +826,52 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(19, summary.predicted_pixels)
         self.assertEqual(2, len(worker_process_ids))
         self.assertNotIn(os.getpid(), worker_process_ids)
+        self.assertEqual([1, 1], written_batch_sizes)
+
+    def test_reduces_worker_count_after_memory_allocation_failure(self) -> None:
+        """Retry uncheckpointed tiles with a smaller process pool."""
+
+        iterator_call_worker_counts = []
+
+        def exhaust_memory_once(cached_tiles, worker_context, worker_count):
+            iterator_call_worker_counts.append(worker_count)
+            if len(iterator_call_worker_counts) == 1:
+                raise MemoryError("synthetic process commit exhaustion")
+            return iter_calculated_inference_tiles(
+                cached_tiles,
+                worker_context,
+                worker_count,
+            )
+
+        standard_output = io.StringIO()
+        with (
+            patch(
+                "scripts.apply_reference_condition_models."
+                "iter_calculated_inference_tiles",
+                side_effect=exhaust_memory_once,
+            ),
+            contextlib.redirect_stdout(standard_output),
+        ):
+            summary = run_reference_condition_inference(
+                replace(
+                    self.analysis_configuration,
+                    inference=replace(
+                        self.analysis_configuration.inference,
+                        worker_count=2,
+                    ),
+                ),
+                self.model_run_directory,
+                output_directory=self.temporary_path / "memory_retry_output",
+                show_progress=False,
+                analysis_cache_tiles=self.analysis_cache_tiles,
+            )
+
+        self.assertEqual(19, summary.predicted_pixels)
+        self.assertEqual([2, 1], iterator_call_worker_counts)
+        self.assertIn(
+            "with 1 worker instead of 2",
+            standard_output.getvalue(),
+        )
 
     def test_writes_nodata_outside_exact_aoi(self) -> None:
         """Mask polygon holes even when cached tiles cover those pixels."""

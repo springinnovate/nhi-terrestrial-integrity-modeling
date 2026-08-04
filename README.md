@@ -265,17 +265,24 @@ process pool. Each worker process loads the reusable model context once, reads s
 and application-mask data, and calculates model outputs independently. The parent
 serializes the context once to a temporary Joblib artifact, and workers memory-map
 that shared artifact instead of receiving a separate serialized model copy during
-Windows process startup. This lets all requested processes start promptly while early
-workers begin calculating tiles. Numerical libraries are limited to one internal
-thread per worker so tile-level parallelism does not oversubscribe the CPU. A worker
-count of one calculates in the parent process and avoids process-startup overhead.
+Windows process startup. Workers synchronize after loading so the first initialized
+process cannot drain queued tiles while the rest are still starting. Numerical
+libraries are limited to one internal thread per worker so tile-level parallelism does
+not oversubscribe the CPU. A worker count of one calculates in the parent process and
+avoids process-startup overhead.
 The scheduler assigns a replacement tile as soon as a worker result arrives, before
 the parent writes that result, so serialized output cannot leave the corresponding
 worker idle. Stitched GeoTIFF writes and checkpoint updates stay in the parent process
-for file safety. Completed results are flushed and checkpointed in batches no larger
-than the active worker count, which avoids reopening five rasters and recompressing
-shared output blocks after every 128-pixel source tile. The bounded pipeline retains
-at most one write batch plus one in-flight result per worker.
+for file safety. Completed results are flushed and checkpointed in fixed batches of
+four tiles, independently of the active worker count. This amortizes reopening the
+five rasters while preventing a larger worker pool from also creating a larger parent
+write buffer. Each worker still needs private memory for its active model calculation,
+so choose `worker_count` according to available system commit as well as CPU cores.
+On Windows, committed memory can be nearly exhausted while Task Manager still shows
+substantial available physical RAM. If a worker allocation fails, inference preserves
+completed checkpoints and retries the remaining tiles with half as many workers. The
+stitched outputs use tiled GeoTIFF storage with blocks aligned to the cache-tile size,
+up to 256 by 256 pixels.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized
