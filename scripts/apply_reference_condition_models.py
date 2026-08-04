@@ -22,9 +22,10 @@ import joblib
 import numpy as np
 import pandas as pd
 import rasterio
-from matplotlib import colormaps, rc_context
+from matplotlib import rc_context
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.colors import ListedColormap
+from matplotlib.axes import Axes
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from rasterio.coords import BoundingBox
@@ -51,13 +52,30 @@ from .reference_condition_utils import FIGURE_DPI
 
 
 MAXIMUM_DISPLAY_DIMENSION = 700
-DISPLAY_COLOR_MAXIMUM = 10.0
-DISPLAY_YELLOW_GREEN_VALUE = 3.0
-DISPLAY_COLOR_TICKS = (0.0, 1.0, 3.0, 5.0, 7.0, 10.0)
-PERCENTILE_COLOR_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+MEAN_ABSOLUTE_DEPARTURE_MAXIMUM = 2.0
+MEAN_ABSOLUTE_DEPARTURE_TICKS = (0.0, 0.5, 1.0, 1.5, 2.0)
+REFERENCE_SIMILARITY_THRESHOLDS = (0.01, 0.05, 0.10, 0.50)
+REFERENCE_SIMILARITY_COLORS = (
+    "#A50026",
+    "#F46D43",
+    "#FDAE61",
+    "#A6D96A",
+    "#1A9850",
+)
+REFERENCE_SIMILARITY_LABELS = (
+    "0-0.01",
+    "0.01-0.05",
+    "0.05-0.10",
+    "0.10-0.50",
+    "0.50-1.00",
+)
 REFERENCE_SITE_COLOR = "#0072B2"
 REFERENCE_SITE_OUTLINE_COLOR = "#FFFFFF"
 REFERENCE_SITE_OUTLINE_WIDTH = 0.4
+OUTSIDE_TARGET_COLOR = "#E5E7EB"
+INSUFFICIENT_PREDICTOR_COLOR = "#626B73"
+INCOMPLETE_RESPONSE_COLOR = "#AAB2BA"
+AOI_OUTLINE_COLOR = "#374151"
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
 STATUS_OUTSIDE_TARGET = 0
@@ -409,8 +427,8 @@ class InferenceRunSummary:
     standardized_deviation_path: Path
     departure_percentile_path: Path
     inference_status_path: Path
-    aggregate_deviation_figure_path: Path
-    departure_percentile_figure_path: Path
+    mean_absolute_deviation_figure_path: Path
+    reference_similarity_figure_path: Path
     report_path: Path
     metadata_path: Path
     response_count: int
@@ -488,8 +506,8 @@ class InferenceArtifactPaths:
     standardized_deviation: Path
     departure_percentile: Path
     inference_status: Path
-    aggregate_deviation_figure: Path
-    departure_percentile_figure: Path
+    mean_absolute_deviation_figure: Path
+    reference_similarity_figure: Path
     report: Path
     metadata: Path
     checkpoint: Path
@@ -501,11 +519,15 @@ class InferenceOutputStatistics:
 
     response_statistics: dict[str, ResponseStatistics]
     departure_percentile_statistics: DeparturePercentileStatistics
-    aggregate_value_sums: np.ndarray
-    aggregate_value_counts: np.ndarray
+    mean_absolute_deviation_sums: np.ndarray
+    mean_absolute_deviation_counts: np.ndarray
     percentile_value_sums: np.ndarray
     percentile_value_counts: np.ndarray
     reference_pixel_counts: np.ndarray
+    aoi_pixel_counts: np.ndarray
+    outside_target_pixel_counts: np.ndarray
+    insufficient_predictor_pixel_counts: np.ndarray
+    incomplete_response_pixel_counts: np.ndarray
     aoi_pixels: int
     target_pixels: int
     predicted_pixels: int
@@ -983,8 +1005,8 @@ def write_inference_report(
 
     coverage_statistics = inference_metadata["coverage"]
     inference_configuration = inference_metadata["configuration"]
-    aggregate_figure_metadata = inference_metadata[
-        "aggregate_deviation_figure"
+    mean_absolute_figure_metadata = inference_metadata[
+        "mean_absolute_deviation_figure"
     ]
     reference_calibration_metadata = inference_metadata[
         "reference_departure_calibration"
@@ -993,7 +1015,7 @@ def write_inference_report(
         "reference_departure_percentile"
     ]
     percentile_statistics = departure_percentile_metadata["statistics"]
-    color_scale_upper_value = aggregate_figure_metadata[
+    color_scale_upper_value = mean_absolute_figure_metadata[
         "color_scale_upper_value"
     ]
     complete_reference_area_percent = reference_calibration_metadata[
@@ -1002,7 +1024,7 @@ def write_inference_report(
     stabilized_covariance_condition_number = reference_calibration_metadata[
         "stabilized_covariance_condition_number"
     ]
-    cells_at_or_above_color_maximum_percent = aggregate_figure_metadata[
+    cells_at_or_above_color_maximum_percent = mean_absolute_figure_metadata[
         "cells_at_or_above_color_maximum_percent"
     ]
     application_mask_metadata = inference_metadata["application_mask"]
@@ -1079,7 +1101,7 @@ def write_inference_report(
             "predictors, and 2 received model predictions. Its second band records "
             "the number of missing predictors before imputation.",
             "",
-            "## Multivariate reference-departure percentile",
+            "## Multivariate reference similarity",
             "",
             (
                 "The calibration uses complete standardized out-of-fold residual "
@@ -1122,33 +1144,38 @@ def write_inference_report(
             ),
             "",
             (
-                "The percentile PNG uses a fixed 0–1 scale, with 0 in green and 1 "
-                "in red. Blue display cells contain reference sites and are "
-                "excluded from the colored surface. `P_i` measures multivariate "
-                "departure from the sampled reference distribution; it does not "
-                "prove degradation or constitute an ecological integrity score."
+                "The primary PNG maps `S_i = 1 - P_i`, so larger values indicate "
+                "greater similarity to modeled reference condition. Five fixed "
+                "classes distinguish pixels inside the central 50% of represented "
+                "reference departures from pixels beyond the 90th, 95th, and 99th "
+                "departure percentiles."
             ),
             "",
-            "## Aggregate standardized-deviation map",
+            (
+                "Blue display cells contain reference calibration pixels and are "
+                "not scored. Neutral legend categories distinguish pixels outside "
+                "the application mask, pixels with insufficient predictors, pixels "
+                "with incomplete observed responses, and areas outside the AOI."
+            ),
+            "",
+            "## Mean absolute standardized-deviation map",
             "",
             (
-                "The PNG maps the mean pixel-level `sum(abs(z_j))` within each "
-                "coarsened display cell, using every fitted ecological response. "
-                "Green indicates lower total standardized departure from modeled "
-                "reference condition and red indicates larger departure."
+                "The diagnostic PNG maps pixel-level `mean(abs(z_j))` within each "
+                "coarsened display cell. Dividing by the response count makes the "
+                "scale comparable between analyses with different fitted responses."
             ),
             "",
             (
                 "Only non-reference pixels with defined standardized deviations "
-                "for every response contribute to the colored surface. Black "
-                "outlines identify display cells containing supplied reference-site "
-                "pixels. A fixed linear scale maps 0 to green, "
-                f"{DISPLAY_YELLOW_GREEN_VALUE:g} to yellow-green, and "
+                "for every response contribute to the colored surface. A fixed "
+                "linear scale maps 0 to green, 1 reference RMSE on average to "
+                "yellow, and "
                 f"{color_scale_upper_value:g} or more to red. "
                 f"{cells_at_or_above_color_maximum_percent:.1f}% "
                 "of colored display cells are at or above "
-                f"{color_scale_upper_value:g}. This is a diagnostic total-departure "
-                "map, not a grassland integrity score."
+                f"{color_scale_upper_value:g}. This is a departure diagnostic, not "
+                "a grassland integrity score."
             ),
             "",
             "## Response outputs",
@@ -1226,35 +1253,227 @@ def write_inference_report(
     output_path.write_text("\n".join(report_lines), encoding="utf-8")
 
 
-def create_aggregate_deviation_figure(
-    value_sums: np.ndarray,
-    value_counts: np.ndarray,
-    reference_counts: np.ndarray,
+def add_assessment_context(
+    axis: Axes,
+    scored_display_mask: np.ndarray,
+    reference_pixel_counts: np.ndarray,
+    aoi_pixel_counts: np.ndarray,
+    outside_target_pixel_counts: np.ndarray,
+    insufficient_predictor_pixel_counts: np.ndarray,
+    incomplete_response_pixel_counts: np.ndarray,
     raster_bounds: BoundingBox,
-    raster_crs: CRS | None,
+    application_mask_supplied: bool,
+) -> tuple[list[Patch], dict[str, int]]:
+    """Draw reference pixels, the AOI boundary, and unscored categories.
+
+    Args:
+        axis: Matplotlib map axis receiving the context layers.
+        scored_display_mask: Cells containing at least one plotted assessment.
+        reference_pixel_counts: Reference pixels represented by each display cell.
+        aoi_pixel_counts: AOI pixels represented by each display cell.
+        outside_target_pixel_counts: AOI pixels excluded from inference per cell.
+        insufficient_predictor_pixel_counts: Target pixels rejected because too
+            many environmental predictors were missing.
+        incomplete_response_pixel_counts: Predicted non-reference pixels lacking
+            one or more observed ecological responses required for the score.
+        raster_bounds: Spatial bounds shared by every display array.
+        application_mask_supplied: Whether outside-target cells were selected by
+            an external application mask.
+
+    Returns:
+        Legend handles for categories present in the figure and display-cell
+        counts for metadata.
+    """
+
+    reference_display_mask = reference_pixel_counts > 0
+    aoi_display_mask = aoi_pixel_counts > 0
+    unscored_display_mask = ~scored_display_mask & ~reference_display_mask
+    unscored_category_counts = np.stack(
+        [
+            outside_target_pixel_counts,
+            insufficient_predictor_pixel_counts,
+            incomplete_response_pixel_counts,
+        ]
+    )
+    # A coarsened cell can contain several unscored states. Showing the state
+    # with the most source pixels prevents a single pixel from defining it.
+    dominant_unscored_categories = np.argmax(unscored_category_counts, axis=0)
+    represented_unscored_mask = unscored_category_counts.sum(axis=0) > 0
+    unscored_categories = np.full(scored_display_mask.shape, np.nan)
+    represented_display_mask = unscored_display_mask & represented_unscored_mask
+    unscored_categories[represented_display_mask] = (
+        dominant_unscored_categories[represented_display_mask]
+    )
+    unscored_color_map = ListedColormap(
+        [
+            OUTSIDE_TARGET_COLOR,
+            INSUFFICIENT_PREDICTOR_COLOR,
+            INCOMPLETE_RESPONSE_COLOR,
+        ]
+    )
+    unscored_color_map.set_bad((1.0, 1.0, 1.0, 0.0))
+    raster_extent = (
+        raster_bounds.left,
+        raster_bounds.right,
+        raster_bounds.bottom,
+        raster_bounds.top,
+    )
+    axis.imshow(
+        np.ma.masked_invalid(unscored_categories),
+        cmap=unscored_color_map,
+        origin="upper",
+        extent=raster_extent,
+        interpolation="nearest",
+        vmin=-0.5,
+        vmax=2.5,
+        zorder=0,
+    )
+
+    x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
+        aoi_display_mask[0]
+    )
+    y_cell_size = (raster_bounds.top - raster_bounds.bottom) / len(
+        aoi_display_mask
+    )
+    x_centers = np.linspace(
+        raster_bounds.left - x_cell_size / 2.0,
+        raster_bounds.right + x_cell_size / 2.0,
+        aoi_display_mask.shape[1] + 2,
+    )
+    y_centers = np.linspace(
+        raster_bounds.top + y_cell_size / 2.0,
+        raster_bounds.bottom - y_cell_size / 2.0,
+        aoi_display_mask.shape[0] + 2,
+    )
+    axis.contour(
+        x_centers,
+        y_centers,
+        np.pad(aoi_display_mask, 1).astype(np.uint8),
+        levels=[0.5],
+        colors=[AOI_OUTLINE_COLOR],
+        linewidths=0.7,
+        zorder=3,
+    )
+
+    if np.any(reference_display_mask):
+        reference_color_map = ListedColormap([REFERENCE_SITE_COLOR])
+        reference_color_map.set_bad((1.0, 1.0, 1.0, 0.0))
+        axis.imshow(
+            np.ma.masked_where(
+                ~reference_display_mask,
+                np.ones(reference_display_mask.shape, dtype=np.uint8),
+            ),
+            cmap=reference_color_map,
+            origin="upper",
+            extent=raster_extent,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            zorder=4,
+        )
+        axis.contour(
+            x_centers,
+            y_centers,
+            np.pad(reference_display_mask, 1).astype(np.uint8),
+            levels=[0.5],
+            colors=[REFERENCE_SITE_OUTLINE_COLOR],
+            linewidths=REFERENCE_SITE_OUTLINE_WIDTH,
+            zorder=5,
+        )
+
+    legend_handles = []
+    if np.any(reference_display_mask):
+        legend_handles.append(
+            Patch(
+                facecolor=REFERENCE_SITE_COLOR,
+                edgecolor=REFERENCE_SITE_OUTLINE_COLOR,
+                label="Reference calibration pixels (not scored)",
+            )
+        )
+    displayed_unscored_categories = unscored_categories[
+        np.isfinite(unscored_categories)
+    ]
+    unscored_labels = (
+        "Outside application mask"
+        if application_mask_supplied
+        else "Outside usable inference target",
+        "Not modeled: insufficient predictors",
+        "Not scored: incomplete responses",
+    )
+    for category, (color, label) in enumerate(
+        zip(
+            (
+                OUTSIDE_TARGET_COLOR,
+                INSUFFICIENT_PREDICTOR_COLOR,
+                INCOMPLETE_RESPONSE_COLOR,
+            ),
+            unscored_labels,
+            strict=True,
+        )
+    ):
+        if np.any(displayed_unscored_categories == category):
+            legend_handles.append(
+                Patch(facecolor=color, edgecolor="none", label=label)
+            )
+    if np.any(~aoi_display_mask):
+        legend_handles.append(
+            Patch(
+                facecolor="white",
+                edgecolor=AOI_OUTLINE_COLOR,
+                linewidth=0.7,
+                label="Outside AOI",
+            )
+        )
+
+    return legend_handles, {
+        "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
+        "outside_aoi_display_cells": int(np.count_nonzero(~aoi_display_mask)),
+        "outside_target_display_cells": int(
+            np.count_nonzero(unscored_categories == 0)
+        ),
+        "insufficient_predictor_display_cells": int(
+            np.count_nonzero(unscored_categories == 1)
+        ),
+        "incomplete_response_display_cells": int(
+            np.count_nonzero(unscored_categories == 2)
+        ),
+    }
+
+
+def create_mean_absolute_deviation_figure(
+    deviation_sums: np.ndarray,
+    deviation_counts: np.ndarray,
+    reference_pixel_counts: np.ndarray,
+    aoi_pixel_counts: np.ndarray,
+    outside_target_pixel_counts: np.ndarray,
+    insufficient_predictor_pixel_counts: np.ndarray,
+    incomplete_response_pixel_counts: np.ndarray,
+    raster_bounds: BoundingBox,
     response_count: int,
-    ecoregion_name: str,
+    analysis_name: str,
     application_mask_supplied: bool,
     output_path: Path,
 ) -> dict[str, object]:
-    """Map coarsened total standardized departure and reference-site locations.
+    """Map mean absolute standardized departure across fitted responses.
 
-    The source-pixel diagnostic is the sum of absolute standardized deviations
-    across all fitted ecological responses. Each visible display cell contains
-    the mean diagnostic among complete-response, non-reference source pixels.
-    Reference pixels are excluded from the colored surface and shown as black
-    outlines around display cells containing at least one reference pixel.
+    This response-count-independent diagnostic first averages ``abs(z_j)``
+    within each complete source pixel and then averages those values within each
+    coarsened display cell.
 
     Args:
-        value_sums: Sum of source-pixel aggregate deviations per display cell.
-        value_counts: Contributing non-reference source pixels per display cell.
-        reference_counts: Reference-site source pixels per display cell.
+        deviation_sums: Sum of source-pixel mean absolute departures per cell.
+        deviation_counts: Contributing complete non-reference pixels per cell.
+        reference_pixel_counts: Reference pixels represented by each cell.
+        aoi_pixel_counts: AOI pixels represented by each cell.
+        outside_target_pixel_counts: AOI pixels excluded from inference per cell.
+        insufficient_predictor_pixel_counts: Target pixels rejected because too
+            many environmental predictors were missing.
+        incomplete_response_pixel_counts: Predicted pixels lacking complete
+            ecological responses per cell.
         raster_bounds: Spatial bounds of the source raster.
-        raster_crs: Source raster coordinate reference system, when defined.
-        response_count: Number of standardized response deviations in each sum.
-        ecoregion_name: Human-readable label included in the title.
-        application_mask_supplied: Whether inference was limited by an external
-            application mask.
+        response_count: Number of standardized responses in each pixel mean.
+        analysis_name: Human-readable label included in the title.
+        application_mask_supplied: Whether inference used an external mask.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
@@ -1265,30 +1484,34 @@ def create_aggregate_deviation_figure(
             to display.
     """
 
-    display_values = np.full(value_sums.shape, np.nan, dtype=np.float64)
+    display_values = np.full(deviation_sums.shape, np.nan, dtype=np.float64)
     np.divide(
-        value_sums,
-        value_counts,
+        deviation_sums,
+        deviation_counts,
         out=display_values,
-        where=value_counts > 0,
+        where=deviation_counts > 0,
     )
     finite_values = display_values[np.isfinite(display_values)]
     if len(finite_values) == 0:
         raise RuntimeError(
             "No non-reference pixels have standardized deviations for every "
-            "response; the aggregate deviation figure cannot be created."
+            "response; the mean absolute departure figure cannot be created."
         )
 
     cells_at_or_above_maximum = int(
-        np.count_nonzero(finite_values >= DISPLAY_COLOR_MAXIMUM)
+        np.count_nonzero(
+            finite_values >= MEAN_ABSOLUTE_DEPARTURE_MAXIMUM
+        )
     )
     cells_at_or_above_maximum_percent = (
         100.0 * cells_at_or_above_maximum / len(finite_values)
     )
 
-    color_map = colormaps["RdYlGn_r"].copy()
-    color_map.set_bad("#ECEFF1")
-    reference_display_mask = reference_counts > 0
+    color_map = LinearSegmentedColormap.from_list(
+        "mean_absolute_standardized_departure",
+        ["#1A9850", "#F2C94C", "#D73027"],
+    )
+    color_map.set_bad((1.0, 1.0, 1.0, 0.0))
     extent = (
         raster_bounds.left,
         raster_bounds.right,
@@ -1296,9 +1519,20 @@ def create_aggregate_deviation_figure(
         raster_bounds.top,
     )
     with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
-        figure = Figure(figsize=(10.0, 7.5), facecolor="white")
+        figure = Figure(figsize=(11.0, 7.5), facecolor="white")
         FigureCanvasAgg(figure)
         axis = figure.subplots()
+        context_handles, context_metadata = add_assessment_context(
+            axis,
+            np.isfinite(display_values),
+            reference_pixel_counts,
+            aoi_pixel_counts,
+            outside_target_pixel_counts,
+            insufficient_predictor_pixel_counts,
+            incomplete_response_pixel_counts,
+            raster_bounds,
+            application_mask_supplied,
+        )
         image = axis.imshow(
             np.ma.masked_invalid(display_values),
             cmap=color_map,
@@ -1306,79 +1540,27 @@ def create_aggregate_deviation_figure(
             extent=extent,
             interpolation="nearest",
             vmin=0.0,
-            vmax=DISPLAY_COLOR_MAXIMUM,
+            vmax=MEAN_ABSOLUTE_DEPARTURE_MAXIMUM,
+            zorder=1,
         )
-        if np.any(reference_display_mask):
-            x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
-                reference_display_mask[0]
-            )
-            y_cell_size = (raster_bounds.top - raster_bounds.bottom) / len(
-                reference_display_mask
-            )
-            x_centers = np.linspace(
-                raster_bounds.left + x_cell_size / 2.0,
-                raster_bounds.right - x_cell_size / 2.0,
-                reference_display_mask.shape[1],
-            )
-            y_centers = np.linspace(
-                raster_bounds.top - y_cell_size / 2.0,
-                raster_bounds.bottom + y_cell_size / 2.0,
-                reference_display_mask.shape[0],
-            )
-            if np.all(reference_display_mask):
-                axis.plot(
-                    [
-                        raster_bounds.left,
-                        raster_bounds.right,
-                        raster_bounds.right,
-                        raster_bounds.left,
-                        raster_bounds.left,
-                    ],
-                    [
-                        raster_bounds.bottom,
-                        raster_bounds.bottom,
-                        raster_bounds.top,
-                        raster_bounds.top,
-                        raster_bounds.bottom,
-                    ],
-                    color="#111111",
-                    linewidth=1.4,
-                    zorder=3,
-                )
-            elif min(reference_display_mask.shape) > 1:
-                axis.contour(
-                    x_centers,
-                    y_centers,
-                    reference_display_mask.astype(np.uint8),
-                    levels=[0.5],
-                    colors=["#111111"],
-                    linewidths=1.3,
-                    zorder=3,
-                )
-
         color_bar = figure.colorbar(
             image,
             ax=axis,
             pad=0.025,
-            shrink=0.88,
+            shrink=0.84,
             extend="max",
         )
         color_bar.set_label(
-            "Mean pixel sum of |z| across all fitted responses",
+            "Mean absolute standardized departure",
             rotation=90,
             labelpad=12,
         )
-        color_bar.set_ticks(DISPLAY_COLOR_TICKS)
+        color_bar.set_ticks(MEAN_ABSOLUTE_DEPARTURE_TICKS)
+        color_bar.ax.set_yticklabels(("0", "0.5", "1", "1.5", "2+"))
         axis.set_aspect("equal", adjustable="box")
-        if raster_crs is not None and raster_crs.is_geographic:
-            axis.set_xlabel("Longitude")
-            axis.set_ylabel("Latitude")
-        else:
-            axis.set_xlabel("Raster x coordinate")
-            axis.set_ylabel("Raster y coordinate")
+        axis.set_axis_off()
         axis.set_title(
-            f"Total standardized departure from modeled reference condition\n"
-            f"{ecoregion_name}",
+            f"Average departure from modeled reference condition\n{analysis_name}",
             fontsize=15,
             weight="bold",
             pad=34,
@@ -1388,45 +1570,30 @@ def create_aggregate_deviation_figure(
             0.0,
             1.015,
             (
-                f"Fixed linear scale: 0 is green, "
-                f"{DISPLAY_YELLOW_GREEN_VALUE:g} is yellow-green, and "
-                f"{DISPLAY_COLOR_MAXIMUM:g} or more is red; black outlines "
-                "contain reference sites"
+                "0 matches expected condition; 1 is one reference RMSE on "
+                "average; 2 or more is capped in red"
             ),
             transform=axis.transAxes,
             ha="left",
             va="bottom",
             color="#4B5459",
         )
-        axis.legend(
-            handles=[
-                Patch(
-                    facecolor="white",
-                    edgecolor="#111111",
-                    linewidth=1.3,
-                    label="Contains reference sites",
-                )
-            ],
-            loc="best",
-            frameon=True,
-            facecolor="white",
-            edgecolor="none",
-            framealpha=0.94,
-        )
-        warning = (
-            " No application mask was supplied, so the modeled surface includes "
-            "the usable AOI predictor footprint."
-            if not application_mask_supplied
-            else ""
-        )
+        if context_handles:
+            axis.legend(
+                handles=context_handles,
+                loc="upper left",
+                frameon=True,
+                facecolor="white",
+                edgecolor="none",
+                framealpha=0.94,
+            )
         figure.text(
             0.5,
             0.01,
             (
-                f"Each display cell is the mean of pixel-level sum(|z_j|) across "
-                f"{response_count} responses. Reference pixels are outlined and "
-                f"excluded from the color values. Diagnostic only, not an integrity "
-                f"score.{warning}"
+                f"Each colored display cell averages pixel-level mean(|z_j|) "
+                f"across {response_count} responses. Values show departure, not "
+                "whether the ecological change is beneficial or detrimental."
             ),
             ha="center",
             va="bottom",
@@ -1434,32 +1601,25 @@ def create_aggregate_deviation_figure(
             color="#4B5459",
             wrap=True,
         )
-        axis.spines[["top", "right"]].set_visible(False)
         figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
 
     return {
-        "metric": "sum(abs(z_j)) across every fitted ecological response",
+        "metric": "mean(abs(z_j)) across every fitted ecological response",
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
         ),
         "display_width": int(display_values.shape[1]),
         "display_height": int(display_values.shape[0]),
         "colored_display_cells": int(len(finite_values)),
-        "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
-        "contributing_source_pixels": int(value_counts.sum()),
-        "reference_source_pixels": int(reference_counts.sum()),
+        **context_metadata,
+        "contributing_source_pixels": int(deviation_counts.sum()),
+        "reference_source_pixels": int(reference_pixel_counts.sum()),
         "response_count": response_count,
-        "color_normalization": (
-            f"linear over the fixed 0 to {DISPLAY_COLOR_MAXIMUM:g} range"
-        ),
+        "color_normalization": "linear over the fixed 0 to 2 range",
         "color_scale_lower_value": 0.0,
-        "color_scale_upper_value": DISPLAY_COLOR_MAXIMUM,
-        "yellow_green_anchor_value": DISPLAY_YELLOW_GREEN_VALUE,
-        "yellow_green_anchor_normalized_position": (
-            DISPLAY_YELLOW_GREEN_VALUE / DISPLAY_COLOR_MAXIMUM
-        ),
+        "color_scale_upper_value": MEAN_ABSOLUTE_DEPARTURE_MAXIMUM,
         "cells_at_or_above_color_maximum": cells_at_or_above_maximum,
         "cells_at_or_above_color_maximum_percent": (
             cells_at_or_above_maximum_percent
@@ -1470,40 +1630,47 @@ def create_aggregate_deviation_figure(
     }
 
 
-def create_departure_percentile_figure(
+def create_reference_similarity_figure(
     departure_percentile_sums: np.ndarray,
     departure_percentile_counts: np.ndarray,
     reference_pixel_counts: np.ndarray,
+    aoi_pixel_counts: np.ndarray,
+    outside_target_pixel_counts: np.ndarray,
+    insufficient_predictor_pixel_counts: np.ndarray,
+    incomplete_response_pixel_counts: np.ndarray,
     raster_bounds: BoundingBox,
-    raster_crs: CRS | None,
     response_count: int,
-    ecoregion_name: str,
+    analysis_name: str,
     application_mask_supplied: bool,
     output_path: Path,
 ) -> dict[str, object]:
-    """Map coarsened departure percentiles and reference-site locations.
+    """Map reference similarity as one minus departure percentile.
 
-    Each colored display cell contains the mean ``P_i`` among complete-response,
-    non-reference source pixels. Display cells containing one or more reference
-    pixels are drawn in deep violet with a white boundary over the percentile
-    surface.
+    Each colored display cell contains mean ``S_i = 1 - P_i`` among complete,
+    non-reference source pixels. Fixed classes emphasize whether the combined
+    response departure falls within common or exceptional reference variation.
 
     Args:
         departure_percentile_sums: Sum of source-pixel departure percentiles per
             display cell.
         departure_percentile_counts: Contributing non-reference pixels per
             display cell.
-        reference_pixel_counts: Reference-site source pixels per display cell.
+        reference_pixel_counts: Reference pixels represented by each cell.
+        aoi_pixel_counts: AOI pixels represented by each cell.
+        outside_target_pixel_counts: AOI pixels excluded from inference per cell.
+        insufficient_predictor_pixel_counts: Target pixels rejected because too
+            many environmental predictors were missing.
+        incomplete_response_pixel_counts: Predicted pixels lacking complete
+            ecological responses per cell.
         raster_bounds: Spatial bounds of the source raster.
-        raster_crs: Source raster coordinate reference system, when defined.
         response_count: Number of responses in each multivariate distance.
-        ecoregion_name: Human-readable label included in the title.
+        analysis_name: Human-readable label included in the title.
         application_mask_supplied: Whether inference used an external
             application mask.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
-        JSON-ready display dimensions, counts, aggregation, and color limits.
+        JSON-ready display dimensions, similarity classes, and counts.
 
     Raises:
         RuntimeError: If no complete-response non-reference pixels are available.
@@ -1520,100 +1687,71 @@ def create_departure_percentile_figure(
         out=mean_display_percentiles,
         where=departure_percentile_counts > 0,
     )
-    displayed_percentiles = mean_display_percentiles[
-        np.isfinite(mean_display_percentiles)
-    ]
-    if len(displayed_percentiles) == 0:
+    mean_display_similarities = 1.0 - mean_display_percentiles
+    scored_display_mask = np.isfinite(mean_display_similarities)
+    displayed_similarities = mean_display_similarities[scored_display_mask]
+    if len(displayed_similarities) == 0:
         raise RuntimeError(
             "No non-reference pixels have complete standardized-departure "
-            "vectors; the departure-percentile figure cannot be created."
+            "vectors; the reference-similarity figure cannot be created."
         )
 
-    reference_display_mask = reference_pixel_counts > 0
+    similarity_classes = np.full(mean_display_similarities.shape, np.nan)
+    similarity_classes[scored_display_mask] = np.digitize(
+        displayed_similarities,
+        REFERENCE_SIMILARITY_THRESHOLDS,
+        right=True,
+    )
     raster_extent = (
         raster_bounds.left,
         raster_bounds.right,
         raster_bounds.bottom,
         raster_bounds.top,
     )
-    departure_color_map = colormaps["RdYlGn_r"].copy()
-    departure_color_map.set_bad("#ECEFF1")
-    reference_color_map = ListedColormap([REFERENCE_SITE_COLOR])
+    similarity_color_map = ListedColormap(REFERENCE_SIMILARITY_COLORS)
+    similarity_color_map.set_bad((1.0, 1.0, 1.0, 0.0))
     with rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
-        figure = Figure(figsize=(10.0, 7.5), facecolor="white")
+        figure = Figure(figsize=(11.0, 7.5), facecolor="white")
         FigureCanvasAgg(figure)
         axis = figure.subplots()
-        departure_percentile_image = axis.imshow(
-            np.ma.masked_invalid(mean_display_percentiles),
-            cmap=departure_color_map,
+        context_handles, context_metadata = add_assessment_context(
+            axis,
+            scored_display_mask,
+            reference_pixel_counts,
+            aoi_pixel_counts,
+            outside_target_pixel_counts,
+            insufficient_predictor_pixel_counts,
+            incomplete_response_pixel_counts,
+            raster_bounds,
+            application_mask_supplied,
+        )
+        similarity_image = axis.imshow(
+            np.ma.masked_invalid(similarity_classes),
+            cmap=similarity_color_map,
             origin="upper",
             extent=raster_extent,
             interpolation="nearest",
-            vmin=0.0,
-            vmax=1.0,
+            vmin=-0.5,
+            vmax=4.5,
+            zorder=1,
         )
-        if np.any(reference_display_mask):
-            axis.imshow(
-                np.ma.masked_where(
-                    ~reference_display_mask,
-                    np.ones(reference_display_mask.shape, dtype=np.uint8),
-                ),
-                cmap=reference_color_map,
-                origin="upper",
-                extent=raster_extent,
-                interpolation="nearest",
-                vmin=0,
-                vmax=1,
-                zorder=3,
-            )
-            x_cell_size = (raster_bounds.right - raster_bounds.left) / len(
-                reference_display_mask[0]
-            )
-            y_cell_size = (raster_bounds.top - raster_bounds.bottom) / len(
-                reference_display_mask
-            )
-            padded_reference_mask = np.pad(reference_display_mask, 1)
-            x_centers = np.linspace(
-                raster_bounds.left - x_cell_size / 2.0,
-                raster_bounds.right + x_cell_size / 2.0,
-                padded_reference_mask.shape[1],
-            )
-            y_centers = np.linspace(
-                raster_bounds.top + y_cell_size / 2.0,
-                raster_bounds.bottom - y_cell_size / 2.0,
-                padded_reference_mask.shape[0],
-            )
-            axis.contour(
-                x_centers,
-                y_centers,
-                padded_reference_mask.astype(np.uint8),
-                levels=[0.5],
-                colors=[REFERENCE_SITE_OUTLINE_COLOR],
-                linewidths=REFERENCE_SITE_OUTLINE_WIDTH,
-                zorder=4,
-            )
-
         color_bar = figure.colorbar(
-            departure_percentile_image,
+            similarity_image,
             ax=axis,
             pad=0.025,
-            shrink=0.88,
+            shrink=0.84,
+            ticks=np.arange(len(REFERENCE_SIMILARITY_LABELS)),
         )
         color_bar.set_label(
-            r"Reference-condition departure percentile ($P_i$)",
+            r"Reference similarity ($S_i = 1 - P_i$)",
             rotation=90,
             labelpad=12,
         )
-        color_bar.set_ticks(PERCENTILE_COLOR_TICKS)
+        color_bar.ax.set_yticklabels(REFERENCE_SIMILARITY_LABELS)
         axis.set_aspect("equal", adjustable="box")
-        if raster_crs is not None and raster_crs.is_geographic:
-            axis.set_xlabel("Longitude")
-            axis.set_ylabel("Latitude")
-        else:
-            axis.set_xlabel("Raster x coordinate")
-            axis.set_ylabel("Raster y coordinate")
+        axis.set_axis_off()
         axis.set_title(
-            f"Multivariate departure from reference condition\n{ecoregion_name}",
+            f"Similarity to modeled reference condition\n{analysis_name}",
             fontsize=15,
             weight="bold",
             pad=34,
@@ -1623,44 +1761,31 @@ def create_departure_percentile_figure(
             0.0,
             1.015,
             (
-                "Area-weighted reference percentile: 0 is green, 1 is red, "
-                "and violet cells with white boundaries contain reference sites"
+                "Green is within common reference variation; orange and red are "
+                "beyond the 90th to 99th departure percentiles"
             ),
             transform=axis.transAxes,
             ha="left",
             va="bottom",
             color="#4B5459",
         )
-        axis.legend(
-            handles=[
-                Patch(
-                    facecolor=REFERENCE_SITE_COLOR,
-                    edgecolor=REFERENCE_SITE_OUTLINE_COLOR,
-                    linewidth=1.0,
-                    label="Contains reference sites",
-                )
-            ],
-            loc="best",
-            frameon=True,
-            facecolor="white",
-            edgecolor="none",
-            framealpha=0.94,
-        )
-        missing_application_mask_warning = (
-            " No application mask was supplied, so the modeled surface includes "
-            "the usable AOI predictor footprint."
-            if not application_mask_supplied
-            else ""
-        )
+        if context_handles:
+            axis.legend(
+                handles=context_handles,
+                loc="upper left",
+                frameon=True,
+                facecolor="white",
+                edgecolor="none",
+                framealpha=0.94,
+            )
         figure.text(
             0.5,
             0.01,
             (
-                f"Each display cell is the mean $P_i$ across complete non-reference "
-                f"pixels using {response_count} responses. Violet display cells "
-                "contain reference pixels, which are excluded from colored values. "
-                "This measures departure from reference, not ecological degradation "
-                f"by itself.{missing_application_mask_warning}"
+                f"Each colored display cell is mean $S_i$ across complete "
+                f"non-reference pixels using {response_count} responses. High "
+                "similarity means combined departures resemble reference "
+                "observations; it does not prove ecological integrity by itself."
             ),
             ha="center",
             va="bottom",
@@ -1668,32 +1793,50 @@ def create_departure_percentile_figure(
             color="#4B5459",
             wrap=True,
         )
-        axis.spines[["top", "right"]].set_visible(False)
         figure.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
 
+    similarity_class_metadata = []
+    class_lower_bounds = (0.0, *REFERENCE_SIMILARITY_THRESHOLDS)
+    class_upper_bounds = (*REFERENCE_SIMILARITY_THRESHOLDS, 1.0)
+    for label, color, lower_bound, upper_bound in zip(
+        REFERENCE_SIMILARITY_LABELS,
+        REFERENCE_SIMILARITY_COLORS,
+        class_lower_bounds,
+        class_upper_bounds,
+        strict=True,
+    ):
+        similarity_class_metadata.append(
+            {
+                "label": label,
+                "minimum_similarity": lower_bound,
+                "maximum_similarity": upper_bound,
+                "color": color,
+            }
+        )
     return {
-        "metric": "area-weighted empirical reference-distance percentile P_i",
+        "metric": "reference similarity S_i = 1 - P_i",
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
         ),
-        "display_width": int(mean_display_percentiles.shape[1]),
-        "display_height": int(mean_display_percentiles.shape[0]),
-        "colored_display_cells": int(len(displayed_percentiles)),
-        "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
+        "display_width": int(mean_display_similarities.shape[1]),
+        "display_height": int(mean_display_similarities.shape[0]),
+        "colored_display_cells": int(len(displayed_similarities)),
+        **context_metadata,
         "contributing_source_pixels": int(departure_percentile_counts.sum()),
         "reference_source_pixels": int(reference_pixel_counts.sum()),
         "response_count": response_count,
-        "color_normalization": "linear over the fixed 0 to 1 range",
+        "color_normalization": "five fixed reference-similarity classes",
         "color_scale_lower_value": 0.0,
         "color_scale_upper_value": 1.0,
+        "classes": similarity_class_metadata,
         "reference_color": REFERENCE_SITE_COLOR,
         "reference_outline_color": REFERENCE_SITE_OUTLINE_COLOR,
         "reference_outline_width_points": REFERENCE_SITE_OUTLINE_WIDTH,
-        "display_value_minimum": float(displayed_percentiles.min()),
-        "display_value_median": float(np.median(displayed_percentiles)),
-        "display_value_maximum": float(displayed_percentiles.max()),
+        "display_value_minimum": float(displayed_similarities.min()),
+        "display_value_median": float(np.median(displayed_similarities)),
+        "display_value_maximum": float(displayed_similarities.max()),
     }
 
 
@@ -2699,11 +2842,11 @@ def summarize_inference_outputs(
     )
     display_width = max(1, round(output_grid.width * display_scale))
     display_height = max(1, round(output_grid.height * display_scale))
-    aggregate_value_sums = np.zeros(
+    mean_absolute_deviation_sums = np.zeros(
         (display_height, display_width),
         dtype=np.float64,
     )
-    aggregate_value_counts = np.zeros(
+    mean_absolute_deviation_counts = np.zeros(
         (display_height, display_width),
         dtype=np.int64,
     )
@@ -2716,6 +2859,22 @@ def summarize_inference_outputs(
         dtype=np.int64,
     )
     reference_pixel_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    aoi_pixel_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    outside_target_pixel_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    insufficient_predictor_pixel_counts = np.zeros(
+        (display_height, display_width),
+        dtype=np.int64,
+    )
+    incomplete_response_pixel_counts = np.zeros(
         (display_height, display_width),
         dtype=np.int64,
     )
@@ -2764,6 +2923,9 @@ def summarize_inference_outputs(
                     )
                     predicted_pixel_mask = (
                         aoi_pixel_mask & (status_values == STATUS_PREDICTED)
+                    )
+                    outside_target_pixel_mask = (
+                        aoi_pixel_mask & (status_values == STATUS_OUTSIDE_TARGET)
                     )
                     aoi_pixel_count += int(np.count_nonzero(aoi_pixel_mask))
                     insufficient_predictor_pixel_count += int(
@@ -2855,7 +3017,12 @@ def summarize_inference_outputs(
                         np.all(standardized_validity, axis=0)
                         & ~reference_pixel_mask
                     )
-                    total_absolute_standardized_departures = np.sum(
+                    incomplete_response_pixel_mask = (
+                        predicted_pixel_mask
+                        & ~reference_pixel_mask
+                        & ~np.all(standardized_validity, axis=0)
+                    )
+                    mean_absolute_standardized_departures = np.mean(
                         np.abs(standardized_values),
                         axis=0,
                     )
@@ -2886,14 +3053,14 @@ def summarize_inference_outputs(
                         + display_columns[np.newaxis, :]
                     )
                     np.add.at(
-                        aggregate_value_sums.ravel(),
+                        mean_absolute_deviation_sums.ravel(),
                         display_cell_indices[complete_non_reference_pixel_mask],
-                        total_absolute_standardized_departures[
+                        mean_absolute_standardized_departures[
                             complete_non_reference_pixel_mask
                         ],
                     )
                     np.add.at(
-                        aggregate_value_counts.ravel(),
+                        mean_absolute_deviation_counts.ravel(),
                         display_cell_indices[complete_non_reference_pixel_mask],
                         1,
                     )
@@ -2914,15 +3081,41 @@ def summarize_inference_outputs(
                         display_cell_indices[reference_pixel_mask],
                         1,
                     )
+                    np.add.at(
+                        aoi_pixel_counts.ravel(),
+                        display_cell_indices[aoi_pixel_mask],
+                        1,
+                    )
+                    np.add.at(
+                        outside_target_pixel_counts.ravel(),
+                        display_cell_indices[outside_target_pixel_mask],
+                        1,
+                    )
+                    np.add.at(
+                        insufficient_predictor_pixel_counts.ravel(),
+                        display_cell_indices[insufficient_pixel_mask],
+                        1,
+                    )
+                    np.add.at(
+                        incomplete_response_pixel_counts.ravel(),
+                        display_cell_indices[incomplete_response_pixel_mask],
+                        1,
+                    )
 
     return InferenceOutputStatistics(
         response_statistics=response_statistics,
         departure_percentile_statistics=departure_percentile_statistics,
-        aggregate_value_sums=aggregate_value_sums,
-        aggregate_value_counts=aggregate_value_counts,
+        mean_absolute_deviation_sums=mean_absolute_deviation_sums,
+        mean_absolute_deviation_counts=mean_absolute_deviation_counts,
         percentile_value_sums=percentile_value_sums,
         percentile_value_counts=percentile_value_counts,
         reference_pixel_counts=reference_pixel_counts,
+        aoi_pixel_counts=aoi_pixel_counts,
+        outside_target_pixel_counts=outside_target_pixel_counts,
+        insufficient_predictor_pixel_counts=(
+            insufficient_predictor_pixel_counts
+        ),
+        incomplete_response_pixel_counts=incomplete_response_pixel_counts,
         aoi_pixels=aoi_pixel_count,
         target_pixels=target_pixel_count,
         predicted_pixels=predicted_pixel_count,
@@ -3022,13 +3215,13 @@ def run_reference_condition_inference(
         inference_status=(
             resolved_output_directory / f"{analysis_slug}_inference_status.tif"
         ),
-        aggregate_deviation_figure=(
+        mean_absolute_deviation_figure=(
             resolved_output_directory
-            / f"{analysis_slug}_aggregate_standardized_deviation.png"
+            / f"{analysis_slug}_mean_absolute_standardized_deviation.png"
         ),
-        departure_percentile_figure=(
+        reference_similarity_figure=(
             resolved_output_directory
-            / f"{analysis_slug}_reference_departure_percentile.png"
+            / f"{analysis_slug}_reference_similarity.png"
         ),
         report=(
             resolved_output_directory / f"{analysis_slug}_inference_report.md"
@@ -3126,11 +3319,23 @@ def run_reference_condition_inference(
     departure_percentile_statistics = (
         output_statistics.departure_percentile_statistics
     )
-    aggregate_value_sums = output_statistics.aggregate_value_sums
-    aggregate_value_counts = output_statistics.aggregate_value_counts
+    mean_absolute_deviation_sums = (
+        output_statistics.mean_absolute_deviation_sums
+    )
+    mean_absolute_deviation_counts = (
+        output_statistics.mean_absolute_deviation_counts
+    )
     percentile_value_sums = output_statistics.percentile_value_sums
     percentile_value_counts = output_statistics.percentile_value_counts
     reference_pixel_counts = output_statistics.reference_pixel_counts
+    aoi_pixel_counts = output_statistics.aoi_pixel_counts
+    outside_target_pixel_counts = output_statistics.outside_target_pixel_counts
+    insufficient_predictor_pixel_counts = (
+        output_statistics.insufficient_predictor_pixel_counts
+    )
+    incomplete_response_pixel_counts = (
+        output_statistics.incomplete_response_pixel_counts
+    )
     raster_pixel_count = output_grid.width * output_grid.height
     aoi_pixel_count = output_statistics.aoi_pixels
     target_pixel_count = output_statistics.target_pixels
@@ -3140,28 +3345,33 @@ def run_reference_condition_inference(
     )
     imputed_pixel_count = output_statistics.imputed_pixels
     source_bounds = output_grid.bounds
-    source_crs = output_grid.crs
-    aggregate_figure_metadata = create_aggregate_deviation_figure(
-        aggregate_value_sums,
-        aggregate_value_counts,
+    mean_absolute_deviation_figure_metadata = create_mean_absolute_deviation_figure(
+        mean_absolute_deviation_sums,
+        mean_absolute_deviation_counts,
         reference_pixel_counts,
+        aoi_pixel_counts,
+        outside_target_pixel_counts,
+        insufficient_predictor_pixel_counts,
+        incomplete_response_pixel_counts,
         source_bounds,
-        source_crs,
         len(response_models),
         analysis_configuration.display_name,
         application_mask_path is not None,
-        artifact_paths.aggregate_deviation_figure,
+        artifact_paths.mean_absolute_deviation_figure,
     )
-    departure_percentile_figure_metadata = create_departure_percentile_figure(
+    reference_similarity_figure_metadata = create_reference_similarity_figure(
         percentile_value_sums,
         percentile_value_counts,
         reference_pixel_counts,
+        aoi_pixel_counts,
+        outside_target_pixel_counts,
+        insufficient_predictor_pixel_counts,
+        incomplete_response_pixel_counts,
         source_bounds,
-        source_crs,
         len(response_models),
         analysis_configuration.display_name,
         application_mask_path is not None,
-        artifact_paths.departure_percentile_figure,
+        artifact_paths.reference_similarity_figure,
     )
     elapsed_seconds = time.perf_counter() - started
     departure_percentile_summary = departure_percentile_statistics.summarize()
@@ -3207,11 +3417,11 @@ def run_reference_condition_inference(
             artifact_paths.departure_percentile
         ),
         "inference_status": str(artifact_paths.inference_status),
-        "aggregate_standardized_deviation_figure": str(
-            artifact_paths.aggregate_deviation_figure
+        "mean_absolute_standardized_deviation_figure": str(
+            artifact_paths.mean_absolute_deviation_figure
         ),
-        "reference_departure_percentile_figure": str(
-            artifact_paths.departure_percentile_figure
+        "reference_similarity_figure": str(
+            artifact_paths.reference_similarity_figure
         ),
         "report": str(artifact_paths.report),
         "metadata": str(artifact_paths.metadata),
@@ -3219,7 +3429,7 @@ def run_reference_condition_inference(
     }
     inference_metadata: dict[str, object] = {
         "artifact_type": "reference_condition_raster_inference",
-        "format_version": 3,
+        "format_version": 4,
         "ecoregion_name": ecoregion_name,
         "analysis_configuration": {
             "path": str(analysis_configuration.path),
@@ -3327,9 +3537,11 @@ def run_reference_condition_inference(
             "statistics": departure_percentile_summary,
             "reference_pixels": "excluded and written as nodata",
             "required_responses": "every fitted response",
-            "figure": departure_percentile_figure_metadata,
+            "similarity_figure": reference_similarity_figure_metadata,
         },
-        "aggregate_deviation_figure": aggregate_figure_metadata,
+        "mean_absolute_deviation_figure": (
+            mean_absolute_deviation_figure_metadata
+        ),
         "artifacts": artifact_path_records,
         "elapsed_seconds": elapsed_seconds,
     }
@@ -3375,9 +3587,12 @@ def run_reference_condition_inference(
     print()
     print(f"Inference report: {artifact_paths.report}")
     print(f"Metadata: {artifact_paths.metadata}")
-    print(f"Aggregate deviation figure: {artifact_paths.aggregate_deviation_figure}")
+    print(
+        "Mean absolute deviation figure: "
+        f"{artifact_paths.mean_absolute_deviation_figure}"
+    )
     print(f"Departure percentile raster: {artifact_paths.departure_percentile}")
-    print(f"Departure percentile figure: {artifact_paths.departure_percentile_figure}")
+    print(f"Reference similarity figure: {artifact_paths.reference_similarity_figure}")
     print(f"Completed in {elapsed_seconds:.1f} seconds")
 
     return InferenceRunSummary(
@@ -3387,11 +3602,11 @@ def run_reference_condition_inference(
         standardized_deviation_path=artifact_paths.standardized_deviation,
         departure_percentile_path=artifact_paths.departure_percentile,
         inference_status_path=artifact_paths.inference_status,
-        aggregate_deviation_figure_path=(
-            artifact_paths.aggregate_deviation_figure
+        mean_absolute_deviation_figure_path=(
+            artifact_paths.mean_absolute_deviation_figure
         ),
-        departure_percentile_figure_path=(
-            artifact_paths.departure_percentile_figure
+        reference_similarity_figure_path=(
+            artifact_paths.reference_similarity_figure
         ),
         report_path=artifact_paths.report,
         metadata_path=artifact_paths.metadata,

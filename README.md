@@ -291,8 +291,8 @@ Outputs under `outputs/reference_condition_inference/<analysis_name>` include:
 - `<analysis_name>_standardized_deviation.tif`
 - `<analysis_name>_reference_departure_percentile.tif`
 - `<analysis_name>_inference_status.tif`
-- `<analysis_name>_aggregate_standardized_deviation.png`
-- `<analysis_name>_reference_departure_percentile.png`
+- `<analysis_name>_mean_absolute_standardized_deviation.png`
+- `<analysis_name>_reference_similarity.png`
 - `<analysis_name>_inference_report.md`
 - `<analysis_name>_inference_metadata.json`
 - `<analysis_name>_inference_checkpoint.json`
@@ -305,17 +305,13 @@ target, status 1 exceeds the training missingness threshold, and status 2 receiv
 model predictions. Pixels within the threshold use the final reference-training
 imputation values stored in each model.
 
-The aggregate PNG makes the raster result visible at publication resolution. For
-each source pixel with every modeled response defined, it calculates
-`sum(abs(z_j))` across all responses. It then enlarges the result to at most 700
-display cells along the longest raster dimension by taking the mean among
-non-reference pixels in each display cell. Green indicates lower total standardized
-departure and red indicates larger departure. A fixed linear scale maps 0 to green,
-3 to yellow-green, and values of 10 or more to red. Black outlines show display
-cells containing pixels from the analysis-year reference-site band. Reference
-pixels do not contribute to the colored values. This aggregate is a diagnostic, not
-an integrity score, and responses with similar ecological information can be counted
-more than once.
+The mean-absolute-deviation PNG provides a response-count-independent diagnostic.
+For each source pixel with every modeled response defined, it calculates
+`mean(abs(z_j))` across responses. It then reduces the result to at most 700 display
+cells along the longest raster dimension by taking the mean among non-reference
+pixels in each display cell. A fixed linear scale maps 0 to green, 1 reference RMSE
+on average to yellow, and values of 2 or more to red. This diagnostic shows average
+departure magnitude, not whether the ecological change is beneficial or detrimental.
 
 The reference-departure percentile uses only complete reference rows from
 `ecological_response_predictions.parquet`. It calculates their area-weighted mean
@@ -329,12 +325,19 @@ For every complete non-reference raster pixel, the script calculates a Mahalanob
 distance from the reference center and writes `P_i`: the represented-area fraction of
 complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` means the
 pixel is farther from the reference center than 95% of represented calibration area.
-The aligned single-band GeoTIFF uses the fixed 0 to 1 scale. Reference pixels and pixels
-missing any fitted response are nodata. The corresponding PNG shows reference-site
-display cells in blue with white boundaries and mean non-reference `P_i` from
-green at 0 through red at 1. The report records complete-reference coverage,
-covariance conditioning, reference distance quantiles, raster coverage, and
-upper-percentile frequencies.
+The aligned single-band GeoTIFF uses the fixed 0 to 1 `P_i` scale. Reference pixels
+and pixels missing any fitted response are nodata. The primary PNG maps reference
+similarity `S_i = 1 - P_i`, so larger values identify pixels whose combined response
+departures more closely resemble reference observations. Five fixed classes separate
+the central 50% of represented reference departures from the 50th-90th, 90th-95th,
+95th-99th, and beyond-99th percentile ranges.
+
+Both PNGs show reference calibration pixels in blue and exclude them from the colored
+assessment surface. Neutral legend categories distinguish pixels outside the
+application mask, target pixels with insufficient predictors, predicted pixels with
+incomplete observed responses, and areas outside the AOI. The report records
+complete-reference coverage, covariance conditioning, reference distance quantiles,
+raster coverage, and upper-percentile frequencies.
 
 `P_i` is a multivariate reference-condition departure percentile, not proof of
 degradation or an ecological integrity score. Keep the individual standardized
