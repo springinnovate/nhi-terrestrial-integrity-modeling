@@ -312,7 +312,9 @@ cells along the longest raster dimension by taking the mean among non-reference
 pixels in each display cell. A fixed linear scale keeps values through about 1 in
 green shades, transitions through amber between 1 and 2, and maps values of 2 or
 more to red. A value of 1 means the average absolute difference is about the size
-normally observed between predictions and reference sites.
+normally observed between predictions and reference sites. The figure title and
+subtitle describe this as the difference between observed vegetation and modeled
+reference condition rather than as an ecological-integrity score.
 
 The reference-departure percentile uses only complete reference rows from
 `ecological_response_predictions.parquet`. It calculates their area-weighted mean
@@ -333,12 +335,13 @@ departures more closely resemble reference observations. Five fixed classes sepa
 the central 50% of represented reference departures from the 50th-90th, 90th-95th,
 95th-99th, and beyond-99th percentile ranges.
 
-Both PNGs show reference calibration pixels in blue and exclude them from the colored
-assessment surface. Neutral legend categories distinguish pixels outside the
-application mask, target pixels with insufficient predictors, predicted pixels with
-incomplete observed responses, and areas outside the AOI. The report records
-complete-reference coverage, covariance conditioning, reference distance quantiles,
-raster coverage, and upper-percentile frequencies.
+Both PNGs show reference calibration pixels in pale blue and exclude them from the
+colored assessment surface. Pale gray identifies pixels outside the configured
+inference target, dark gray identifies target pixels with insufficient predictors,
+and pale lavender identifies pixels where one or more observed biotic measurements
+are unavailable. The report records complete-reference coverage, covariance
+conditioning, reference distance quantiles, raster coverage, and upper-percentile
+frequencies.
 
 `P_i` is a multivariate reference-condition departure percentile, not proof of
 degradation or an ecological integrity score. Keep the individual standardized
@@ -356,7 +359,10 @@ Set `inference.application_mask_path` to a raster whose defined first-band pixel
 equal to `1` identify the inference target. The mask may have a different CRS,
 resolution, transform, or global extent; it is aligned to each raster window with
 nearest-neighbor resampling without loading the complete mask into memory. Zeros,
-other values, nodata, and pixels outside the mask extent are excluded:
+other values, nodata, and pixels outside the mask extent are excluded. Set the
+required `inference.application_mask_label` to a concise description such as
+`"2018 grassland extent"`; figures use it to label excluded pixels without exposing
+the implementation-oriented phrase "application mask":
 
 ```text
 python -m scripts.apply_reference_condition_models config\south_africa_reference_condition_analysis.toml outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample

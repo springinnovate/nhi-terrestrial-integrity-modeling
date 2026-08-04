@@ -74,7 +74,7 @@ REFERENCE_SITE_OUTLINE_COLOR = "#DCECF3"
 REFERENCE_SITE_OUTLINE_WIDTH = 0.35
 OUTSIDE_TARGET_COLOR = "#E5E7EB"
 INSUFFICIENT_PREDICTOR_COLOR = "#626B73"
-INCOMPLETE_RESPONSE_COLOR = "#AAB2BA"
+INCOMPLETE_RESPONSE_COLOR = "#C5B8D6"
 AOI_OUTLINE_COLOR = "#374151"
 FLOAT_NODATA = -9999.0
 STATUS_NODATA = 255
@@ -1033,6 +1033,11 @@ def write_inference_report(
         if application_mask_metadata is not None
         else "not supplied"
     )
+    inference_target_text = (
+        str(application_mask_metadata["label"])
+        if application_mask_metadata is not None
+        else "usable AOI predictor footprint"
+    )
     report_lines = [
         "# Reference-condition raster inference: "
         f"{inference_metadata['ecoregion_name']}",
@@ -1041,7 +1046,7 @@ def write_inference_report(
     if application_mask_metadata is None:
         report_lines.extend(
             [
-                "> **Important:** No application mask was supplied. These outputs "
+                "> **Important:** No inference target mask was supplied. These outputs "
                 "cover the usable AOI predictor footprint and must not be "
                 "interpreted as grassland integrity maps.",
                 "",
@@ -1058,8 +1063,9 @@ def write_inference_report(
             "- Validated source tiles: "
             f"{inference_metadata['input_raster_cache']['source_tiles']:,}",
             f"- Model run: `{inference_metadata['model_run_directory']}`",
-            f"- Application mask: `{application_mask_path_text}`",
-            "- Application mask selection: "
+            f"- Inference target: {inference_target_text}",
+            f"- Target mask raster: `{application_mask_path_text}`",
+            "- Target mask selection: "
             f"{inference_metadata['mask_interpretation']}",
             f"- Responses: {inference_metadata['response_count']}",
             (
@@ -1152,10 +1158,11 @@ def write_inference_report(
             ),
             "",
             (
-                "Blue display cells contain reference calibration pixels and are "
-                "not scored. Neutral legend categories distinguish pixels outside "
-                "the application mask, pixels with insufficient predictors, pixels "
-                "with incomplete observed responses, and areas outside the AOI."
+                "Pale blue display cells contain reference calibration pixels and "
+                "are not scored. Pale gray marks pixels outside the configured "
+                f"inference target ({inference_target_text}); dark gray marks pixels "
+                "with insufficient predictors; pale lavender marks pixels where one "
+                "or more observed biotic measurements are unavailable."
             ),
             "",
             "## Mean absolute standardized-deviation map",
@@ -1263,7 +1270,7 @@ def add_assessment_context(
     insufficient_predictor_pixel_counts: np.ndarray,
     incomplete_response_pixel_counts: np.ndarray,
     raster_bounds: BoundingBox,
-    application_mask_supplied: bool,
+    application_mask_label: str | None,
 ) -> tuple[list[Patch], dict[str, int]]:
     """Draw reference pixels, the AOI boundary, and unscored categories.
 
@@ -1278,8 +1285,8 @@ def add_assessment_context(
         incomplete_response_pixel_counts: Predicted non-reference pixels lacking
             one or more observed ecological responses required for the score.
         raster_bounds: Spatial bounds shared by every display array.
-        application_mask_supplied: Whether outside-target cells were selected by
-            an external application mask.
+        application_mask_label: Human-readable name for the externally selected
+            inference extent, or ``None`` when no mask was supplied.
 
     Returns:
         Legend handles for categories present in the figure and display-cell
@@ -1395,11 +1402,11 @@ def add_assessment_context(
         np.isfinite(unscored_categories)
     ]
     unscored_labels = (
-        "Outside application mask"
-        if application_mask_supplied
+        f"Outside {application_mask_label}"
+        if application_mask_label is not None
         else "Outside usable inference target",
         "Not modeled: insufficient predictors",
-        "Not scored: incomplete responses",
+        "Not scored: one or more biotic measurements unavailable",
     )
     for category, (color, label) in enumerate(
         zip(
@@ -1427,6 +1434,10 @@ def add_assessment_context(
         )
 
     return legend_handles, {
+        "outside_target_legend_label": unscored_labels[0],
+        "outside_target_color": OUTSIDE_TARGET_COLOR,
+        "incomplete_response_legend_label": unscored_labels[2],
+        "incomplete_response_color": INCOMPLETE_RESPONSE_COLOR,
         "reference_display_cells": int(np.count_nonzero(reference_display_mask)),
         "outside_aoi_display_cells": int(np.count_nonzero(~aoi_display_mask)),
         "outside_target_display_cells": int(
@@ -1452,7 +1463,7 @@ def create_mean_absolute_deviation_figure(
     raster_bounds: BoundingBox,
     response_count: int,
     analysis_name: str,
-    application_mask_supplied: bool,
+    application_mask_label: str | None,
     output_path: Path,
 ) -> dict[str, object]:
     """Map mean absolute standardized departure across fitted responses.
@@ -1474,7 +1485,8 @@ def create_mean_absolute_deviation_figure(
         raster_bounds: Spatial bounds of the source raster.
         response_count: Number of standardized responses in each pixel mean.
         analysis_name: Human-readable label included in the title.
-        application_mask_supplied: Whether inference used an external mask.
+        application_mask_label: Human-readable name for the externally selected
+            inference extent, or ``None`` when no mask was supplied.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
@@ -1518,6 +1530,11 @@ def create_mean_absolute_deviation_figure(
         ],
     )
     color_map.set_bad((1.0, 1.0, 1.0, 0.0))
+    figure_title = "How observed vegetation differs from modeled reference condition"
+    figure_subtitle = (
+        "Green indicates vegetation closer to expected reference conditions; "
+        "red indicates larger average differences"
+    )
     extent = (
         raster_bounds.left,
         raster_bounds.right,
@@ -1537,7 +1554,7 @@ def create_mean_absolute_deviation_figure(
             insufficient_predictor_pixel_counts,
             incomplete_response_pixel_counts,
             raster_bounds,
-            application_mask_supplied,
+            application_mask_label,
         )
         image = axis.imshow(
             np.ma.masked_invalid(display_values),
@@ -1557,7 +1574,7 @@ def create_mean_absolute_deviation_figure(
             extend="max",
         )
         color_bar.set_label(
-            "Mean absolute standardized departure",
+            "Mean absolute standardized difference",
             rotation=90,
             labelpad=12,
         )
@@ -1566,7 +1583,7 @@ def create_mean_absolute_deviation_figure(
         axis.set_aspect("equal", adjustable="box")
         axis.set_axis_off()
         axis.set_title(
-            f"Average departure from modeled reference condition\n{analysis_name}",
+            f"{figure_title}\n{analysis_name}",
             fontsize=15,
             weight="bold",
             pad=34,
@@ -1575,11 +1592,7 @@ def create_mean_absolute_deviation_figure(
         axis.text(
             0.0,
             1.015,
-            (
-                "Values near 1 are comparable to typical reference-site "
-                "prediction differences; 2 or more indicates large average "
-                "differences"
-            ),
+            figure_subtitle,
             transform=axis.transAxes,
             ha="left",
             va="bottom",
@@ -1616,6 +1629,8 @@ def create_mean_absolute_deviation_figure(
         figure.savefig(output_path, dpi=FIGURE_DPI, bbox_inches="tight")
 
     return {
+        "title": figure_title,
+        "subtitle": figure_subtitle,
         "metric": "mean(abs(z_j)) across every fitted ecological response",
         "display_aggregation": (
             "mean among complete-response non-reference source pixels"
@@ -1651,7 +1666,7 @@ def create_reference_similarity_figure(
     raster_bounds: BoundingBox,
     response_count: int,
     analysis_name: str,
-    application_mask_supplied: bool,
+    application_mask_label: str | None,
     output_path: Path,
 ) -> dict[str, object]:
     """Map reference similarity as one minus departure percentile.
@@ -1675,8 +1690,8 @@ def create_reference_similarity_figure(
         raster_bounds: Spatial bounds of the source raster.
         response_count: Number of responses in each multivariate distance.
         analysis_name: Human-readable label included in the title.
-        application_mask_supplied: Whether inference used an external
-            application mask.
+        application_mask_label: Human-readable name for the externally selected
+            inference extent, or ``None`` when no mask was supplied.
         output_path: Destination path for the publication-resolution PNG.
 
     Returns:
@@ -1733,7 +1748,7 @@ def create_reference_similarity_figure(
             insufficient_predictor_pixel_counts,
             incomplete_response_pixel_counts,
             raster_bounds,
-            application_mask_supplied,
+            application_mask_label,
         )
         similarity_image = axis.imshow(
             np.ma.masked_invalid(similarity_classes),
@@ -2520,6 +2535,9 @@ def write_inference_tiles(
     output_mode = "r+" if can_resume else "w"
 
     application_mask_path = analysis_configuration.inference.application_mask_path
+    application_mask_label = (
+        analysis_configuration.inference.application_mask_label
+    )
     application_mask_metadata = None
     with ExitStack() as stack:
         if application_mask_path is not None:
@@ -2528,6 +2546,7 @@ def write_inference_tiles(
             )
             application_mask_metadata = {
                 "path": str(application_mask_path),
+                "label": application_mask_label,
                 "selected_value": 1,
                 "resampling": "nearest",
                 "source_width": application_mask_source.width,
@@ -2584,6 +2603,9 @@ def write_inference_tiles(
                 "stack_identifier": analysis_cache_tiles.stack_identifier,
                 "model_run_directory": str(model_run_directory),
                 "application_mask": str(application_mask_path or "not_supplied"),
+                "application_mask_label": str(
+                    application_mask_label or "not_supplied"
+                ),
                 "application_mask_selected_value": "1",
                 "application_mask_resampling": "nearest",
             }
@@ -2668,6 +2690,21 @@ def write_inference_tiles(
                     output_band_index,
                     **response_tags,
                 )
+
+        # The label is presentation metadata and does not invalidate completed
+        # inference tiles, so refresh it even when all raster data are resumed.
+        for output_destination in (
+            expected_destination,
+            deviation_destination,
+            standardized_destination,
+            percentile_destination,
+            status_destination,
+        ):
+            output_destination.update_tags(
+                application_mask_label=str(
+                    application_mask_label or "not_supplied"
+                )
+            )
 
         checkpoint_metadata = {
             "schema_version": INFERENCE_CHECKPOINT_SCHEMA_VERSION,
@@ -3280,12 +3317,16 @@ def run_reference_condition_inference(
     )
     if application_mask_path is None:
         print(
-            "Application mask: not supplied; inferring across the usable AOI "
+            "Inference target mask: not supplied; inferring across the usable AOI "
             "predictor footprint"
         )
     else:
-        print(f"Application mask: {application_mask_path}")
-        print("Application mask target: defined first-band pixels equal to 1")
+        print(
+            "Inference target: "
+            f"{analysis_configuration.inference.application_mask_label}"
+        )
+        print(f"Target mask raster: {application_mask_path}")
+        print("Target mask selection: defined first-band pixels equal to 1")
 
     inference_fingerprint = build_inference_fingerprint(
         analysis_configuration,
@@ -3366,7 +3407,7 @@ def run_reference_condition_inference(
         source_bounds,
         len(response_models),
         analysis_configuration.display_name,
-        application_mask_path is not None,
+        analysis_configuration.inference.application_mask_label,
         artifact_paths.mean_absolute_deviation_figure,
     )
     reference_similarity_figure_metadata = create_reference_similarity_figure(
@@ -3380,7 +3421,7 @@ def run_reference_condition_inference(
         source_bounds,
         len(response_models),
         analysis_configuration.display_name,
-        application_mask_path is not None,
+        analysis_configuration.inference.application_mask_label,
         artifact_paths.reference_similarity_figure,
     )
     elapsed_seconds = time.perf_counter() - started

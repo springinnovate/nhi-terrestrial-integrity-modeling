@@ -142,12 +142,14 @@ class InferenceSettings:
 
     Attributes:
         application_mask_path: Optional resolved raster defining target pixels.
+        application_mask_label: Human-readable name for the selected extent.
         worker_count: Maximum cache tiles calculated concurrently.
         window_size_pixels: Width and height of each processing window.
         covariance_shrinkage: Reference covariance diagonal shrinkage fraction.
     """
 
     application_mask_path: Path | None
+    application_mask_label: str | None
     worker_count: int
     window_size_pixels: int
     covariance_shrinkage: float
@@ -452,6 +454,23 @@ def load_analysis_configuration(
     if not resolved_aoi_path.is_file():
         raise ValueError(f"Analysis AOI does not exist: {resolved_aoi_path}")
     application_mask_path_value = inference_section.get("application_mask_path")
+    application_mask_label_value = inference_section.get(
+        "application_mask_label"
+    )
+    if (application_mask_path_value is None) != (
+        application_mask_label_value is None
+    ):
+        raise ValueError(
+            "inference.application_mask_path and application_mask_label must "
+            "be configured together."
+        )
+    application_mask_label = (
+        str(application_mask_label_value).strip()
+        if application_mask_label_value is not None
+        else None
+    )
+    if application_mask_label == "":
+        raise ValueError("inference.application_mask_label cannot be empty.")
     normalized_configuration_bytes = json.dumps(
         raw_configuration,
         sort_keys=True,
@@ -552,6 +571,7 @@ def load_analysis_configuration(
                 if application_mask_path_value is not None
                 else None
             ),
+            application_mask_label=application_mask_label,
             worker_count=int(inference_section["worker_count"]),
             window_size_pixels=int(inference_section["window_size_pixels"]),
             covariance_shrinkage=float(
