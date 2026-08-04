@@ -760,6 +760,6 @@ responses = []
 #     not the individual expected-response or standardized-deviation rasters.
 [inference]
 application_mask_path = "../data/grassland_mask_2018.tif"
-worker_count = 4
+worker_count = 8
 window_size_pixels = 256
 covariance_shrinkage = 0.10
