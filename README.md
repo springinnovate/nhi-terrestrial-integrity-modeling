@@ -291,8 +291,8 @@ Outputs under `outputs/reference_condition_inference/<analysis_name>` include:
 - `<analysis_name>_standardized_deviation.tif`
 - `<analysis_name>_reference_departure_percentile.tif`
 - `<analysis_name>_inference_status.tif`
-- `<analysis_name>_aggregate_standardized_deviation.png`
-- `<analysis_name>_reference_departure_percentile.png`
+- `<analysis_name>_mean_absolute_standardized_deviation.png`
+- `<analysis_name>_reference_similarity.png`
 - `<analysis_name>_inference_report.md`
 - `<analysis_name>_inference_metadata.json`
 - `<analysis_name>_inference_checkpoint.json`
@@ -305,17 +305,16 @@ target, status 1 exceeds the training missingness threshold, and status 2 receiv
 model predictions. Pixels within the threshold use the final reference-training
 imputation values stored in each model.
 
-The aggregate PNG makes the raster result visible at publication resolution. For
-each source pixel with every modeled response defined, it calculates
-`sum(abs(z_j))` across all responses. It then enlarges the result to at most 700
-display cells along the longest raster dimension by taking the mean among
-non-reference pixels in each display cell. Green indicates lower total standardized
-departure and red indicates larger departure. A fixed linear scale maps 0 to green,
-3 to yellow-green, and values of 10 or more to red. Black outlines show display
-cells containing pixels from the analysis-year reference-site band. Reference
-pixels do not contribute to the colored values. This aggregate is a diagnostic, not
-an integrity score, and responses with similar ecological information can be counted
-more than once.
+The mean-absolute-deviation PNG provides a response-count-independent diagnostic.
+For each source pixel with every modeled response defined, it calculates
+`mean(abs(z_j))` across responses. It then reduces the result to at most 700 display
+cells along the longest raster dimension by taking the mean among non-reference
+pixels in each display cell. A fixed linear scale keeps values through about 1 in
+green shades, transitions through amber between 1 and 2, and maps values of 2 or
+more to red. A value of 1 means the average absolute difference is about the size
+normally observed between predictions and reference sites. The figure title and
+subtitle describe this as the difference between observed vegetation and modeled
+reference condition rather than as an ecological-integrity score.
 
 The reference-departure percentile uses only complete reference rows from
 `ecological_response_predictions.parquet`. It calculates their area-weighted mean
@@ -329,12 +328,24 @@ For every complete non-reference raster pixel, the script calculates a Mahalanob
 distance from the reference center and writes `P_i`: the represented-area fraction of
 complete reference rows with an equal or smaller distance. Thus, `P_i=0.95` means the
 pixel is farther from the reference center than 95% of represented calibration area.
-The aligned single-band GeoTIFF uses the fixed 0 to 1 scale. Reference pixels and pixels
-missing any fitted response are nodata. The corresponding PNG shows reference-site
-display cells in blue with white boundaries and mean non-reference `P_i` from
-green at 0 through red at 1. The report records complete-reference coverage,
-covariance conditioning, reference distance quantiles, raster coverage, and
-upper-percentile frequencies.
+The aligned single-band GeoTIFF uses the fixed 0 to 1 `P_i` scale. Reference pixels
+and pixels missing any fitted response are nodata. The primary PNG maps reference
+similarity `S_i = 1 - P_i`, so larger values identify pixels whose combined response
+departures more closely resemble reference observations. Five fixed classes separate
+the central 50% of represented reference departures from the 50th-90th, 90th-95th,
+95th-99th, and beyond-99th percentile ranges. The figure defines `S_i` directly as
+the represented reference-site area with a larger combined observed-versus-expected
+vegetation difference than the mapped pixel; the report retains the `P_i` derivation.
+The figure footer also identifies the five machine-readable GeoTIFF outputs by their
+complete filenames and roles in the inference workflow.
+
+Both PNGs show reference calibration pixels in pale blue and exclude them from the
+colored assessment surface. Pale gray identifies pixels outside the configured
+inference target, dark gray identifies target pixels with insufficient predictors,
+and pale lavender identifies pixels where one or more observed biotic measurements
+are unavailable. The report records complete-reference coverage, covariance
+conditioning, reference distance quantiles, raster coverage, and upper-percentile
+frequencies.
 
 `P_i` is a multivariate reference-condition departure percentile, not proof of
 degradation or an ecological integrity score. Keep the individual standardized
@@ -352,7 +363,10 @@ Set `inference.application_mask_path` to a raster whose defined first-band pixel
 equal to `1` identify the inference target. The mask may have a different CRS,
 resolution, transform, or global extent; it is aligned to each raster window with
 nearest-neighbor resampling without loading the complete mask into memory. Zeros,
-other values, nodata, and pixels outside the mask extent are excluded:
+other values, nodata, and pixels outside the mask extent are excluded. Set the
+required `inference.application_mask_label` to a concise description such as
+`"2018 grassland extent"`; figures use it to label excluded pixels without exposing
+the implementation-oriented phrase "application mask":
 
 ```text
 python -m scripts.apply_reference_condition_models config\south_africa_reference_condition_analysis.toml outputs\integrity_parameters\south_africa_reference_condition_2018_spatial_sample

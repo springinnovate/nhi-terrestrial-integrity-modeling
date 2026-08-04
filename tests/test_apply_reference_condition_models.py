@@ -113,6 +113,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             inference=replace(
                 base_configuration.inference,
                 application_mask_path=None,
+                application_mask_label=None,
                 window_size_pixels=2,
             ),
         )
@@ -441,19 +442,19 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             summary.inference_status_path.name,
         )
         self.assertEqual(
-            "synthetic_prairie_aggregate_standardized_deviation.png",
-            summary.aggregate_deviation_figure_path.name,
+            "synthetic_prairie_mean_absolute_standardized_deviation.png",
+            summary.mean_absolute_deviation_figure_path.name,
         )
         self.assertEqual(
-            "synthetic_prairie_reference_departure_percentile.png",
-            summary.departure_percentile_figure_path.name,
+            "synthetic_prairie_reference_similarity.png",
+            summary.reference_similarity_figure_path.name,
         )
         self.assertGreater(
-            summary.aggregate_deviation_figure_path.stat().st_size,
+            summary.mean_absolute_deviation_figure_path.stat().st_size,
             1_000,
         )
         self.assertGreater(
-            summary.departure_percentile_figure_path.stat().st_size,
+            summary.reference_similarity_figure_path.stat().st_size,
             1_000,
         )
         with rasterio.open(summary.expected_reference_path) as expected_source:
@@ -518,13 +519,14 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         report = summary.report_path.read_text(encoding="utf-8")
         metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
-        self.assertIn("No application mask was supplied", report)
+        self.assertIn("No inference target mask was supplied", report)
         self.assertIn("Synthetic Prairie", report)
-        self.assertIn("mean pixel-level `sum(abs(z_j))`", report)
+        self.assertIn("pixel-level `mean(abs(z_j))`", report)
         self.assertIn("fixed linear scale", report)
-        self.assertIn("Multivariate reference-departure percentile", report)
+        self.assertIn("Multivariate reference similarity", report)
         self.assertIn("farther from the reference center than 95%", report)
         self.assertIsNone(metadata["application_mask"])
+        self.assertEqual(4, metadata["format_version"])
         self.assertEqual(18, metadata["responses"][0]["statistics"]["deviation_pixels"])
         self.assertEqual(16, summary.departure_percentile_pixels)
         self.assertEqual(16, metadata["coverage"]["departure_percentile_pixels"])
@@ -545,59 +547,134 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         )
         self.assertEqual(
             1.0,
-            metadata["reference_departure_percentile"]["figure"][
+            metadata["reference_departure_percentile"]["similarity_figure"][
                 "color_scale_upper_value"
             ],
         )
         self.assertEqual(
-            "#0072B2",
-            metadata["reference_departure_percentile"]["figure"][
+            "#8CBFD6",
+            metadata["reference_departure_percentile"]["similarity_figure"][
                 "reference_color"
             ],
         )
         self.assertEqual(
-            "#FFFFFF",
-            metadata["reference_departure_percentile"]["figure"][
+            "#DCECF3",
+            metadata["reference_departure_percentile"]["similarity_figure"][
                 "reference_outline_color"
             ],
         )
         self.assertEqual(
-            0.4,
-            metadata["reference_departure_percentile"]["figure"][
+            0.35,
+            metadata["reference_departure_percentile"]["similarity_figure"][
                 "reference_outline_width_points"
             ],
         )
         self.assertEqual(
             16,
-            metadata["aggregate_deviation_figure"]["contributing_source_pixels"],
-        )
-        self.assertEqual(
-            2,
-            metadata["aggregate_deviation_figure"]["reference_source_pixels"],
-        )
-        self.assertEqual(
-            2,
-            metadata["aggregate_deviation_figure"]["response_count"],
-        )
-        self.assertEqual(3, metadata["aggregate_deviation_figure"]["display_width"])
-        self.assertEqual(2, metadata["aggregate_deviation_figure"]["display_height"])
-        self.assertEqual(
-            10.0,
-            metadata["aggregate_deviation_figure"]["color_scale_upper_value"],
-        )
-        self.assertEqual(
-            "linear over the fixed 0 to 10 range",
-            metadata["aggregate_deviation_figure"]["color_normalization"],
-        )
-        self.assertEqual(
-            3.0,
-            metadata["aggregate_deviation_figure"]["yellow_green_anchor_value"],
-        )
-        self.assertEqual(
-            0.3,
-            metadata["aggregate_deviation_figure"][
-                "yellow_green_anchor_normalized_position"
+            metadata["mean_absolute_deviation_figure"][
+                "contributing_source_pixels"
             ],
+        )
+        self.assertEqual(
+            2,
+            metadata["mean_absolute_deviation_figure"]["reference_source_pixels"],
+        )
+        self.assertEqual(
+            "How observed vegetation differs from modeled reference condition",
+            metadata["mean_absolute_deviation_figure"]["title"],
+        )
+        self.assertEqual(
+            "Outside usable inference target",
+            metadata["mean_absolute_deviation_figure"][
+                "outside_target_legend_label"
+            ],
+        )
+        self.assertEqual(
+            "#C5B8D6",
+            metadata["mean_absolute_deviation_figure"][
+                "incomplete_response_color"
+            ],
+        )
+        self.assertEqual(
+            2,
+            metadata["mean_absolute_deviation_figure"]["response_count"],
+        )
+        self.assertEqual(
+            3,
+            metadata["mean_absolute_deviation_figure"]["display_width"],
+        )
+        self.assertEqual(
+            2,
+            metadata["mean_absolute_deviation_figure"]["display_height"],
+        )
+        self.assertEqual(
+            2.0,
+            metadata["mean_absolute_deviation_figure"]["color_scale_upper_value"],
+        )
+        self.assertEqual(
+            "linear over the fixed 0 to 2 range",
+            metadata["mean_absolute_deviation_figure"]["color_normalization"],
+        )
+        self.assertEqual(
+            "five fixed reference-similarity classes",
+            metadata["reference_departure_percentile"]["similarity_figure"][
+                "color_normalization"
+            ],
+        )
+        self.assertEqual(
+            "reference similarity S_i = 1 - P_i",
+            metadata["reference_departure_percentile"]["similarity_figure"][
+                "metric"
+            ],
+        )
+        similarity_figure_metadata = metadata["reference_departure_percentile"][
+            "similarity_figure"
+        ]
+        self.assertEqual(
+            r"Reference similarity ($S_i$)",
+            similarity_figure_metadata["color_bar_label"],
+        )
+        self.assertIn(
+            "fraction of represented reference-site area",
+            similarity_figure_metadata["caption"],
+        )
+        self.assertNotIn(
+            "P_i",
+            similarity_figure_metadata["color_bar_label"]
+            + similarity_figure_metadata["caption"],
+        )
+        self.assertIn(
+            "Machine-readable GeoTIFFs in this directory",
+            similarity_figure_metadata["geotiff_footer"],
+        )
+        self.assertEqual(
+            {
+                "reference_departure_percentile": (
+                    "synthetic_prairie_reference_departure_percentile.tif"
+                ),
+                "expected_reference": "synthetic_prairie_expected_reference.tif",
+                "observed_minus_expected": (
+                    "synthetic_prairie_observed_minus_expected.tif"
+                ),
+                "standardized_deviation": (
+                    "synthetic_prairie_standardized_deviation.tif"
+                ),
+                "inference_status": "synthetic_prairie_inference_status.tif",
+            },
+            similarity_figure_metadata["related_geotiffs"],
+        )
+        self.assertEqual(
+            ["0-0.01", "0.01-0.05", "0.05-0.10", "0.10-0.50", "0.50-1.00"],
+            [
+                similarity_class["label"]
+                for similarity_class in metadata["reference_departure_percentile"][
+                    "similarity_figure"
+                ]["classes"]
+            ],
+        )
+        self.assertEqual(
+            "mean(abs(z_j)) across every fitted ecological response",
+            metadata["mean_absolute_deviation_figure"]["metric"],
         )
         self.assertIn(
             "Reference-condition raster inference",
@@ -778,6 +855,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     inference=replace(
                         self.analysis_configuration.inference,
                         application_mask_path=mask_path,
+                        application_mask_label="Synthetic habitat extent",
                         window_size_pixels=3,
                     ),
                 ),
@@ -791,6 +869,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertEqual(17, summary.predicted_pixels)
         with rasterio.open(summary.expected_reference_path) as expected_source:
             expected = expected_source.read(masked=True)
+            expected_tags = expected_source.tags()
         with rasterio.open(summary.inference_status_path) as status_source:
             status = status_source.read()
         with rasterio.open(summary.departure_percentile_path) as percentile_source:
@@ -802,12 +881,36 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertTrue(bool(expected.mask[0, 3, 4]))
         self.assertTrue(bool(percentiles.mask[3, 4]))
         self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 3, 4])
+        self.assertEqual(
+            "Synthetic habitat extent",
+            expected_tags["application_mask_label"],
+        )
         metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
         self.assertEqual(str(mask_path), metadata["application_mask"]["path"])
+        self.assertEqual(
+            "Synthetic habitat extent",
+            metadata["application_mask"]["label"],
+        )
+        self.assertEqual(
+            "Outside Synthetic habitat extent",
+            metadata["mean_absolute_deviation_figure"][
+                "outside_target_legend_label"
+            ],
+        )
+        self.assertEqual(
+            "Not scored: one or more biotic measurements unavailable",
+            metadata["reference_departure_percentile"]["similarity_figure"][
+                "incomplete_response_legend_label"
+            ],
+        )
         self.assertEqual(1, metadata["application_mask"]["selected_value"])
         self.assertEqual("nearest", metadata["application_mask"]["resampling"])
+        self.assertIn(
+            "Inference target: Synthetic habitat extent",
+            summary.report_path.read_text(encoding="utf-8"),
+        )
         self.assertNotIn(
-            "No application mask was supplied",
+            "No inference target mask was supplied",
             summary.report_path.read_text(encoding="utf-8"),
         )
 
@@ -841,6 +944,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     inference=replace(
                         self.analysis_configuration.inference,
                         application_mask_path=mask_path,
+                        application_mask_label="Projected habitat extent",
                     ),
                 ),
                 self.model_run_directory,

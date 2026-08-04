@@ -738,9 +738,14 @@ responses = []
 # Values:
 #   application_mask_path: Optional raster resolved relative to this file. Only
 #     defined first-band pixels exactly equal to 1 receive inference. Remove this key
-#     to use every otherwise-eligible predictor-footprint pixel. Change it for a
-#     different assessment extent or mask year. CRS, resolution, grid, and extent
-#     may differ from the stack because nearest-neighbor alignment is windowed.
+#     and application_mask_label to use every otherwise-eligible predictor-footprint
+#     pixel. Change it for a different assessment extent or mask year. CRS,
+#     resolution, grid, and extent may differ from the stack because nearest-neighbor
+#     alignment is windowed.
+#   application_mask_label: Required with application_mask_path. This concise,
+#     human-readable name appears in figures, reports, and output metadata so a
+#     reader knows what the mask represents. Change it whenever the mask's habitat,
+#     year, or interpretation changes. It does not affect pixel selection.
 #   worker_count: Maximum cache tiles calculated concurrently. Increase it when
 #     CPU and storage bandwidth are available; decrease it to reduce peak memory
 #     and concurrent reads. Each worker can retain one tile's five result arrays.
@@ -760,6 +765,7 @@ responses = []
 #     not the individual expected-response or standardized-deviation rasters.
 [inference]
 application_mask_path = "../data/grassland_mask_2018.tif"
+application_mask_label = "2018 grassland extent"
 worker_count = 8
 window_size_pixels = 256
 covariance_shrinkage = 0.10

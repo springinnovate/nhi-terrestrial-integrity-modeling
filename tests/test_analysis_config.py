@@ -62,6 +62,7 @@ responses = ["d02"]
 
 [inference]
 application_mask_path = "application_mask.tif"
+application_mask_label = "Test habitat extent"
 worker_count = 3
 window_size_pixels = 256
 covariance_shrinkage = 0.1
@@ -145,6 +146,10 @@ class AnalysisConfigurationTest(unittest.TestCase):
             "grassland_mask_2018.tif",
             configuration.inference.application_mask_path.name,
         )
+        self.assertEqual(
+            "2018 grassland extent",
+            configuration.inference.application_mask_label,
+        )
         self.assertNotIn("maybe_grassland_ecoregions", configuration.datasets)
         self.assertEqual(39, len(configuration.bands))
         role_counts = {
@@ -175,6 +180,10 @@ class AnalysisConfigurationTest(unittest.TestCase):
             self.temporary_path / "application_mask.tif",
             configuration.inference.application_mask_path,
         )
+        self.assertEqual(
+            "Test habitat extent",
+            configuration.inference.application_mask_label,
+        )
         self.assertEqual(3, configuration.inference.worker_count)
 
         self.assertEqual(
@@ -202,6 +211,21 @@ class AnalysisConfigurationTest(unittest.TestCase):
             },
             predictor_columns,
         )
+
+    def test_requires_application_mask_path_and_label_together(self) -> None:
+        """Reject a target mask whose publication-facing meaning is undefined."""
+
+        configuration_path = self.temporary_path / "missing_mask_label.toml"
+        configuration_path.write_text(
+            MINIMAL_ANALYSIS_TOML.replace(
+                'application_mask_label = "Test habitat extent"\n',
+                "",
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be configured together"):
+            load_analysis_configuration(configuration_path)
 
     def test_effective_configuration_change_changes_hash(self) -> None:
         """Change cache identity when effective TOML content changes."""
