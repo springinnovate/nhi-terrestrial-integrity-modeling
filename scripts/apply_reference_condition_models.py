@@ -69,9 +69,9 @@ REFERENCE_SIMILARITY_LABELS = (
     "0.10-0.50",
     "0.50-1.00",
 )
-REFERENCE_SITE_COLOR = "#0072B2"
-REFERENCE_SITE_OUTLINE_COLOR = "#FFFFFF"
-REFERENCE_SITE_OUTLINE_WIDTH = 0.4
+REFERENCE_SITE_COLOR = "#8CBFD6"
+REFERENCE_SITE_OUTLINE_COLOR = "#DCECF3"
+REFERENCE_SITE_OUTLINE_WIDTH = 0.35
 OUTSIDE_TARGET_COLOR = "#E5E7EB"
 INSUFFICIENT_PREDICTOR_COLOR = "#626B73"
 INCOMPLETE_RESPONSE_COLOR = "#AAB2BA"
@@ -1169,8 +1169,9 @@ def write_inference_report(
             (
                 "Only non-reference pixels with defined standardized deviations "
                 "for every response contribute to the colored surface. A fixed "
-                "linear scale maps 0 to green, 1 reference RMSE on average to "
-                "yellow, and "
+                "linear scale keeps values through about 1 in green shades, "
+                "transitions through amber between 1 and "
+                f"{color_scale_upper_value:g}, and maps "
                 f"{color_scale_upper_value:g} or more to red. "
                 f"{cells_at_or_above_color_maximum_percent:.1f}% "
                 "of colored display cells are at or above "
@@ -1509,7 +1510,12 @@ def create_mean_absolute_deviation_figure(
 
     color_map = LinearSegmentedColormap.from_list(
         "mean_absolute_standardized_departure",
-        ["#1A9850", "#F2C94C", "#D73027"],
+        [
+            (0.0, "#1A9850"),
+            (0.5, "#8BCF70"),
+            (0.75, "#F6C85F"),
+            (1.0, "#D73027"),
+        ],
     )
     color_map.set_bad((1.0, 1.0, 1.0, 0.0))
     extent = (
@@ -1570,8 +1576,9 @@ def create_mean_absolute_deviation_figure(
             0.0,
             1.015,
             (
-                "0 matches expected condition; 1 is one reference RMSE on "
-                "average; 2 or more is capped in red"
+                "Values near 1 are comparable to typical reference-site "
+                "prediction differences; 2 or more indicates large average "
+                "differences"
             ),
             transform=axis.transAxes,
             ha="left",
@@ -1592,8 +1599,11 @@ def create_mean_absolute_deviation_figure(
             0.01,
             (
                 f"Each colored display cell averages pixel-level mean(|z_j|) "
-                f"across {response_count} responses. Values show departure, not "
-                "whether the ecological change is beneficial or detrimental."
+                f"across {response_count} responses. Observed biotic conditions "
+                "are compared with reference conditions predicted from local "
+                "abiotic factors. A value of 1 means the average absolute "
+                "difference is about the size normally observed between "
+                "predictions and reference sites."
             ),
             ha="center",
             va="bottom",

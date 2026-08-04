@@ -309,9 +309,10 @@ The mean-absolute-deviation PNG provides a response-count-independent diagnostic
 For each source pixel with every modeled response defined, it calculates
 `mean(abs(z_j))` across responses. It then reduces the result to at most 700 display
 cells along the longest raster dimension by taking the mean among non-reference
-pixels in each display cell. A fixed linear scale maps 0 to green, 1 reference RMSE
-on average to yellow, and values of 2 or more to red. This diagnostic shows average
-departure magnitude, not whether the ecological change is beneficial or detrimental.
+pixels in each display cell. A fixed linear scale keeps values through about 1 in
+green shades, transitions through amber between 1 and 2, and maps values of 2 or
+more to red. A value of 1 means the average absolute difference is about the size
+normally observed between predictions and reference sites.
 
 The reference-departure percentile uses only complete reference rows from
 `ecological_response_predictions.parquet`. It calculates their area-weighted mean
