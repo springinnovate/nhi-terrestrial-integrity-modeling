@@ -647,7 +647,8 @@ def build_inference_fingerprint(
         analysis_configuration: Complete effective analysis configuration.
         analysis_cache_tiles: Validated source tiles and checksums.
         model_run_directory: Model run containing metadata and fitted models.
-        response_models: Ordered fitted response models.
+        response_models: Fitted response models sorted by response-band
+            identifier, such as ``d02``, ``d03``, and onward.
         reference_prediction_table_path: Calibration table used for percentiles.
 
     Returns:
