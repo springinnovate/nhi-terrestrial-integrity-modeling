@@ -2036,11 +2036,13 @@ def calculate_inference_tile(
 def initialize_inference_worker(
     context_path: Path,
 ) -> None:
-    """Initialize one process from the shared model-context artifact.
+    """Initialize one process from the shared model-context file.
 
     Args:
-        context_path: Joblib artifact containing models, calibration, AOI, and
-            raster settings shared by every worker process.
+        context_path: Temporary file written with Joblib containing the fitted
+            models, reference calibration, AOI geometry, and raster settings.
+            Every worker reads this file instead of receiving its own in-memory
+            copy of those inputs.
 
     Returns:
         None: The context and numerical-library limit are process globals.
