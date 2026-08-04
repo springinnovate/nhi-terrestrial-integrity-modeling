@@ -82,6 +82,11 @@ STATUS_OUTSIDE_TARGET = 0
 STATUS_INSUFFICIENT_PREDICTORS = 1
 STATUS_PREDICTED = 2
 INFERENCE_CHECKPOINT_SCHEMA_VERSION = 1
+OUTPUT_RASTER_BLOCK_SIZE = 256
+# Keep parent-process result buffering independent of calculation concurrency.
+# Four tiles amortize reopening the five stitched outputs without retaining one
+# additional completed result for every configured worker.
+INFERENCE_WRITE_BATCH_SIZE = 4
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1081,8 @@ def write_inference_report(
             f"{inference_configuration['window_size_pixels']} pixels",
             "- Configured tile workers: "
             f"{inference_configuration['worker_count']}",
+            "- Completed-tile write batch: "
+            f"{inference_configuration['write_batch_size']} tiles",
             (
                 "- Covariance diagonal shrinkage: "
                 f"{inference_configuration['covariance_shrinkage']:.1%}"
@@ -2559,8 +2566,8 @@ def write_inference_tiles(
         "compress": "deflate",
         "predictor": 3,
         "tiled": True,
-        "blockxsize": 256,
-        "blockysize": 256,
+        "blockxsize": OUTPUT_RASTER_BLOCK_SIZE,
+        "blockysize": OUTPUT_RASTER_BLOCK_SIZE,
         "interleave": "band",
         "BIGTIFF": "IF_SAFER",
         "SPARSE_OK": True,
@@ -2827,7 +2834,7 @@ def write_inference_tiles(
                         active_worker_count,
                     )
                     while computed_tile_batch := tuple(
-                        islice(calculated_tiles, active_worker_count)
+                        islice(calculated_tiles, INFERENCE_WRITE_BATCH_SIZE)
                     ):
                         utilized_worker_process_ids.update(
                             computed_tile.worker_process_id
@@ -3356,6 +3363,7 @@ def run_reference_condition_inference(
         "Concurrent tile workers: "
         f"{analysis_configuration.inference.worker_count}"
     )
+    print(f"Completed-tile write batch: {INFERENCE_WRITE_BATCH_SIZE} tiles")
     if application_mask_path is None:
         print(
             "Inference target mask: not supplied; inferring across the usable AOI "
@@ -3559,6 +3567,7 @@ def run_reference_condition_inference(
             ),
             "window_size_pixels": window_size_pixels,
             "worker_count": analysis_configuration.inference.worker_count,
+            "write_batch_size": INFERENCE_WRITE_BATCH_SIZE,
             "covariance_shrinkage": covariance_shrinkage,
             "imputation": "final-reference-training values stored in each model",
         },

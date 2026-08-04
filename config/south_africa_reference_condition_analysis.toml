@@ -749,7 +749,8 @@ responses = []
 #   worker_count: Maximum cache tiles calculated concurrently. Increase it when
 #     CPU and storage bandwidth are available; decrease it to reduce peak memory
 #     and concurrent reads. Each worker can retain one tile's five result arrays.
-#     GeoTIFF writes and checkpoint updates remain serialized for file safety.
+#     GeoTIFF writes and checkpoint updates remain serialized for file safety and
+#     flush in small fixed batches independent of this worker count.
 #   window_size_pixels: Width and height of each square processing window. The value
 #     256 processes at most 65,536 source pixels per window. Larger windows may
 #     improve sequential I/O but use more memory; smaller windows lower peak memory

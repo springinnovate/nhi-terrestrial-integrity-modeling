@@ -272,10 +272,12 @@ count of one calculates in the parent process and avoids process-startup overhea
 The scheduler assigns a replacement tile as soon as a worker result arrives, before
 the parent writes that result, so serialized output cannot leave the corresponding
 worker idle. Stitched GeoTIFF writes and checkpoint updates stay in the parent process
-for file safety. Completed results are flushed and checkpointed in batches no larger
-than the active worker count, which avoids reopening five rasters and recompressing
-shared output blocks after every 128-pixel source tile. The bounded pipeline retains
-at most one write batch plus one in-flight result per worker.
+for file safety. Completed results are flushed and checkpointed in fixed batches of
+four tiles, independently of the active worker count. This amortizes reopening the
+five rasters while preventing a larger worker pool from also creating a larger parent
+write buffer. Each worker still needs private memory for its active model calculation,
+so choose `worker_count` according to available memory as well as CPU cores. The
+stitched outputs use tiled GeoTIFF storage with 256 by 256 pixel blocks.
 
 For each fitted response the command writes the final model's expected reference
 value, observed-minus-expected deviation, and standardized deviation. Standardized
