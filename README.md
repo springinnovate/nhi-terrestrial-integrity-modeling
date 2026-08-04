@@ -337,7 +337,7 @@ the central 50% of represented reference departures from the 50th-90th, 90th-95t
 the represented reference-site area with a larger combined observed-versus-expected
 vegetation difference than the mapped pixel; the report retains the `P_i` derivation.
 The figure footer also identifies the five machine-readable GeoTIFF outputs by their
-shared analysis prefix, filename suffix, and role in the inference workflow.
+complete filenames and roles in the inference workflow.
 
 Both PNGs show reference calibration pixels in pale blue and exclude them from the
 colored assessment surface. Pale gray identifies pixels outside the configured
