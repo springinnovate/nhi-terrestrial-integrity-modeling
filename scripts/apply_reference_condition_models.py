@@ -15,8 +15,10 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from contextlib import ExitStack
 from dataclasses import dataclass
 from itertools import islice
+from multiprocessing.synchronize import Barrier as ProcessBarrier
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import BrokenBarrierError
 
 import joblib
 import numpy as np
@@ -82,11 +84,12 @@ STATUS_OUTSIDE_TARGET = 0
 STATUS_INSUFFICIENT_PREDICTORS = 1
 STATUS_PREDICTED = 2
 INFERENCE_CHECKPOINT_SCHEMA_VERSION = 1
-OUTPUT_RASTER_BLOCK_SIZE = 256
+MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE = 256
 # Keep parent-process result buffering independent of calculation concurrency.
 # Four tiles amortize reopening the five stitched outputs without retaining one
 # additional completed result for every configured worker.
 INFERENCE_WRITE_BATCH_SIZE = 4
+WORKER_STARTUP_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -2251,6 +2254,7 @@ def calculate_inference_tile(
 
 def initialize_inference_worker(
     context_path: Path,
+    startup_barrier: ProcessBarrier,
 ) -> None:
     """Initialize one process from the shared model-context file.
 
@@ -2259,6 +2263,8 @@ def initialize_inference_worker(
             models, reference calibration, AOI geometry, and raster settings.
             Every worker reads this file instead of receiving its own in-memory
             copy of those inputs.
+        startup_barrier: Process-shared barrier that prevents an early worker
+            from draining queued tiles while other workers are still loading.
 
     Returns:
         None: The context and numerical-library limit are process globals.
@@ -2271,6 +2277,14 @@ def initialize_inference_worker(
     # scikit-learn to create another thread pool inside every process would
     # oversubscribe the machine and can make inference substantially slower.
     _INFERENCE_NUMERICAL_THREAD_LIMIT = threadpool_limits(limits=1)
+    try:
+        startup_barrier.wait(timeout=WORKER_STARTUP_TIMEOUT_SECONDS)
+    except BrokenBarrierError as error:
+        raise RuntimeError(
+            "Inference workers did not initialize within "
+            f"{WORKER_STARTUP_TIMEOUT_SECONDS} seconds. Reduce worker_count "
+            "or check the process-tree memory limit."
+        ) from error
 
 
 def calculate_inference_tile_in_worker(
@@ -2354,11 +2368,13 @@ def iter_calculated_inference_tiles(
         # for every process. A shared, uncompressed artifact is written once;
         # workers load its arrays read-only through Joblib memory mapping.
         joblib.dump(worker_context, worker_context_path, compress=0)
+        startup_barrier = process_context.Barrier(worker_count)
+        print(f"Initializing {worker_count} inference worker processes...")
         with ProcessPoolExecutor(
             max_workers=worker_count,
             mp_context=process_context,
             initializer=initialize_inference_worker,
-            initargs=(worker_context_path,),
+            initargs=(worker_context_path, startup_barrier),
         ) as executor:
             pending_futures: set[Future[ComputedInferenceTile]] = set()
             for _ in range(worker_count):
@@ -2554,6 +2570,13 @@ def write_inference_tiles(
     }
     completed_tile_ids.intersection_update(expected_tile_ids)
 
+    # Match one compressed output block to one cache tile when possible. This
+    # analysis uses 128-pixel cache tiles; forcing 256-pixel output blocks made
+    # independently completed tiles repeatedly update the same compressed block.
+    output_raster_block_size = min(
+        MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE,
+        max(16, analysis_configuration.grid.tile_size_pixels),
+    )
     float_profile = {
         "driver": "GTiff",
         "width": output_grid.width,
@@ -2566,8 +2589,8 @@ def write_inference_tiles(
         "compress": "deflate",
         "predictor": 3,
         "tiled": True,
-        "blockxsize": OUTPUT_RASTER_BLOCK_SIZE,
-        "blockysize": OUTPUT_RASTER_BLOCK_SIZE,
+        "blockxsize": output_raster_block_size,
+        "blockysize": output_raster_block_size,
         "interleave": "band",
         "BIGTIFF": "IF_SAFER",
         "SPARSE_OK": True,
@@ -2827,45 +2850,80 @@ def write_inference_tiles(
                     ),
                     reference_band_offset=reference_band_offset,
                 )
-                try:
-                    calculated_tiles = iter_calculated_inference_tiles(
-                        tiles_to_process,
-                        worker_context,
-                        active_worker_count,
-                    )
-                    while computed_tile_batch := tuple(
-                        islice(calculated_tiles, INFERENCE_WRITE_BATCH_SIZE)
-                    ):
-                        utilized_worker_process_ids.update(
-                            computed_tile.worker_process_id
-                            for computed_tile in computed_tile_batch
+                while tiles_to_process:
+                    try:
+                        calculated_tiles = iter_calculated_inference_tiles(
+                            tiles_to_process,
+                            worker_context,
+                            active_worker_count,
                         )
-                        write_computed_inference_tiles(
-                            computed_tile_batch,
-                            artifact_paths,
-                        )
-                        completed_tile_ids.update(
-                            computed_tile.tile_id
-                            for computed_tile in computed_tile_batch
-                        )
-                        newly_processed_tile_count += len(computed_tile_batch)
-                        checkpoint_metadata["completed_tile_ids"] = sorted(
-                            completed_tile_ids
-                        )
-                        temporary_checkpoint_path.write_text(
-                            json.dumps(
-                                checkpoint_metadata,
-                                indent=2,
-                                sort_keys=True,
+                        while computed_tile_batch := tuple(
+                            islice(calculated_tiles, INFERENCE_WRITE_BATCH_SIZE)
+                        ):
+                            utilized_worker_process_ids.update(
+                                computed_tile.worker_process_id
+                                for computed_tile in computed_tile_batch
                             )
-                            + "\n",
-                            encoding="utf-8",
+                            write_computed_inference_tiles(
+                                computed_tile_batch,
+                                artifact_paths,
+                            )
+                            completed_tile_ids.update(
+                                computed_tile.tile_id
+                                for computed_tile in computed_tile_batch
+                            )
+                            newly_processed_tile_count += len(computed_tile_batch)
+                            checkpoint_metadata["completed_tile_ids"] = sorted(
+                                completed_tile_ids
+                            )
+                            temporary_checkpoint_path.write_text(
+                                json.dumps(
+                                    checkpoint_metadata,
+                                    indent=2,
+                                    sort_keys=True,
+                                )
+                                + "\n",
+                                encoding="utf-8",
+                            )
+                            os.replace(
+                                temporary_checkpoint_path,
+                                artifact_paths.checkpoint,
+                            )
+                            tile_progress.update(len(computed_tile_batch))
+                            tile_progress.set_postfix(
+                                workers=active_worker_count,
+                                processes=len(utilized_worker_process_ids),
+                                cached=(
+                                    len(completed_tile_ids)
+                                    - newly_processed_tile_count
+                                ),
+                                processed=newly_processed_tile_count,
+                                failed=failed_tile_count,
+                            )
+                    except MemoryError as error:
+                        if active_worker_count == 1:
+                            raise RuntimeError(
+                                "Inference exhausted available memory with one "
+                                "worker. Reduce inference.window_size_pixels or "
+                                "increase the system commit/pagefile limit."
+                            ) from error
+                        previous_worker_count = active_worker_count
+                        active_worker_count = max(1, active_worker_count // 2)
+                        tiles_to_process = tuple(
+                            cached_tile
+                            for cached_tile in tiles_to_process
+                            if cached_tile.tile.tile_id not in completed_tile_ids
                         )
-                        os.replace(
-                            temporary_checkpoint_path,
-                            artifact_paths.checkpoint,
+                        active_worker_label = (
+                            "worker" if active_worker_count == 1 else "workers"
                         )
-                        tile_progress.update(len(computed_tile_batch))
+                        tqdm.write(
+                            "A worker exhausted available committed memory. "
+                            f"Retrying {len(tiles_to_process):,} uncheckpointed "
+                            f"tiles with {active_worker_count} "
+                            f"{active_worker_label} instead of "
+                            f"{previous_worker_count}."
+                        )
                         tile_progress.set_postfix(
                             workers=active_worker_count,
                             processes=len(utilized_worker_process_ids),
@@ -2876,19 +2934,21 @@ def write_inference_tiles(
                             processed=newly_processed_tile_count,
                             failed=failed_tile_count,
                         )
-                except Exception:
-                    failed_tile_count += 1
-                    tile_progress.set_postfix(
-                        workers=active_worker_count,
-                        processes=len(utilized_worker_process_ids),
-                        cached=(
-                            len(completed_tile_ids)
-                            - newly_processed_tile_count
-                        ),
-                        processed=newly_processed_tile_count,
-                        failed=failed_tile_count,
-                    )
-                    raise
+                        continue
+                    except Exception:
+                        failed_tile_count += 1
+                        tile_progress.set_postfix(
+                            workers=active_worker_count,
+                            processes=len(utilized_worker_process_ids),
+                            cached=(
+                                len(completed_tile_ids)
+                                - newly_processed_tile_count
+                            ),
+                            processed=newly_processed_tile_count,
+                            failed=failed_tile_count,
+                        )
+                        raise
+                    break
 
     return (
         application_mask_metadata,
