@@ -15,10 +15,10 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from scripts import habitat_training
+from scripts.habitat_training import IntegrityConfiguration, calculate_regression_metrics
 from scripts.habitat_condition import predict_expected_response
 from scripts.fit_grassland_integrity_parameters import (
-    IntegrityConfiguration,
-    calculate_regression_metrics,
     create_model_performance_figure,
     create_observed_expected_figure,
     resolve_response_names,
@@ -280,6 +280,46 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
                 scatter_call.kwargs["color"],
             )
 
+    def test_shared_training_preserves_missing_data_results(self) -> None:
+        """Match the original CLI's fold fitting with predictor and response gaps."""
+
+        sample = self._create_sample_table()
+        sample.loc[0, "y2018_d20_predictor"] = np.nan
+        sample.loc[1, "y2018_d35_predictor"] = np.nan
+        sample.loc[2, [f"y2018_d{band}_predictor" for band in range(20, 25)]] = np.nan
+        sample.loc[3, "y2018_d02_response"] = np.nan
+        sample.loc[7, "y2018_d22_predictor"] = np.nan
+        prepared = prepare_reference_condition_data(
+            sample, self.integrity_configuration, self.analysis_configuration,
+        )
+        self.assertEqual(119, int(prepared.table["usable_for_gam"].sum()))
+        # Recorded from the complete CLI at 029752c0854da3b8 before extraction.
+        for response_name, expected_rmse, expected_predictions in [
+            (
+                "y2018_d02_response",
+                0.02674556265243113,
+                [2.3488264315846523, 2.3504923679526297, np.nan, 2.390433077949166, 2.3748926203596974, 2.443560414679702],
+            ),
+            (
+                "y2018_d11_response",
+                0.03558167475813667,
+                [11.420266964304467, 11.41372443548002, np.nan, 11.465174983638958, 11.507518543381165, 11.519099393231302],
+            )
+        ]:
+            with self.subTest(response=response_name):
+                fitted = habitat_training.fit_response_with_spatial_validation(
+                    prepared, response_name, self.integrity_configuration,
+                )
+                np.testing.assert_allclose(
+                    fitted.overall_metrics["weighted_rmse"], expected_rmse,
+                    rtol=1e-10, atol=1e-10,
+                )
+                np.testing.assert_allclose(
+                    fitted.out_of_fold_expected[[0, 1, 2, 3, 60, 119]],
+                    expected_predictions,
+                    rtol=1e-10, atol=1e-10, equal_nan=True,
+                )
+
     def test_runs_selected_response_models_and_writes_reports(self) -> None:
         """Persist reloadable models, held-out deviations, metrics, and figures."""
 
@@ -308,6 +348,38 @@ class FitGrasslandIntegrityParametersTest(unittest.TestCase):
         response_metrics = pd.read_csv(summary.response_metrics_path)
         metadata = json.loads(summary.metadata_path.read_text(encoding="utf-8"))
         fitted_model = joblib.load(summary.model_paths[0])
+
+        # Numerical results recorded from the complete CLI at 029752c0854da3b8.
+        np.testing.assert_allclose(
+            response_metrics.loc[
+                response_metrics["response_band"].eq("d02"),
+                "reference_residual_rmse_oof",
+            ],
+            [0.027126324322570252],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            predictions.loc[[0, 2, 60, 119], "d02_expected_reference_oof"],
+            [2.349602221631895, 2.387848653614371, 2.3748926203596974, 2.444315551225902],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            response_metrics.loc[
+                response_metrics["response_band"].eq("d11"),
+                "reference_residual_rmse_oof",
+            ],
+            [0.03507485558323178],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            predictions.loc[[0, 2, 60, 119], "d11_expected_reference_oof"],
+            [11.413869388410703, 11.446529994870238, 11.507518543381165, 11.517858484575665],
+            rtol=1e-10,
+            atol=1e-10,
+        )
 
         self.assertEqual(120, summary.sampled_rows)
         self.assertEqual(120, summary.usable_rows)
