@@ -9,7 +9,7 @@ import math
 import textwrap
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import cartopy.crs as ccrs
@@ -29,6 +29,7 @@ from shapely.geometry import box, mapping
 from shapely.geometry.base import BaseGeometry
 from tqdm.auto import tqdm
 
+from . import spatial_sampling
 from .analysis_config import (
     DEFAULT_ANALYSIS_CONFIG_PATH,
     AnalysisConfiguration,
@@ -52,45 +53,6 @@ PARQUET_PROVENANCE_KEY = b"nhi_spatial_sample_provenance"
 BACKGROUND_SITE_CLASS = 0
 REFERENCE_SITE_CLASS = 1
 REFERENCE_SITE_CLASSES = (BACKGROUND_SITE_CLASS, REFERENCE_SITE_CLASS)
-
-
-@dataclass(frozen=True)
-class SamplingCandidate:
-    """Identify one retained source pixel before its band values are reread.
-
-    Attributes:
-        tile_sequence: Position of the source tile in deterministic AOI order.
-        local_pixel_index: Row-major pixel position inside the cache tile.
-        sampling_block_column: Global equal-area sampling-block column.
-        sampling_block_row: Global equal-area sampling-block row.
-        reference_site_class: Zero for background or one for reference.
-        random_priority: Seeded priority used for sampling without replacement.
-    """
-
-    tile_sequence: int
-    local_pixel_index: int
-    sampling_block_column: int
-    sampling_block_row: int
-    reference_site_class: int
-    random_priority: float
-
-
-@dataclass
-class SamplingStratumState:
-    """Accumulate one global sampling-block and reference-class stratum.
-
-    A stratum is the complete group of eligible pixels sharing one global
-    sampling block and one binary reference class. Its sampling cap and weight
-    are calculated independently from every other such group.
-
-    Attributes:
-        available_pixel_count: Eligible source pixels encountered in the
-            stratum.
-        candidates: Lowest-priority pixels retained up to the configured cap.
-    """
-
-    available_pixel_count: int = 0
-    candidates: list[SamplingCandidate] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -223,7 +185,7 @@ class SamplingScan:
         sampled_band_names: Names corresponding to sampled-band positions.
     """
 
-    strata: dict[tuple[int, int, int], SamplingStratumState]
+    strata: dict[tuple[int, int, int], spatial_sampling.SamplingStratumState]
     raster_summary: RasterCacheScanSummary
     reference_band_offset: int
     sampled_band_offsets: tuple[int, ...]
@@ -418,9 +380,7 @@ def scan_cached_tiles(
     # Each dictionary key identifies one (global block column, global block row,
     # reference class) stratum. Reusing that key merges counts and retained
     # candidates when the same sampling group crosses cache-tile boundaries.
-    strata: dict[tuple[int, int, int], SamplingStratumState] = defaultdict(
-        SamplingStratumState
-    )
+    strata: dict[tuple[int, int, int], spatial_sampling.SamplingStratumState] = {}
     aoi_pixel_count = 0
     any_band_defined_pixel_count = 0
     every_band_defined_pixel_count = 0
@@ -556,118 +516,25 @@ def scan_cached_tiles(
                 eligible_local_pixel_indices
             ].astype(np.uint8)
 
-            # Python's built-in hash is randomly salted for each process, so it
-            # would select different pixels on another run. SHA-256 combines the
-            # configured seed and tile address into a repeatable per-tile NumPy
-            # seed across processes and machines.
-            tile_seed_material = (
-                f"{sampling_settings.random_seed}:{cached_tile.tile.tile_id}"
-            ).encode("utf-8")
-            tile_seed = int.from_bytes(
-                hashlib.sha256(tile_seed_material).digest()[:8],
-                byteorder="little",
-                signed=False,
-            )
-            tile_random_generator = np.random.default_rng(tile_seed)
-            all_tile_priorities = tile_random_generator.random(
-                tile_height * tile_width
-            )
-            eligible_priorities = all_tile_priorities[
-                eligible_local_pixel_indices
-            ]
-
-            stratum_records = np.empty(
-                tile_eligible_pixel_count,
-                dtype=[
-                    ("block_column", np.int64),
-                    ("block_row", np.int64),
-                    ("reference_class", np.uint8),
-                ],
-            )
-            stratum_records["block_column"] = sampling_block_columns
-            stratum_records["block_row"] = sampling_block_rows
-            stratum_records["reference_class"] = reference_site_classes
-            unique_strata, stratum_offsets = np.unique(
-                stratum_records,
-                return_inverse=True,
-            )
-            positions_sorted_by_stratum = np.argsort(
-                stratum_offsets,
-                kind="stable",
-            )
-            pixels_per_tile_stratum = np.bincount(
-                stratum_offsets,
-                minlength=len(unique_strata),
-            )
-            stratum_start_offset = 0
-            for stratum_offset, unique_stratum in enumerate(unique_strata):
-                available_in_tile = int(
-                    pixels_per_tile_stratum[stratum_offset]
-                )
-                positions_in_stratum = positions_sorted_by_stratum[
-                    stratum_start_offset : (
-                        stratum_start_offset + available_in_tile
-                    )
-                ]
-                stratum_start_offset += available_in_tile
-                stratum_key = (
-                    int(unique_stratum["block_column"]),
-                    int(unique_stratum["block_row"]),
-                    int(unique_stratum["reference_class"]),
-                )
-                stratum_state = strata[stratum_key]
-                stratum_state.available_pixel_count += available_in_tile
-                retained_from_tile = min(
-                    sampling_settings.samples_per_class_per_block,
-                    available_in_tile,
-                )
-                if retained_from_tile < available_in_tile:
-                    local_priority_offsets = np.argpartition(
-                        eligible_priorities[positions_in_stratum],
-                        retained_from_tile - 1,
-                    )[:retained_from_tile]
-                    retained_positions = positions_in_stratum[
-                        local_priority_offsets
-                    ]
-                else:
-                    retained_positions = positions_in_stratum
-                new_candidates = [
-                    SamplingCandidate(
-                        tile_sequence=tile_sequence,
-                        local_pixel_index=int(
-                            eligible_local_pixel_indices[position]
-                        ),
-                        sampling_block_column=stratum_key[0],
-                        sampling_block_row=stratum_key[1],
-                        reference_site_class=stratum_key[2],
-                        random_priority=float(eligible_priorities[position]),
-                    )
-                    for position in retained_positions
-                ]
-                previous_candidate_count = len(stratum_state.candidates)
-                # Python's built-in sorted ranks the retained dataclass objects;
-                # this is not a NumPy operation. The secondary keys make ties
-                # deterministic before the per-stratum cap is applied.
-                stratum_state.candidates = sorted(
-                    [*stratum_state.candidates, *new_candidates],
-                    key=lambda candidate: (
-                        candidate.random_priority,
-                        candidate.tile_sequence,
-                        candidate.local_pixel_index,
+            background_increase, reference_increase = (
+                spatial_sampling.retain_tile_candidates(
+                    strata,
+                    tile_id=cached_tile.tile.tile_id,
+                    tile_sequence=tile_sequence,
+                    tile_pixel_count=tile_height * tile_width,
+                    eligible_pixel_indices=eligible_local_pixel_indices,
+                    sampling_block_columns=sampling_block_columns,
+                    sampling_block_rows=sampling_block_rows,
+                    reference_site_classes=reference_site_classes,
+                    random_seed=sampling_settings.random_seed,
+                    samples_per_class_per_block=(
+                        sampling_settings.samples_per_class_per_block
                     ),
-                )[: sampling_settings.samples_per_class_per_block]
-                retained_candidate_delta = (
-                    len(stratum_state.candidates) - previous_candidate_count
                 )
-                retained_candidate_count += retained_candidate_delta
-                if stratum_key[2] == REFERENCE_SITE_CLASS:
-                    retained_reference_candidate_count += (
-                        retained_candidate_delta
-                    )
-                else:
-                    retained_background_candidate_count += (
-                        retained_candidate_delta
-                    )
+            )
+            retained_background_candidate_count += background_increase
+            retained_reference_candidate_count += reference_increase
+            retained_candidate_count += background_increase + reference_increase
 
             tile_progress.set_postfix(
                 aoi=f"{aoi_pixel_count:,}",
@@ -772,7 +639,7 @@ def assemble_spatial_sample(
         ),
     )
     sampled_row_count = len(all_candidates)
-    candidates_by_tile: dict[int, list[SamplingCandidate]] = defaultdict(list)
+    candidates_by_tile: dict[int, list[spatial_sampling.SamplingCandidate]] = defaultdict(list)
     for candidate in all_candidates:
         candidates_by_tile[candidate.tile_sequence].append(candidate)
 
@@ -782,10 +649,6 @@ def assemble_spatial_sample(
             for block_column, block_row, _ in sampling_scan.strata
         }
     )
-    block_id_by_key = {
-        block_key: block_offset + 1
-        for block_offset, block_key in enumerate(block_keys)
-    }
     available_pixels_by_block = {block_key: 0 for block_key in block_keys}
     for stratum_key, stratum_state in sampling_scan.strata.items():
         available_pixels_by_block[stratum_key[:2]] += (
@@ -798,25 +661,11 @@ def assemble_spatial_sample(
         "cache_tile_id": np.empty(sampled_row_count, dtype=object),
         "longitude": np.empty(sampled_row_count, dtype=np.float64),
         "latitude": np.empty(sampled_row_count, dtype=np.float64),
-        "sampling_block_id": np.empty(sampled_row_count, dtype=np.int64),
-        "sampling_block_column": np.empty(sampled_row_count, dtype=np.int64),
-        "sampling_block_row": np.empty(sampled_row_count, dtype=np.int64),
-        "reference_site": np.empty(sampled_row_count, dtype=np.uint8),
-        "pixel_area_m2": np.empty(sampled_row_count, dtype=np.float64),
-        "available_pixels_in_block_class": np.empty(
-            sampled_row_count,
-            dtype=np.int64,
+        **spatial_sampling.build_sample_weight_columns(
+            all_candidates,
+            sampling_scan.strata,
+            sampling_scan.raster_summary.pixel_area_m2,
         ),
-        "sampled_pixels_in_block_class": np.empty(
-            sampled_row_count,
-            dtype=np.int32,
-        ),
-        "sampling_probability": np.empty(
-            sampled_row_count,
-            dtype=np.float64,
-        ),
-        "sampling_weight": np.empty(sampled_row_count, dtype=np.float64),
-        "area_weight_m2": np.empty(sampled_row_count, dtype=np.float64),
     }
     # Start raster-data columns as NaN so a selected source pixel that is
     # masked/nodata in a particular band remains missing in the sample table.
@@ -897,51 +746,6 @@ def assemble_spatial_sample(
             )
             table_columns["longitude"][destination_slice] = longitudes
             table_columns["latitude"][destination_slice] = latitudes
-
-            for candidate_offset, candidate in enumerate(tile_candidates):
-                destination_row = write_offset + candidate_offset
-                stratum_key = (
-                    candidate.sampling_block_column,
-                    candidate.sampling_block_row,
-                    candidate.reference_site_class,
-                )
-                stratum_state = sampling_scan.strata[stratum_key]
-                sampled_in_stratum = len(stratum_state.candidates)
-                sampling_weight = (
-                    stratum_state.available_pixel_count / sampled_in_stratum
-                )
-                table_columns["sampling_block_id"][destination_row] = (
-                    block_id_by_key[stratum_key[:2]]
-                )
-                table_columns["sampling_block_column"][destination_row] = (
-                    candidate.sampling_block_column
-                )
-                table_columns["sampling_block_row"][destination_row] = (
-                    candidate.sampling_block_row
-                )
-                table_columns["reference_site"][destination_row] = (
-                    candidate.reference_site_class
-                )
-                table_columns["pixel_area_m2"][destination_row] = (
-                    sampling_scan.raster_summary.pixel_area_m2
-                )
-                table_columns[
-                    "available_pixels_in_block_class"
-                ][destination_row] = stratum_state.available_pixel_count
-                table_columns[
-                    "sampled_pixels_in_block_class"
-                ][destination_row] = sampled_in_stratum
-                table_columns["sampling_probability"][destination_row] = (
-                    sampled_in_stratum
-                    / stratum_state.available_pixel_count
-                )
-                table_columns["sampling_weight"][destination_row] = (
-                    sampling_weight
-                )
-                table_columns["area_weight_m2"][destination_row] = (
-                    sampling_scan.raster_summary.pixel_area_m2
-                    * sampling_weight
-                )
 
             # np.newaxis reshapes band offsets to (bands, 1) and pixel offsets
             # to (1, pixels). NumPy broadcasts the shared index tuple into one
