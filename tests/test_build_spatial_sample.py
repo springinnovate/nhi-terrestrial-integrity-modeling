@@ -179,6 +179,16 @@ class BuildSpatialSampleTest(unittest.TestCase):
         self.assertEqual(32, raster_summary.eligible_pixel_count)
         self.assertEqual(1, spatial_sample.block_count)
         self.assertEqual(6, len(spatial_sample.table))
+        # Exact capped sample recorded from the original sampler at a88198a.
+        np.testing.assert_array_equal(
+            spatial_sample.table[["row", "column", "reference_site"]].to_numpy(),
+            [[-2, 0, 0], [-2, 1, 1], [-1, 3, 1],
+             [-3, 4, 0], [-2, 6, 0], [-1, 6, 1]],
+        )
+        np.testing.assert_allclose(
+            spatial_sample.table["sampling_weight"],
+            [7, 11 / 3, 11 / 3, 7, 7, 11 / 3],
+        )
         self.assertEqual(
             {0: 3, 1: 3},
             spatial_sample.table["reference_site"].value_counts().to_dict(),
