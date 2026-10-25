@@ -42,8 +42,8 @@ from shapely.geometry.base import BaseGeometry
 from threadpoolctl import threadpool_limits
 from tqdm.auto import tqdm
 
+from . import habitat_condition
 from .analysis_config import AnalysisConfiguration, load_analysis_configuration
-from .fit_grassland_integrity_parameters import predict_expected_response
 from .raster_cache_utils import (
     AnalysisCacheTiles,
     CachedRasterTile,
@@ -113,29 +113,18 @@ class ResponseModel:
     display_name: str
     predictor_names: tuple[str, ...]
     reference_rmse: float
-    bundle: dict[str, object]
+    bundle: habitat_condition.FittedResponseModel
 
 
 @dataclass(frozen=True)
 class ReferenceDepartureCalibration:
-    """Reference distribution used to convert response vectors into percentiles.
+    """Numerical reference distribution and the CLI records used to fit it.
 
     Attributes:
+        distribution: Fitted numerical distance and percentile calculation.
         prediction_table_path: Parquet table containing out-of-fold response
             predictions and standardized deviations.
         response_bands: Ordered response bands in every departure vector.
-        reference_mean_vector: Area-weighted reference mean standardized-
-            departure vector.
-        reference_covariance_matrix: Area-weighted reference covariance before
-            stabilization.
-        stabilized_reference_covariance_matrix: Reference covariance after
-            diagonal shrinkage.
-        reference_precision_matrix: Inverse of the stabilized reference
-            covariance matrix.
-        sorted_reference_distances: Ascending Mahalanobis distances for complete
-            reference rows.
-        cumulative_reference_area_fractions: Cumulative represented-area
-            fractions corresponding to the sorted distances.
         covariance_shrinkage: Fraction of covariance shrunk toward its diagonal.
         reference_row_count: Number of labeled reference rows before
             completeness filtering.
@@ -143,86 +132,16 @@ class ReferenceDepartureCalibration:
             matrix.
         reference_area_m2: Total represented reference area before filtering.
         complete_reference_area_m2: Represented area defining the matrix.
-        covariance_condition_number: Condition number before stabilization.
-        stabilized_covariance_condition_number: Condition number after
-            stabilization.
     """
 
+    distribution: habitat_condition.ReferenceDepartureDistribution
     prediction_table_path: Path
     response_bands: tuple[str, ...]
-    reference_mean_vector: np.ndarray
-    reference_covariance_matrix: np.ndarray
-    stabilized_reference_covariance_matrix: np.ndarray
-    reference_precision_matrix: np.ndarray
-    sorted_reference_distances: np.ndarray
-    cumulative_reference_area_fractions: np.ndarray
     covariance_shrinkage: float
     reference_row_count: int
     complete_reference_row_count: int
     reference_area_m2: float
     complete_reference_area_m2: float
-    covariance_condition_number: float
-    stabilized_covariance_condition_number: float
-
-    def calculate_mahalanobis_distances(
-        self,
-        standardized_departures: np.ndarray,
-    ) -> np.ndarray:
-        """Calculate covariance-aware distance for complete response vectors.
-
-        Args:
-            standardized_departures: Matrix with one pixel per row and one
-                standardized ecological-response departure per column.
-
-        Returns:
-            Mahalanobis distance for every input row.
-        """
-
-        centered_standardized_departures = (
-            np.asarray(standardized_departures, dtype=np.float64)
-            - self.reference_mean_vector
-        )
-        squared_distances = np.einsum(
-            "ij,jk,ik->i",
-            centered_standardized_departures,
-            self.reference_precision_matrix,
-            centered_standardized_departures,
-        )
-        return np.sqrt(np.maximum(squared_distances, 0.0))
-
-    def calculate_reference_departure_percentiles(
-        self,
-        mahalanobis_distances: np.ndarray,
-    ) -> np.ndarray:
-        """Evaluate distances against the area-weighted reference distribution.
-
-        Args:
-            mahalanobis_distances: Mahalanobis distances to transform.
-
-        Returns:
-            Area-weighted empirical reference percentiles on the 0–1 scale.
-        """
-
-        mahalanobis_distance_array = np.asarray(
-            mahalanobis_distances,
-            dtype=np.float64,
-        )
-        insertion_offsets = np.searchsorted(
-            self.sorted_reference_distances,
-            mahalanobis_distance_array,
-            side="right",
-        )
-        reference_departure_percentiles = np.zeros(
-            mahalanobis_distance_array.shape,
-            dtype=np.float64,
-        )
-        has_reference_at_or_below = insertion_offsets > 0
-        reference_departure_percentiles[has_reference_at_or_below] = (
-            self.cumulative_reference_area_fractions[
-                insertion_offsets[has_reference_at_or_below] - 1
-            ]
-        )
-        return reference_departure_percentiles
 
 
 @dataclass
@@ -917,82 +836,20 @@ def build_reference_departure_calibration(
     complete_reference_area_weights = area_weights.loc[
         complete_reference_row_mask
     ].to_numpy(dtype=np.float64)
-    if len(complete_reference_departures) <= len(response_models):
-        raise ValueError(
-            "Reference departure calibration requires more complete reference "
-            "rows than fitted responses."
-        )
-
-    complete_reference_area_m2 = float(complete_reference_area_weights.sum())
-    reference_mean_vector = np.average(
+    distribution = habitat_condition.fit_reference_departure_distribution(
         complete_reference_departures,
-        axis=0,
-        weights=complete_reference_area_weights,
+        complete_reference_area_weights,
+        covariance_shrinkage,
     )
-    centered_reference_departures = (
-        complete_reference_departures - reference_mean_vector
-    )
-    reference_covariance_matrix = (
-        (
-            centered_reference_departures
-            * complete_reference_area_weights[:, np.newaxis]
-        ).T
-        @ centered_reference_departures
-        / complete_reference_area_m2
-    )
-    reference_variances = np.diag(reference_covariance_matrix)
-    if not np.isfinite(reference_variances).all() or np.any(
-        reference_variances <= 0
-    ):
-        raise ValueError(
-            "Every fitted response must have positive finite reference variance."
-        )
-
-    # Shrinking only off-diagonal covariance preserves each response's reference
-    # variance while preventing near-duplicate responses from destabilizing inversion.
-    stabilized_reference_covariance_matrix = (
-        (1.0 - covariance_shrinkage) * reference_covariance_matrix
-        + covariance_shrinkage * np.diag(reference_variances)
-    )
-    reference_precision_matrix = np.linalg.inv(
-        stabilized_reference_covariance_matrix
-    )
-    squared_reference_distances = np.einsum(
-        "ij,jk,ik->i",
-        centered_reference_departures,
-        reference_precision_matrix,
-        centered_reference_departures,
-    )
-    reference_distances = np.sqrt(np.maximum(squared_reference_distances, 0.0))
-    reference_distance_sort_order = np.argsort(reference_distances, kind="stable")
-    sorted_reference_distances = reference_distances[reference_distance_sort_order]
-    cumulative_reference_area_fractions = np.cumsum(
-        complete_reference_area_weights[reference_distance_sort_order]
-    ) / complete_reference_area_m2
-    cumulative_reference_area_fractions[-1] = 1.0
-
     return ReferenceDepartureCalibration(
+        distribution=distribution,
         prediction_table_path=prediction_table_path,
         response_bands=response_bands,
-        reference_mean_vector=reference_mean_vector,
-        reference_covariance_matrix=reference_covariance_matrix,
-        stabilized_reference_covariance_matrix=(
-            stabilized_reference_covariance_matrix
-        ),
-        reference_precision_matrix=reference_precision_matrix,
-        sorted_reference_distances=sorted_reference_distances,
-        cumulative_reference_area_fractions=cumulative_reference_area_fractions,
         covariance_shrinkage=covariance_shrinkage,
         reference_row_count=int(np.count_nonzero(reference_row_mask)),
         complete_reference_row_count=len(complete_reference_departures),
         reference_area_m2=reference_area_m2,
-        complete_reference_area_m2=complete_reference_area_m2,
-        covariance_condition_number=float(
-            np.linalg.cond(reference_covariance_matrix)
-        ),
-        stabilized_covariance_condition_number=float(
-            np.linalg.cond(stabilized_reference_covariance_matrix)
-        ),
+        complete_reference_area_m2=float(complete_reference_area_weights.sum()),
     )
 
 
@@ -2178,9 +2035,11 @@ def calculate_inference_tile(
                 for response_model_offset, response_model in enumerate(
                     response_models
                 ):
-                    expected_reference_values = predict_expected_response(
-                        response_model.bundle,
-                        predictor_table,
+                    expected_reference_values = (
+                        habitat_condition.predict_expected_response(
+                            response_model.bundle,
+                            predictor_table,
+                        )
                     )
                     if not np.isfinite(expected_reference_values).all():
                         raise RuntimeError(
@@ -2219,13 +2078,14 @@ def calculate_inference_tile(
             standardized_departure_vectors = standardized_output[
                 :, complete_non_reference_pixel_mask
             ].T.astype(np.float64)
+            reference_distribution = reference_calibration.distribution
             mahalanobis_distances = (
-                reference_calibration.calculate_mahalanobis_distances(
+                reference_distribution.calculate_mahalanobis_distances(
                     standardized_departure_vectors
                 )
             )
             departure_percentiles = (
-                reference_calibration.calculate_reference_departure_percentiles(
+                reference_distribution.calculate_reference_departure_percentiles(
                     mahalanobis_distances
                 )
             )
@@ -3407,10 +3267,11 @@ def run_reference_condition_inference(
         f"of {reference_calibration.reference_area_m2 / 1_000_000:.2f} km^2 "
         "represented reference area"
     )
+    reference_distribution = reference_calibration.distribution
     print(
         "Covariance condition number: "
-        f"{reference_calibration.covariance_condition_number:.3g} before, "
-        f"{reference_calibration.stabilized_covariance_condition_number:.3g} "
+        f"{reference_distribution.covariance_condition_number:.3g} before, "
+        f"{reference_distribution.stabilized_covariance_condition_number:.3g} "
         f"after {covariance_shrinkage:.1%} diagonal shrinkage"
     )
     print(f"Output directory: {resolved_output_directory}")
@@ -3540,13 +3401,13 @@ def run_reference_condition_inference(
         dtype=np.float64,
     )
     reference_distance_quantile_offsets = np.searchsorted(
-        reference_calibration.cumulative_reference_area_fractions,
+        reference_distribution.cumulative_reference_area_fractions,
         reference_distance_quantile_probabilities,
         side="left",
     )
     reference_distance_quantiles = {
         f"p{round(probability * 100):02d}": float(
-            reference_calibration.sorted_reference_distances[offset]
+            reference_distribution.sorted_reference_distances[offset]
         )
         for probability, offset in zip(
             reference_distance_quantile_probabilities,
@@ -3673,19 +3534,19 @@ def run_reference_condition_inference(
                 * reference_calibration.complete_reference_area_m2
                 / reference_calibration.reference_area_m2
             ),
-            "mean_vector": reference_calibration.reference_mean_vector.tolist(),
+            "mean_vector": reference_distribution.reference_mean_vector.tolist(),
             "covariance_matrix": (
-                reference_calibration.reference_covariance_matrix.tolist()
+                reference_distribution.reference_covariance_matrix.tolist()
             ),
             "covariance_shrinkage": covariance_shrinkage,
             "stabilized_covariance_matrix": (
-                reference_calibration.stabilized_reference_covariance_matrix.tolist()
+                reference_distribution.stabilized_reference_covariance_matrix.tolist()
             ),
             "covariance_condition_number": (
-                reference_calibration.covariance_condition_number
+                reference_distribution.covariance_condition_number
             ),
             "stabilized_covariance_condition_number": (
-                reference_calibration.stabilized_covariance_condition_number
+                reference_distribution.stabilized_covariance_condition_number
             ),
             "reference_distance_quantiles": reference_distance_quantiles,
             "percentile_definition": (

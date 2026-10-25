@@ -41,10 +41,10 @@ from scripts.apply_reference_condition_models import (
     write_computed_inference_tiles,
 )
 from scripts.fetch_gee_raster_tiles import cache_aoi_tiles
+from scripts.habitat_condition import predict_expected_response
 from scripts.fit_grassland_integrity_parameters import (
     IntegrityConfiguration,
     fit_response_gam,
-    predict_expected_response,
 )
 from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
 from scripts.raster_cache_utils import resolve_analysis_cache_tiles
@@ -359,17 +359,18 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             covariance_shrinkage=0.10,
         )
 
-        np.testing.assert_allclose(calibration.reference_mean_vector, [0.0, 0.0])
+        distribution = calibration.distribution
+        np.testing.assert_allclose(distribution.reference_mean_vector, [0.0, 0.0])
         np.testing.assert_allclose(
-            calibration.reference_covariance_matrix,
+            distribution.reference_covariance_matrix,
             np.diag([2.0 / 3.0, 2.0 / 3.0]),
         )
-        mahalanobis_distances = calibration.calculate_mahalanobis_distances(
+        mahalanobis_distances = distribution.calculate_mahalanobis_distances(
             np.array([[0.5, -0.5]], dtype=np.float64)
         )
         np.testing.assert_allclose(mahalanobis_distances, [math.sqrt(0.75)])
         np.testing.assert_allclose(
-            calibration.calculate_reference_departure_percentiles(
+            distribution.calculate_reference_departure_percentiles(
                 mahalanobis_distances
             ),
             [1.0 / 3.0],
@@ -704,8 +705,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         resumed_output = io.StringIO()
         with (
             patch(
-                "scripts.apply_reference_condition_models."
-                "predict_expected_response",
+                "scripts.habitat_condition.predict_expected_response",
                 side_effect=AssertionError(
                     "A completed inference tile must not be modeled again."
                 ),
@@ -750,8 +750,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
 
         with (
             patch(
-                "scripts.apply_reference_condition_models."
-                "predict_expected_response",
+                "scripts.habitat_condition.predict_expected_response",
                 side_effect=interrupt_second_tile,
             ),
             contextlib.redirect_stdout(io.StringIO()),

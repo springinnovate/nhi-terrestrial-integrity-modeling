@@ -15,16 +15,14 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import Ridge
 from sklearn.metrics import (
     mean_absolute_error,
     r2_score,
     root_mean_squared_error,
 )
-from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 from tqdm.auto import tqdm
 
+from . import habitat_condition
 from .analysis_config import AnalysisConfiguration, load_analysis_configuration
 from .reference_condition_utils import (
     FIGURE_DPI,
@@ -457,7 +455,7 @@ def fit_response_gam(
     configuration: IntegrityConfiguration,
     analysis_configuration: AnalysisConfiguration,
 ) -> dict[str, object]:
-    """Fit one regularized additive reference-condition regression.
+    """Fit one response and attach the CLI model artifact metadata.
 
     Args:
         training_table (pandas.DataFrame): Reference rows used to fit the
@@ -478,44 +476,16 @@ def fit_response_gam(
         predictor names, imputation values, fitted preprocessor, and regressor.
     """
 
+    fitted_model = habitat_condition.fit_response_model(
+        training_table,
+        response_name,
+        continuous_predictor_names,
+        categorical_predictor_name,
+        imputation_values,
+        spline_knot_count=configuration.spline_knot_count,
+        ridge_alpha=configuration.ridge_alpha,
+    )
     predictor_names = (*continuous_predictor_names, categorical_predictor_name)
-    imputed_predictors = training_table.loc[:, predictor_names].fillna(
-        imputation_values
-    )
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "continuous_splines",
-                SplineTransformer(
-                    n_knots=configuration.spline_knot_count,
-                    degree=3,
-                    knots="quantile",
-                    extrapolation="linear",
-                    include_bias=False,
-                ),
-                list(continuous_predictor_names),
-            ),
-            (
-                "landform_categories",
-                OneHotEncoder(
-                    handle_unknown="ignore",
-                    sparse_output=False,
-                    dtype=np.float64,
-                ),
-                [categorical_predictor_name],
-            ),
-        ],
-        sparse_threshold=0.0,
-    )
-    design_matrix = preprocessor.fit_transform(imputed_predictors)
-    represented_areas = training_table["area_weight_m2"].to_numpy(dtype=np.float64)
-    fitting_weights = represented_areas * len(training_table) / represented_areas.sum()
-    regressor = Ridge(alpha=configuration.ridge_alpha)
-    regressor.fit(
-        design_matrix,
-        training_table[response_name].to_numpy(dtype=np.float64),
-        sample_weight=fitting_weights,
-    )
     response_definition = analysis_configuration.band_for_column(response_name)
     predictor_display_names = {
         predictor_name: analysis_configuration.band_for_column(
@@ -535,42 +505,8 @@ def fit_response_gam(
         "analysis_configuration_sha256": (
             analysis_configuration.configuration_sha256
         ),
-        "continuous_predictor_names": continuous_predictor_names,
-        "categorical_predictor_name": categorical_predictor_name,
-        "imputation_values": imputation_values,
-        "preprocessor": preprocessor,
-        "regressor": regressor,
+        **fitted_model,
     }
-
-
-def predict_expected_response(
-    fitted_model: dict[str, object],
-    predictor_table: pd.DataFrame,
-) -> np.ndarray:
-    """Predict expected reference condition with a serialized model bundle.
-
-    Args:
-        fitted_model (dict[str, object]): Model bundle returned by
-            ``fit_response_gam`` or loaded from its Joblib artifact.
-        predictor_table (pandas.DataFrame): Rows containing every predictor
-            named by the fitted model.
-
-    Returns:
-        numpy.ndarray: Expected reference-condition response for each input row.
-    """
-
-    continuous_predictor_names = tuple(
-        fitted_model["continuous_predictor_names"]
-    )
-    categorical_predictor_name = str(fitted_model["categorical_predictor_name"])
-    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
-    imputed_predictor_table = predictor_table.loc[:, predictor_names].fillna(
-        fitted_model["imputation_values"]
-    )
-    design_matrix = fitted_model["preprocessor"].transform(
-        imputed_predictor_table
-    )
-    return np.asarray(fitted_model["regressor"].predict(design_matrix))
 
 
 def _response_output_columns(response_band: str) -> tuple[str, str, str]:
@@ -1143,7 +1079,7 @@ def create_partial_response_figure(
                 columns=predictor_names,
             )
             response_table[predictor_name] = category_values
-            expected_response_values = predict_expected_response(
+            expected_response_values = habitat_condition.predict_expected_response(
                 fitted_model,
                 response_table,
             )
@@ -1174,7 +1110,7 @@ def create_partial_response_figure(
                 columns=predictor_names,
             )
             response_table[predictor_name] = predictor_values
-            expected_response_values = predict_expected_response(
+            expected_response_values = habitat_condition.predict_expected_response(
                 fitted_model,
                 response_table,
             )
@@ -1544,7 +1480,7 @@ def run_integrity_parameter_gams(
                 configuration,
                 analysis_configuration,
             )
-            fold_expected_values = predict_expected_response(
+            fold_expected_values = habitat_condition.predict_expected_response(
                 fitted_model,
                 prepared_reference_data.table.loc[assessment_row_mask],
             )
