@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts import habitat_sampling as sampling
+from scripts import spatial_sampling as sampling
 
 
 def _sample_two_tiles() -> tuple[
@@ -48,7 +48,7 @@ def _sample_two_tiles() -> tuple[
     return strata, increases
 
 
-class HabitatSamplingTest(unittest.TestCase):
+class SpatialSamplingTest(unittest.TestCase):
     """Preserve global sample caps, deterministic addresses and area weights."""
 
     def test_merges_tile_candidates_and_weights_the_complete_strata(self) -> None:
@@ -138,7 +138,7 @@ candidates = [item for state in strata.values() for item in state.candidates]
 namespace["sampling"].build_sample_weight_columns(candidates, strata, 1_000_000.0)
 for name in sys.modules:
     assert not (
-        name.startswith("scripts.") and name != "scripts.habitat_sampling"
+        name.startswith("scripts.") and name != "scripts.spatial_sampling"
     ), name
     assert name.split(".")[0] not in {{
         "matplotlib", "rasterio", "cartopy", "ee", "tomllib", "pyproj"

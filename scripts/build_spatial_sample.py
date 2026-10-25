@@ -29,7 +29,7 @@ from shapely.geometry import box, mapping
 from shapely.geometry.base import BaseGeometry
 from tqdm.auto import tqdm
 
-from . import habitat_sampling
+from . import spatial_sampling
 from .analysis_config import (
     DEFAULT_ANALYSIS_CONFIG_PATH,
     AnalysisConfiguration,
@@ -185,7 +185,7 @@ class SamplingScan:
         sampled_band_names: Names corresponding to sampled-band positions.
     """
 
-    strata: dict[tuple[int, int, int], habitat_sampling.SamplingStratumState]
+    strata: dict[tuple[int, int, int], spatial_sampling.SamplingStratumState]
     raster_summary: RasterCacheScanSummary
     reference_band_offset: int
     sampled_band_offsets: tuple[int, ...]
@@ -380,7 +380,7 @@ def scan_cached_tiles(
     # Each dictionary key identifies one (global block column, global block row,
     # reference class) stratum. Reusing that key merges counts and retained
     # candidates when the same sampling group crosses cache-tile boundaries.
-    strata: dict[tuple[int, int, int], habitat_sampling.SamplingStratumState] = {}
+    strata: dict[tuple[int, int, int], spatial_sampling.SamplingStratumState] = {}
     aoi_pixel_count = 0
     any_band_defined_pixel_count = 0
     every_band_defined_pixel_count = 0
@@ -517,7 +517,7 @@ def scan_cached_tiles(
             ].astype(np.uint8)
 
             background_increase, reference_increase = (
-                habitat_sampling.retain_tile_candidates(
+                spatial_sampling.retain_tile_candidates(
                     strata,
                     tile_id=cached_tile.tile.tile_id,
                     tile_sequence=tile_sequence,
@@ -639,7 +639,7 @@ def assemble_spatial_sample(
         ),
     )
     sampled_row_count = len(all_candidates)
-    candidates_by_tile: dict[int, list[habitat_sampling.SamplingCandidate]] = defaultdict(list)
+    candidates_by_tile: dict[int, list[spatial_sampling.SamplingCandidate]] = defaultdict(list)
     for candidate in all_candidates:
         candidates_by_tile[candidate.tile_sequence].append(candidate)
 
@@ -661,7 +661,7 @@ def assemble_spatial_sample(
         "cache_tile_id": np.empty(sampled_row_count, dtype=object),
         "longitude": np.empty(sampled_row_count, dtype=np.float64),
         "latitude": np.empty(sampled_row_count, dtype=np.float64),
-        **habitat_sampling.build_sample_weight_columns(
+        **spatial_sampling.build_sample_weight_columns(
             all_candidates,
             sampling_scan.strata,
             sampling_scan.raster_summary.pixel_area_m2,
