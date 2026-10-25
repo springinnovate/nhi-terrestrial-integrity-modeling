@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nhi-terrestrial-integrity-modeling"
+version = "0.1.0"
+description = "Habitat condition from prepared raster inputs and reference sites"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyproj>=3.6",
+    "rasterio>=1.3",
+    "scikit-learn>=1.4",
+    "shapely>=2.0",
+]
+
+[project.urls]
+Repository = "https://github.com/springinnovate/nhi-terrestrial-integrity-modeling"
+
+[tool.setuptools]
+packages = []
+include-package-data = false
+py-modules = [
+    "nhi_terrestrial_integrity_modeling.habitat_condition",
+    "nhi_terrestrial_integrity_modeling.habitat_training",
+    "nhi_terrestrial_integrity_modeling.prepared_rasters",
+    "nhi_terrestrial_integrity_modeling.prepared_runner",
+    "nhi_terrestrial_integrity_modeling.prepared_sampling",
+    "nhi_terrestrial_integrity_modeling.spatial_sampling",
+]
+
+[tool.setuptools.package-dir]
+nhi_terrestrial_integrity_modeling = "scripts"
