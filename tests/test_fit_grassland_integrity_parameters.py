@@ -15,12 +15,12 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from scripts.habitat_condition import predict_expected_response
 from scripts.fit_grassland_integrity_parameters import (
     IntegrityConfiguration,
     calculate_regression_metrics,
     create_model_performance_figure,
     create_observed_expected_figure,
-    predict_expected_response,
     resolve_response_names,
     run_integrity_parameter_gams,
     summarize_response_coverage,
