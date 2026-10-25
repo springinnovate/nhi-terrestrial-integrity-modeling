@@ -11,7 +11,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SamplingCandidate:
-    """Identify one retained source pixel before its band values are reread.
+    """Location and random priority of one retained source pixel.
 
     Attributes:
         tile_sequence: Position of the source tile in deterministic AOI order.
@@ -32,7 +32,7 @@ class SamplingCandidate:
 
 @dataclass
 class SamplingStratumState:
-    """Accumulate one global sampling-block and reference-class stratum.
+    """Population count and retained pixels for one block and reference class.
 
     A stratum is the complete group of eligible pixels sharing one global
     sampling block and one binary reference class. Its sampling cap and weight
@@ -63,10 +63,10 @@ def retain_tile_candidates(
 ) -> tuple[int, int]:
     """Merge one tile's lowest-priority pixels into the global block/class sample.
 
-    A block crossing tile boundaries receives one sampling cap. Random priorities
-    are generated for the complete tile before selecting eligible positions.
-    A position's priority depends on the tile identity, dimensions and seed,
-    independently of which other positions are eligible.
+    Each block/reference-class group has one sampling cap across tile boundaries.
+    Random priorities are generated for the complete tile before selecting eligible
+    positions. A pixel's priority depends on the tile identity, row-major position
+    and seed, independently of which other positions are eligible.
 
     Args:
         strata: Population counts and retained candidates from previous tiles;
@@ -81,7 +81,7 @@ def retain_tile_candidates(
         sampling_block_rows: Corresponding global sampling-block rows.
         reference_site_classes: Corresponding binary classes, 0 for background
             and 1 for reference sites.
-        random_seed: Preset seed for deterministic sampling.
+        random_seed: Seed for deterministic sampling.
         samples_per_class_per_block: Positive scientific sample cap per global
             block/class combination.
 
@@ -90,8 +90,8 @@ def retain_tile_candidates(
         Replacing a retained pixel without growing its stratum returns no increase.
     """
 
-    retained_background_candidate_count = 0
-    retained_reference_candidate_count = 0
+    background_count_increase = 0
+    reference_count_increase = 0
     # Python's built-in hash is randomly salted for each process, so it
     # would select different pixels on another run. SHA-256 combines the
     # configured seed and tile address into a repeatable per-tile NumPy
@@ -186,11 +186,11 @@ def retain_tile_candidates(
             len(stratum_state.candidates) - previous_candidate_count
         )
         if stratum_key[2] == 1:
-            retained_reference_candidate_count += retained_candidate_delta
+            reference_count_increase += retained_candidate_delta
         else:
-            retained_background_candidate_count += retained_candidate_delta
+            background_count_increase += retained_candidate_delta
 
-    return retained_background_candidate_count, retained_reference_candidate_count
+    return background_count_increase, reference_count_increase
 
 
 def build_sample_weight_columns(
@@ -208,7 +208,7 @@ def build_sample_weight_columns(
         candidates: Retained pixels in the caller's desired output row order.
         strata: Completed population counts and selections from
             ``retain_tile_candidates``.
-        pixel_area_m2: Constant pixel area for the admitted equal-area grid.
+        pixel_area_m2: Constant pixel area for the equal-area grid.
 
     Returns:
         Arrays in candidate order: block ID/column/row, reference class, pixel

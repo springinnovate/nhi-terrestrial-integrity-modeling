@@ -127,7 +127,7 @@ class SpatialSamplingTest(unittest.TestCase):
         )
 
     def test_calculates_without_cache_raster_or_plotting_imports(self) -> None:
-        """Select and weight pixels in a fresh process using the shared owner."""
+        """Select and weight pixels without importing raster or plotting libraries."""
 
         script = f'''
 import runpy
