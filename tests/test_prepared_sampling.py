@@ -74,25 +74,35 @@ class PreparedSamplingTests(unittest.TestCase):
             with self.subTest(aoi=pixel_aoi.wkt):
                 self.compare_with_cli(pixel_aoi)
 
-    def compare_with_cli(self, pixel_aoi: Polygon) -> None:
+    def test_matches_cli_sampling_blocks_and_folds_away_from_origin(self) -> None:
+        """Preserve selections near Montana where the two projected grids diverge."""
+        self.compare_with_cli(
+            box(1.2, 1.2, 10.8, 6.8).difference(box(4.2, 2.2, 6.8, 4.8)),
+            origin=(-10613660, 5358567),
+        )
+
+    def compare_with_cli(
+        self, pixel_aoi: Polygon, *, origin: tuple[int, int] = (11, -17),
+    ) -> None:
         """Compare a cropped source against its original complete CLI tiles.
 
         Args:
             pixel_aoi: AOI in the uncropped fixture's pixel coordinates.
+            origin: EPSG:6933 tile origin; the Montana case crosses EPSG:8857 blocks.
         """
         default = load_analysis_configuration()
         definitions = tuple(
             next(band for band in default.bands if band.role == role)
             for role in ("reference", "predictor", "response")
         )
-        grid = RasterCacheGrid("EPSG:6933", 30, 4, origin_x=11, origin_y=-17)
+        grid = RasterCacheGrid("EPSG:6933", 30, 4, origin_x=origin[0], origin_y=origin[1])
         configuration = replace(
             default, grid=grid, bands=definitions,
             sampling=replace(default.sampling, block_size_meters=300,
                              samples_per_class_per_block=3, random_seed=17),
         )
         names = configuration.band_names()
-        full_transform = Affine(30, 0, -109, 0, -30, 223)
+        full_transform = Affine(30, 0, origin[0] - 120, 0, -30, origin[1] + 240)
         rows, columns = np.indices((8, 12))
         values = np.stack((
             ((rows + columns) % 3 == 0).astype(float),
@@ -102,7 +112,7 @@ class PreparedSamplingTests(unittest.TestCase):
         values[1:, 5, 8] = -9999
         values[2, 2:5, 8] = np.nan
         values[0, 5, 6] = -9999
-        aoi = affine_transform(pixel_aoi, [30, 0, 0, -30, -109, 223])
+        aoi = affine_transform(pixel_aoi, [30, 0, 0, -30, full_transform.c, full_transform.f])
         to_wgs84 = Transformer.from_crs(6933, 4326, always_xy=True)
         wgs84_aoi = transform(to_wgs84.transform, aoi)
         aoi, tiles = select_intersecting_tiles(wgs84_aoi, grid)
@@ -127,8 +137,9 @@ class PreparedSamplingTests(unittest.TestCase):
         with open_prepared_rasters(
             bands, RasterBand("reference", path), RasterBand("assessment", mask_path),
         ) as reader:
-            actual = sample_prepared_rasters(reader, aoi, **self.settings)
-            repeated = sample_prepared_rasters(reader, aoi, **self.settings)
+            settings = {**self.settings, "tile_origin": origin}
+            actual = sample_prepared_rasters(reader, aoi, **settings)
+            repeated = sample_prepared_rasters(reader, aoi, **settings)
         expected_table = expected.table.copy()
         expected_table["row"] = (expected_table["row"] + 7).astype(np.int64)
         expected_table["column"] = (expected_table["column"] + 3).astype(np.int64)
@@ -137,10 +148,13 @@ class PreparedSamplingTests(unittest.TestCase):
         self.assertGreater(len(actual), 0)
         self.assertLess(len(actual), 40)
         self.assertGreater(actual["reference_site"].sum(), 0)
-        training = prepare_reference_condition_data(
-            actual, ReferenceConditionConfiguration(2, 300, 600, 0.0, 1.0, 3),
-            (names[1],), names[1],
+        training_settings = ReferenceConditionConfiguration(2, 300, 600, 0.0, 1.0, 3)
+        training = prepare_reference_condition_data(actual, training_settings, (names[1],), names[1])
+        expected_training = prepare_reference_condition_data(
+            expected_table, training_settings, (names[1],), names[1],
         )
+        fold_columns = ["validation_block_column", "validation_block_row", "spatial_fold"]
+        pd.testing.assert_frame_equal(training.table[fold_columns], expected_training.table[fold_columns])
         np.testing.assert_array_equal(training.table["reference_site"], actual["reference_site"])
         self.assertEqual(len(training.table), len(actual))
         self.assertTrue(training.table["spatial_fold"].isin([1, 2]).all())
@@ -166,6 +180,7 @@ class PreparedSamplingTests(unittest.TestCase):
         np.testing.assert_array_equal(actual["response"], values[0, selected_rows, selected_columns])
         np.testing.assert_array_equal(actual["reference_site"], selected_rows % 2)
         x, y = grid * (selected_columns + 0.5, selected_rows + 0.5)
+        x, y = Transformer.from_crs(6933, 8857, always_xy=True).transform(x, y)
         np.testing.assert_array_equal(actual["sampling_block_column"], np.floor(x / 300))
         np.testing.assert_array_equal(actual["sampling_block_row"], np.floor(y / 300))
         np.testing.assert_array_equal(actual["sampling_weight"], np.ones(24))

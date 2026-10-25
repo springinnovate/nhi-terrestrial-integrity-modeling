@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import pandas as pd
+from pyproj import Transformer
 from rasterio.features import geometry_mask
 from rasterio.transform import xy
 from rasterio.windows import Window, transform as window_transform
@@ -112,8 +113,8 @@ def sample_prepared_rasters(
         reader: Reader from ``open_prepared_rasters`` with predictor/response bands
             and a reference mask. Band names must not collide with table metadata.
         aoi: Valid, nonempty polygon or multipolygon in EPSG:6933.
-        block_size_meters: Positive width of global sampling blocks, anchored at
-            projected (0, 0), matching the existing sampling method.
+        block_size_meters: Positive width of global EPSG:8857 sampling blocks,
+            anchored at (0, 0), matching the existing sampling method.
         samples_per_class_per_block: Positive sample cap for each block and
             reference/background class, shared across tile boundaries.
         random_seed: Seed used by the existing deterministic pixel selector.
@@ -165,6 +166,7 @@ def sample_prepared_rasters(
         [] if pixel_aoi.is_empty else
         _sampling_windows(reader, pixel_aoi, tile_size_pixels, tile_origin)
     )
+    sampling_transform = Transformer.from_crs(reader.crs, "EPSG:8857", always_xy=True)
     strata: dict[tuple[int, int, int], spatial_sampling.SamplingStratumState] = {}
     phase = "Selecting sample pixels"
     if progress is not None:
@@ -194,6 +196,7 @@ def sample_prepared_rasters(
         rows, cols = np.nonzero(inside & np.any(np.isfinite(data.values), axis=0))
         if len(rows):
             x, y = xy(data.transform, rows, cols)
+            x, y = sampling_transform.transform(x, y)
             full_indices = (
                 (rows + row_offset) * tile_size_pixels + cols + col_offset
             )
