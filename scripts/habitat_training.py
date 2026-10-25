@@ -842,3 +842,148 @@ def fit_response_with_spatial_validation(
         overall_metrics=overall_metrics,
         fold_metrics=pd.DataFrame.from_records(fold_metric_records),
     )
+
+
+@dataclass(frozen=True)
+class FittedHabitatCondition:
+    """Response models and reference departures fitted from one area sample.
+
+    Use the models and reference distribution together for raster prediction.
+    The remaining fields describe the samples, screening and validation behind
+    that fit; no files or CLI-specific metadata are created.
+
+    Attributes:
+        prepared_data: Sample rows, spatial folds and predictor coverage.
+        predictor_names: Retained continuous predictors followed by the categorical
+            predictor, in the order required by the fitted response models.
+        response_coverage: Screening diagnostics for every requested response.
+        responses: Fitted responses keyed by name, in requested order with rejected
+            responses omitted. Each includes held-out predictions and fit metrics.
+        reference_distribution: Area-weighted distribution of complete reference
+            departures, with response columns in the same order as ``responses``.
+    """
+
+    prepared_data: PreparedReferenceConditionData
+    predictor_names: tuple[str, ...]
+    response_coverage: pd.DataFrame
+    responses: dict[str, ValidatedResponseModel]
+    reference_distribution: habitat_condition.ReferenceDepartureDistribution
+
+
+def fit_habitat_condition(
+    sample_table: pd.DataFrame,
+    configuration: IntegrityConfiguration,
+    *,
+    predictor_names: tuple[str, ...],
+    categorical_predictor_name: str,
+    response_names: tuple[str, ...],
+    covariance_shrinkage: float,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> FittedHabitatCondition:
+    """Fit response models and their reference departure distribution from samples.
+
+    Prepare predictors and spatial folds once, screen the requested responses,
+    and fit each usable response with the existing spatial validation method.
+    Calibrate the combined departure distribution from reference rows with finite
+    held-out standardized residuals for every fitted response. Background rows
+    influence predictor coverage but never train a response or its distribution.
+
+    Args:
+        sample_table: Rows from the prepared sampler, with named finite-or-NaN
+            input values, sampling-block indices, binary ``reference_site`` labels
+            and positive finite ``area_weight_m2``. The table is not modified.
+        configuration: Scientific settings supplied by the model preset, with the
+            same contracts used by preparation, screening and spatial fitting.
+        predictor_names: Nonempty unique predictor columns present in the sample,
+            including the categorical predictor. Caller owns role selection.
+        categorical_predictor_name: The one predictor treated as categorical.
+        response_names: Nonempty unique response columns to try, in desired order.
+            Responses failing scientific screening are reported and omitted.
+        covariance_shrinkage: Preset fraction strictly between zero and one used
+            to shrink reference covariance toward its diagonal before inversion.
+        progress: Optional phase/completed/total callback. Preparation and
+            calibration each report 0 then 1. Fitting counts each validation fold
+            and final all-reference fit. Exceptions propagate, allowing the caller
+            to cancel between fits; no background work is started.
+
+    Returns:
+        Fitted responses, ordered predictors, reference distribution and diagnostics
+        ready for the existing raster-window prediction function.
+
+    Raises:
+        ValueError: If predictor coverage is insufficient, no response can be fit,
+            a fitted response has nonpositive or nonfinite reference RMSE, or
+            complete reference departures cannot support calibration.
+        numpy.linalg.LinAlgError: If the reference covariance cannot be inverted.
+    """
+
+    if progress is not None:
+        progress("Preparing model samples", 0, 1)
+    prepared = prepare_reference_condition_data(
+        sample_table, configuration, predictor_names, categorical_predictor_name,
+    )
+    coverage = summarize_response_coverage(
+        prepared.table, response_names, response_names, configuration,
+    )
+    fitted_names = tuple(coverage.loc[coverage["status"].eq("fit"), "response"])
+    if not fitted_names:
+        raise ValueError(
+            "None of the requested responses can be fit: "
+            + ", ".join(
+                f"{row.response}={row.status}" for row in coverage.itertuples(index=False)
+            )
+        )
+    if progress is not None:
+        progress("Preparing model samples", 1, 1)
+
+    completed_fits = 0
+    total_fits = len(fitted_names) * (configuration.fold_count + 1)
+
+    def report_completed_fit() -> None:
+        """Count one completed validation fold or final all-reference fit.
+
+        The caller's progress callback may raise to cancel further calculation.
+        """
+        nonlocal completed_fits
+        completed_fits += 1
+        if progress is not None:
+            progress("Fitting response models", completed_fits, total_fits)
+
+    if progress is not None:
+        progress("Fitting response models", 0, total_fits)
+    responses: dict[str, ValidatedResponseModel] = {}
+    for name in fitted_names:
+        fitted = fit_response_with_spatial_validation(
+            prepared, name, configuration, on_fold_complete=report_completed_fit,
+        )
+        reference_rmse = fitted.overall_metrics["weighted_rmse"]
+        if not np.isfinite(reference_rmse) or reference_rmse <= 0:
+            raise ValueError(
+                f"{name} has invalid cross-validated reference RMSE {reference_rmse}."
+            )
+        responses[name] = fitted
+        report_completed_fit()
+
+    if progress is not None:
+        progress("Calibrating reference departures", 0, 1)
+    departures = np.column_stack([
+        fitted.standardized_departure for fitted in responses.values()
+    ])
+    complete_reference = (
+        prepared.table["reference_site"].eq(1).to_numpy()
+        & np.isfinite(departures).all(axis=1)
+    )
+    distribution = habitat_condition.fit_reference_departure_distribution(
+        departures[complete_reference],
+        prepared.table.loc[complete_reference, "area_weight_m2"].to_numpy(dtype=np.float64),
+        covariance_shrinkage,
+    )
+    if progress is not None:
+        progress("Calibrating reference departures", 1, 1)
+    return FittedHabitatCondition(
+        prepared_data=prepared,
+        predictor_names=(*prepared.continuous_predictor_names, categorical_predictor_name),
+        response_coverage=coverage,
+        responses=responses,
+        reference_distribution=distribution,
+    )
