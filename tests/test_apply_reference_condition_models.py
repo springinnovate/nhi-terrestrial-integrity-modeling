@@ -41,10 +41,10 @@ from scripts.apply_reference_condition_models import (
     write_computed_inference_tiles,
 )
 from scripts.fetch_gee_raster_tiles import cache_aoi_tiles
-from scripts.habitat_condition import predict_expected_response
+from scripts.habitat_condition import fit_response_model, predict_expected_response
+from scripts.habitat_training import IntegrityConfiguration
 from scripts.fit_grassland_integrity_parameters import (
-    IntegrityConfiguration,
-    fit_response_gam,
+    build_response_model_artifact,
 )
 from scripts.analysis_config import RasterCacheGrid, load_analysis_configuration
 from scripts.raster_cache_utils import resolve_analysis_cache_tiles
@@ -208,7 +208,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             ("d02", "d11"),
             strict=True,
         ):
-            model = fit_response_gam(
+            numerical_model = fit_response_model(
                 training_table,
                 response_name,
                 self.predictor_names[:4],
@@ -217,8 +217,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                     predictor_name: float(training_table[predictor_name].median())
                     for predictor_name in self.predictor_names
                 },
-                configuration,
-                self.analysis_configuration,
+                spline_knot_count=configuration.spline_knot_count,
+                ridge_alpha=configuration.ridge_alpha,
+            )
+            model = build_response_model_artifact(
+                numerical_model, response_name, self.analysis_configuration,
             )
             model["reference_residual_rmse_oof"] = self.response_rmse[response_band]
             model["standardized_deviation_interpretation"] = (

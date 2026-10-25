@@ -15,47 +15,16 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    mean_absolute_error,
-    r2_score,
-    root_mean_squared_error,
-)
 from tqdm.auto import tqdm
 
-from . import habitat_condition
+from . import habitat_condition, habitat_training
 from .analysis_config import AnalysisConfiguration, load_analysis_configuration
 from .reference_condition_utils import (
     FIGURE_DPI,
     SPATIAL_FOLD_COLORS,
-    ReferenceConditionConfiguration,
-    calculate_imputation_values,
     create_fold_map,
     prepare_reference_condition_data,
-    weighted_quantiles,
 )
-
-
-REGRESSION_METRIC_NAMES = (
-    "weighted_r2",
-    "weighted_rmse",
-    "weighted_mae",
-    "weighted_spearman",
-    "weighted_bias",
-)
-
-
-@dataclass(frozen=True)
-class IntegrityConfiguration(ReferenceConditionConfiguration):
-    """Settings for ecological-response screening and GAM fitting.
-
-    Attributes:
-        minimum_response_coverage: Minimum represented reference-site area
-            coverage needed to fit an ecological response.
-        ridge_alpha: L2 regularization strength used by each response model.
-    """
-
-    minimum_response_coverage: float
-    ridge_alpha: float
 
 
 @dataclass(frozen=True)
@@ -167,162 +136,14 @@ def resolve_response_names(
     return tuple(resolved_names)
 
 
-def weighted_standard_deviation(
-    values: np.ndarray,
-    weights: np.ndarray,
-) -> float:
-    """Calculate a represented-area weighted population standard deviation.
-
-    Args:
-        values (numpy.ndarray): Numeric response observations.
-        weights (numpy.ndarray): Represented-area weight for each observation.
-
-    Returns:
-        float: Weighted population standard deviation, or ``NaN`` when no
-        finite observation has positive weight.
-    """
-
-    numeric_values = np.asarray(values, dtype=np.float64)
-    numeric_weights = np.asarray(weights, dtype=np.float64)
-    valid = (
-        np.isfinite(numeric_values)
-        & np.isfinite(numeric_weights)
-        & (numeric_weights > 0)
-    )
-    if not np.any(valid):
-        return float("nan")
-    values_valid = numeric_values[valid]
-    weights_valid = numeric_weights[valid]
-    mean_value = float(np.average(values_valid, weights=weights_valid))
-    return float(
-        np.sqrt(np.average((values_valid - mean_value) ** 2, weights=weights_valid))
-    )
-
-
-def weighted_correlation(
-    first_values: np.ndarray,
-    second_values: np.ndarray,
-    weights: np.ndarray,
-) -> float:
-    """Calculate a represented-area weighted Pearson correlation.
-
-    Args:
-        first_values (numpy.ndarray): First numeric variable.
-        second_values (numpy.ndarray): Second numeric variable.
-        weights (numpy.ndarray): Represented-area weight for each paired
-            observation.
-
-    Returns:
-        float: Weighted Pearson correlation, or ``NaN`` when fewer than two
-        valid pairs remain or either variable has no weighted variation.
-    """
-
-    first = np.asarray(first_values, dtype=np.float64)
-    second = np.asarray(second_values, dtype=np.float64)
-    numeric_weights = np.asarray(weights, dtype=np.float64)
-    valid = (
-        np.isfinite(first)
-        & np.isfinite(second)
-        & np.isfinite(numeric_weights)
-        & (numeric_weights > 0)
-    )
-    if np.count_nonzero(valid) < 2:
-        return float("nan")
-    first = first[valid]
-    second = second[valid]
-    numeric_weights = numeric_weights[valid]
-    first_centered = first - np.average(first, weights=numeric_weights)
-    second_centered = second - np.average(second, weights=numeric_weights)
-    covariance = np.average(
-        first_centered * second_centered,
-        weights=numeric_weights,
-    )
-    first_variance = np.average(first_centered**2, weights=numeric_weights)
-    second_variance = np.average(second_centered**2, weights=numeric_weights)
-    if first_variance <= 0 or second_variance <= 0:
-        return float("nan")
-    return float(covariance / np.sqrt(first_variance * second_variance))
-
-
-def calculate_regression_metrics(
-    observed_values: np.ndarray,
-    expected_values: np.ndarray,
-    area_weights: np.ndarray,
-) -> dict[str, float]:
-    """Calculate area-weighted held-out regression diagnostics.
-
-    Args:
-        observed_values (numpy.ndarray): Observed ecological response values.
-        expected_values (numpy.ndarray): Model-predicted reference values.
-        area_weights (numpy.ndarray): Represented-area weight for each pair.
-
-    Returns:
-        dict[str, float]: Weighted R2, RMSE, MAE, Spearman correlation, and
-        signed bias. Every metric is ``NaN`` when fewer than two valid pairs
-        have positive weight.
-    """
-
-    observed = np.asarray(observed_values, dtype=np.float64)
-    expected = np.asarray(expected_values, dtype=np.float64)
-    weights = np.asarray(area_weights, dtype=np.float64)
-    valid = (
-        np.isfinite(observed)
-        & np.isfinite(expected)
-        & np.isfinite(weights)
-        & (weights > 0)
-    )
-    if np.count_nonzero(valid) < 2:
-        return {metric_name: float("nan") for metric_name in REGRESSION_METRIC_NAMES}
-    observed = observed[valid]
-    expected = expected[valid]
-    weights = weights[valid]
-    residuals = observed - expected
-    # R2 is undefined for a constant observed response. Scikit-learn otherwise
-    # replaces that undefined value with a finite convenience score.
-    if np.ptp(observed) > 0:
-        weighted_r2 = float(
-            r2_score(
-                observed,
-                expected,
-                sample_weight=weights,
-                force_finite=False,
-            )
-        )
-    else:
-        weighted_r2 = float("nan")
-    weighted_rmse = root_mean_squared_error(
-        observed,
-        expected,
-        sample_weight=weights,
-    )
-    weighted_mae = mean_absolute_error(
-        observed,
-        expected,
-        sample_weight=weights,
-    )
-    observed_ranks = pd.Series(observed).rank(method="average").to_numpy()
-    expected_ranks = pd.Series(expected).rank(method="average").to_numpy()
-    return {
-        "weighted_r2": weighted_r2,
-        "weighted_rmse": float(weighted_rmse),
-        "weighted_mae": float(weighted_mae),
-        "weighted_spearman": weighted_correlation(
-            observed_ranks,
-            expected_ranks,
-            weights,
-        ),
-        "weighted_bias": float(np.average(residuals, weights=weights)),
-    }
-
-
 def summarize_response_coverage(
     prepared_table: pd.DataFrame,
     response_names: Sequence[str],
     selected_response_names: Sequence[str],
-    configuration: IntegrityConfiguration,
+    configuration: habitat_training.IntegrityConfiguration,
     analysis_configuration: AnalysisConfiguration,
 ) -> pd.DataFrame:
-    """Determine which response bands can support every spatial fold.
+    """Screen configured responses and attach their CLI band labels.
 
     Args:
         prepared_table (pandas.DataFrame): Spatially folded sample with
@@ -330,7 +151,7 @@ def summarize_response_coverage(
         response_names (Sequence[str]): Configured response columns to assess.
         selected_response_names (Sequence[str]): Response columns requested for
             model fitting.
-        configuration (IntegrityConfiguration): Coverage, spline, and fold
+        configuration (habitat_training.IntegrityConfiguration): Coverage, spline, and fold
             requirements used to screen responses.
         analysis_configuration (AnalysisConfiguration): Response metadata.
 
@@ -339,153 +160,45 @@ def summarize_response_coverage(
         variation, fold support, selection state, and fit status.
     """
 
-    selected_response_name_set = set(selected_response_names)
-    usable_reference_row_mask = prepared_table["usable_for_gam"] & prepared_table[
-        "reference_site"
-    ].eq(1)
-    usable_reference_area_m2 = float(
-        prepared_table.loc[usable_reference_row_mask, "area_weight_m2"].sum()
+    coverage = habitat_training.summarize_response_coverage(
+        prepared_table,
+        response_names,
+        selected_response_names,
+        configuration,
     )
-    minimum_training_rows = max(2, configuration.spline_knot_count)
-    coverage_records = []
-    for response_name in response_names:
-        response_definition = analysis_configuration.band_for_column(response_name)
-        finite_response_row_mask = np.isfinite(
-            pd.to_numeric(prepared_table[response_name], errors="coerce")
-        )
-        defined_reference_row_mask = (
-            usable_reference_row_mask & finite_response_row_mask
-        )
-        defined_reference_area_m2 = float(
-            prepared_table.loc[
-                defined_reference_row_mask,
-                "area_weight_m2",
-            ].sum()
-        )
-        reference_area_coverage = (
-            defined_reference_area_m2 / usable_reference_area_m2
-            if usable_reference_area_m2 > 0
-            else 0.0
-        )
-        response_values = prepared_table.loc[
-            defined_reference_row_mask,
-            response_name,
-        ].to_numpy(dtype=np.float64)
-        response_weights = prepared_table.loc[
-            defined_reference_row_mask, "area_weight_m2"
-        ].to_numpy(dtype=np.float64)
-        reference_weighted_standard_deviation = weighted_standard_deviation(
-            response_values,
-            response_weights,
-        )
-        unique_reference_value_count = int(pd.Series(response_values).nunique())
-        fold_training_rows = []
-        fold_validation_rows = []
-        for spatial_fold in range(1, configuration.fold_count + 1):
-            fold_training_rows.append(
-                int(
-                    np.count_nonzero(
-                        defined_reference_row_mask
-                        & prepared_table["spatial_fold"].ne(spatial_fold)
-                    )
-                )
-            )
-            fold_validation_rows.append(
-                int(
-                    np.count_nonzero(
-                        defined_reference_row_mask
-                        & prepared_table["spatial_fold"].eq(spatial_fold)
-                    )
-                )
-            )
-
-        if response_name not in selected_response_name_set:
-            status = "not_selected"
-        elif not np.any(defined_reference_row_mask):
-            status = "no_reference_values"
-        elif reference_area_coverage < configuration.minimum_response_coverage:
-            status = "insufficient_reference_coverage"
-        elif (
-            unique_reference_value_count < 2
-            or not np.isfinite(reference_weighted_standard_deviation)
-            or reference_weighted_standard_deviation <= 0
-        ):
-            status = "no_reference_variation"
-        elif (
-            min(fold_training_rows) < minimum_training_rows
-            or min(fold_validation_rows) < 2
-        ):
-            status = "insufficient_spatial_fold_support"
-        else:
-            status = "fit"
-
-        coverage_records.append(
-            {
-                "response": response_name,
-                "response_band": response_definition.identifier,
-                "display_name": response_definition.display_name,
-                "selected": response_name in selected_response_name_set,
-                "status": status,
-                "defined_reference_rows": int(
-                    np.count_nonzero(defined_reference_row_mask)
-                ),
-                "usable_reference_rows": int(
-                    np.count_nonzero(usable_reference_row_mask)
-                ),
-                "defined_reference_area_m2": defined_reference_area_m2,
-                "usable_reference_area_m2": usable_reference_area_m2,
-                "reference_area_coverage": reference_area_coverage,
-                "unique_reference_values": unique_reference_value_count,
-                "reference_weighted_sd": (
-                    reference_weighted_standard_deviation
-                ),
-                "minimum_fold_training_rows": min(fold_training_rows),
-                "minimum_fold_validation_rows": min(fold_validation_rows),
-            }
-        )
-    return pd.DataFrame.from_records(coverage_records)
+    definitions = [
+        analysis_configuration.band_for_column(name)
+        for name in coverage["response"]
+    ]
+    coverage.insert(
+        1, "response_band", [definition.identifier for definition in definitions]
+    )
+    coverage.insert(
+        2, "display_name", [definition.display_name for definition in definitions]
+    )
+    return coverage
 
 
-def fit_response_gam(
-    training_table: pd.DataFrame,
+def build_response_model_artifact(
+    fitted_model: habitat_condition.FittedResponseModel,
     response_name: str,
-    continuous_predictor_names: tuple[str, ...],
-    categorical_predictor_name: str,
-    imputation_values: dict[str, float],
-    configuration: IntegrityConfiguration,
     analysis_configuration: AnalysisConfiguration,
 ) -> dict[str, object]:
-    """Fit one response and attach the CLI model artifact metadata.
+    """Attach configured response and stack metadata to a fitted numerical model.
 
     Args:
-        training_table (pandas.DataFrame): Reference rows used to fit the
-            response model, including predictors, response, and area weights.
-        response_name (str): Full ecological-response column name.
-        continuous_predictor_names (tuple[str, ...]): Environmental predictors
-            represented by independent cubic spline terms.
-        categorical_predictor_name (str): Landform predictor represented by
-            one-hot categorical terms.
-        imputation_values (dict[str, float]): Training-derived replacement value
-            for each predictor.
-        configuration (IntegrityConfiguration): Spline and ridge settings.
-        analysis_configuration (AnalysisConfiguration): Response and predictor
-            display metadata.
+        fitted_model: Predictors and fitted estimators from the numerical core.
+        response_name: Response column used to fit the model.
+        analysis_configuration: CLI band labels and stack identity.
 
     Returns:
-        dict[str, object]: Portable model bundle containing response metadata,
-        predictor names, imputation values, fitted preprocessor, and regressor.
+        The existing Joblib artifact fields, including fitted numerical estimators.
     """
 
-    fitted_model = habitat_condition.fit_response_model(
-        training_table,
-        response_name,
-        continuous_predictor_names,
-        categorical_predictor_name,
-        imputation_values,
-        spline_knot_count=configuration.spline_knot_count,
-        ridge_alpha=configuration.ridge_alpha,
+    predictor_names = (
+        *fitted_model["continuous_predictor_names"],
+        fitted_model["categorical_predictor_name"],
     )
-    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
     response_definition = analysis_configuration.band_for_column(response_name)
     predictor_display_names = {
         predictor_name: analysis_configuration.band_for_column(
@@ -530,7 +243,7 @@ def _response_output_columns(response_band: str) -> tuple[str, str, str]:
 def create_model_performance_figure(
     response_metrics: pd.DataFrame,
     fold_metrics: pd.DataFrame,
-    configuration: IntegrityConfiguration,
+    configuration: habitat_training.IntegrityConfiguration,
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
@@ -541,7 +254,7 @@ def create_model_performance_figure(
             fitted ecological response.
         fold_metrics (pandas.DataFrame): Per-fold held-out metrics for each
             fitted ecological response.
-        configuration (IntegrityConfiguration): Spatial-fold settings used to
+        configuration (habitat_training.IntegrityConfiguration): Spatial-fold settings used to
             label and color per-fold metrics.
         ecoregion_name (str): Human-readable ecoregion figure label.
         output_path (pathlib.Path): Destination path for the PNG figure.
@@ -670,7 +383,7 @@ def create_model_performance_figure(
 def create_observed_expected_figure(
     scored_table: pd.DataFrame,
     response_metrics: pd.DataFrame,
-    configuration: IntegrityConfiguration,
+    configuration: habitat_training.IntegrityConfiguration,
     ecoregion_name: str,
     output_path: Path,
 ) -> None:
@@ -681,7 +394,7 @@ def create_observed_expected_figure(
             out-of-fold expected responses.
         response_metrics (pandas.DataFrame): Aggregate metrics and display
             metadata for each fitted response.
-        configuration (IntegrityConfiguration): Spatial-fold settings used to
+        configuration (habitat_training.IntegrityConfiguration): Spatial-fold settings used to
             label and color the cross-validation predictions.
         ecoregion_name (str): Human-readable ecoregion figure label.
         output_path (pathlib.Path): Destination path for the PNG figure.
@@ -867,7 +580,7 @@ def create_residual_summary_figure(
             valid = scored_table["reference_site"].eq(1) & np.isfinite(
                 scored_table[standardized_column]
             )
-            quantiles = weighted_quantiles(
+            quantiles = habitat_training.weighted_quantiles(
                 scored_table.loc[valid, standardized_column].to_numpy(dtype=np.float64),
                 scored_table.loc[valid, "area_weight_m2"].to_numpy(dtype=np.float64),
                 [0.05, 0.25, 0.50, 0.75, 0.95],
@@ -949,7 +662,7 @@ def calculate_deviation_correlation(
         for second_offset in range(first_offset + 1, len(response_bands)):
             second_band = response_bands[second_offset]
             second_column = _response_output_columns(second_band)[2]
-            value = weighted_correlation(
+            value = habitat_training.weighted_correlation(
                 scored_table[first_column].to_numpy(dtype=np.float64),
                 scored_table[second_column].to_numpy(dtype=np.float64),
                 weights,
@@ -1040,7 +753,7 @@ def create_partial_response_figure(
 
     Args:
         fitted_model (dict[str, object]): Model bundle returned by
-            ``fit_response_gam``.
+            ``build_response_model_artifact``.
         reference_training_table (pandas.DataFrame): Reference rows used to
             establish predictor ranges and represented-area quantiles.
         ecoregion_name (str): Human-readable ecoregion figure label.
@@ -1096,7 +809,7 @@ def create_partial_response_figure(
                 ha="right",
             )
         else:
-            lower, upper = weighted_quantiles(
+            lower, upper = habitat_training.weighted_quantiles(
                 reference_training_table[predictor_name].to_numpy(dtype=np.float64),
                 reference_training_table["area_weight_m2"].to_numpy(dtype=np.float64),
                 [0.05, 0.95],
@@ -1314,7 +1027,7 @@ def write_model_selection_report(
 def run_integrity_parameter_gams(
     sample_path: Path,
     output_directory: Path,
-    configuration: IntegrityConfiguration,
+    configuration: habitat_training.IntegrityConfiguration,
     analysis_configuration: AnalysisConfiguration,
     requested_responses: Sequence[str] | None = None,
     show_progress: bool = True,
@@ -1327,7 +1040,7 @@ def run_integrity_parameter_gams(
             ecoregion GeoTIFF loader.
         output_directory (pathlib.Path): Directory for predictions, metrics,
             models, reports, and figures.
-        configuration (IntegrityConfiguration): Predictor screening, spatial
+        configuration (habitat_training.IntegrityConfiguration): Predictor screening, spatial
             validation, response screening, spline, and ridge settings.
         analysis_configuration (AnalysisConfiguration): Configured response and
             predictor roles and display metadata.
@@ -1436,123 +1149,29 @@ def run_integrity_parameter_gams(
     for response_name in fitted_response_names:
         response_definition = analysis_configuration.band_for_column(response_name)
         response_band = response_definition.identifier
-        finite_response_row_mask = np.isfinite(
-            pd.to_numeric(
-                prepared_reference_data.table[response_name],
-                errors="coerce",
-            )
+        validated_response = habitat_training.fit_response_with_spatial_validation(
+            prepared_reference_data,
+            response_name,
+            configuration,
+            on_fold_complete=fit_progress.update,
         )
-        out_of_fold_expected_values = np.full(
-            len(prepared_reference_data.table),
-            np.nan,
-            dtype=np.float64,
+        fold_metric_records.extend(
+            {
+                "response": response_name,
+                "response_band": response_band,
+                "display_name": response_definition.display_name,
+                **record,
+            }
+            for record in validated_response.fold_metrics.to_dict("records")
         )
-        for spatial_fold in range(1, configuration.fold_count + 1):
-            training_row_mask = (
-                usable_row_mask
-                & reference_row_mask
-                & finite_response_row_mask
-                & prepared_reference_data.table["spatial_fold"].ne(spatial_fold)
-            )
-            validation_reference_row_mask = (
-                usable_row_mask
-                & reference_row_mask
-                & finite_response_row_mask
-                & prepared_reference_data.table["spatial_fold"].eq(spatial_fold)
-            )
-            assessment_row_mask = usable_row_mask & prepared_reference_data.table[
-                "spatial_fold"
-            ].eq(
-                spatial_fold,
-            )
-            training_table = prepared_reference_data.table.loc[training_row_mask]
-            imputation_values = calculate_imputation_values(
-                training_table,
-                prepared_reference_data.continuous_predictor_names,
-                prepared_reference_data.categorical_predictor_name,
-            )
-            fitted_model = fit_response_gam(
-                training_table,
-                response_name,
-                prepared_reference_data.continuous_predictor_names,
-                prepared_reference_data.categorical_predictor_name,
-                imputation_values,
-                configuration,
-                analysis_configuration,
-            )
-            fold_expected_values = habitat_condition.predict_expected_response(
-                fitted_model,
-                prepared_reference_data.table.loc[assessment_row_mask],
-            )
-            out_of_fold_expected_values[assessment_row_mask.to_numpy()] = (
-                fold_expected_values
-            )
-            validation_table = prepared_reference_data.table.loc[
-                validation_reference_row_mask
-            ]
-            validation_expected_values = out_of_fold_expected_values[
-                validation_reference_row_mask.to_numpy()
-            ]
-            fold_metrics = calculate_regression_metrics(
-                validation_table[response_name].to_numpy(dtype=np.float64),
-                validation_expected_values,
-                validation_table["area_weight_m2"].to_numpy(dtype=np.float64),
-            )
-            fold_metric_records.append(
-                {
-                    "response": response_name,
-                    "response_band": response_band,
-                    "display_name": response_definition.display_name,
-                    "spatial_fold": spatial_fold,
-                    "training_reference_rows": int(
-                        np.count_nonzero(training_row_mask)
-                    ),
-                    "validation_reference_rows": int(
-                        np.count_nonzero(validation_reference_row_mask)
-                    ),
-                    "validation_reference_area_m2": float(
-                        validation_table["area_weight_m2"].sum()
-                    ),
-                    **fold_metrics,
-                }
-            )
-            fit_progress.update()
-
         expected_column, deviation_column, standardized_column = (
             _response_output_columns(response_band)
         )
-        scored_table[expected_column] = out_of_fold_expected_values
-        observed_values = pd.to_numeric(
-            scored_table[response_name],
-            errors="coerce",
-        ).to_numpy(
-            dtype=np.float64,
-        )
-        observed_minus_expected_values = (
-            observed_values - out_of_fold_expected_values
-        )
-        scored_table[deviation_column] = observed_minus_expected_values
-        reference_validation_row_mask = (
-            usable_row_mask.to_numpy()
-            & reference_row_mask.to_numpy()
-            & np.isfinite(observed_values)
-        )
-        overall_metrics = calculate_regression_metrics(
-            observed_values[reference_validation_row_mask],
-            out_of_fold_expected_values[reference_validation_row_mask],
-            scored_table.loc[
-                reference_validation_row_mask,
-                "area_weight_m2",
-            ].to_numpy(
-                dtype=np.float64,
-            ),
-        )
+        scored_table[expected_column] = validated_response.out_of_fold_expected
+        scored_table[deviation_column] = validated_response.observed_minus_expected
+        scored_table[standardized_column] = validated_response.standardized_departure
+        overall_metrics = validated_response.overall_metrics
         out_of_fold_reference_rmse = overall_metrics["weighted_rmse"]
-        scored_table[standardized_column] = (
-            observed_minus_expected_values / out_of_fold_reference_rmse
-            if out_of_fold_reference_rmse > 0
-            else np.nan
-        )
 
         response_fold_metrics = pd.DataFrame.from_records(fold_metric_records)
         response_fold_metrics = response_fold_metrics.loc[
@@ -1566,21 +1185,16 @@ def run_integrity_parameter_gams(
             "response_band": response_band,
             "display_name": response_definition.display_name,
             "reference_area_coverage": float(coverage_row["reference_area_coverage"]),
-            "validation_reference_rows": int(
-                np.count_nonzero(reference_validation_row_mask)
-            ),
+            "validation_reference_rows": len(validated_response.training_table),
             "validation_reference_area_m2": float(
-                scored_table.loc[
-                    reference_validation_row_mask,
-                    "area_weight_m2",
-                ].sum()
+                validated_response.training_table["area_weight_m2"].sum()
             ),
             "reference_residual_rmse_oof": out_of_fold_reference_rmse,
         }
         metric_record.update(
             {f"overall_{name}": value for name, value in overall_metrics.items()}
         )
-        for metric_name in REGRESSION_METRIC_NAMES:
+        for metric_name in habitat_training.REGRESSION_METRIC_NAMES:
             fold_values = response_fold_metrics[metric_name]
             metric_record.update(
                 {
@@ -1594,24 +1208,10 @@ def run_integrity_parameter_gams(
             )
         response_metric_records.append(metric_record)
 
-        final_training_row_mask = (
-            usable_row_mask & reference_row_mask & finite_response_row_mask
-        )
-        final_training_table = prepared_reference_data.table.loc[
-            final_training_row_mask
-        ]
-        final_imputation_values = calculate_imputation_values(
-            final_training_table,
-            prepared_reference_data.continuous_predictor_names,
-            prepared_reference_data.categorical_predictor_name,
-        )
-        final_model = fit_response_gam(
-            final_training_table,
+        final_training_table = validated_response.training_table
+        final_model = build_response_model_artifact(
+            validated_response.model,
             response_name,
-            prepared_reference_data.continuous_predictor_names,
-            prepared_reference_data.categorical_predictor_name,
-            final_imputation_values,
-            configuration,
             analysis_configuration,
         )
         final_model["reference_residual_rmse_oof"] = out_of_fold_reference_rmse
@@ -1849,7 +1449,7 @@ def main() -> None:
     analysis_configuration = load_analysis_configuration(
         args.analysis_configuration
     )
-    integrity_configuration = IntegrityConfiguration(
+    integrity_configuration = habitat_training.IntegrityConfiguration(
         fold_count=analysis_configuration.model.fold_count,
         sampling_block_size_meters=(
             analysis_configuration.sampling.block_size_meters

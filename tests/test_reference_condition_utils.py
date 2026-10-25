@@ -9,14 +9,16 @@ import numpy as np
 import pandas as pd
 
 from scripts.analysis_config import load_analysis_configuration
-from scripts.reference_condition_utils import (
+from scripts.habitat_training import (
     ReferenceConditionConfiguration,
-    _equal_area_sample_coordinates,
     assign_spatial_folds,
     calculate_imputation_values,
+    weighted_quantiles,
+)
+from scripts.reference_condition_utils import (
+    _equal_area_sample_coordinates,
     infer_ecoregion_name,
     prepare_reference_condition_data,
-    weighted_quantiles,
 )
 
 
