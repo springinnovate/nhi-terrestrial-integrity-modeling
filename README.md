@@ -2,6 +2,37 @@
 
 First-pass local analysis scripts for raster stacks exported from Google Earth Engine.
 
+## Install the Habitat condition library
+
+The callable runner requires Python 3.11 or newer. Install it from a checkout:
+
+```shell
+python -m pip install .
+```
+
+For a pinned application dependency, put this in its requirements file, replacing
+`<full-commit-sha>` with the chosen Git commit:
+
+```text
+nhi-terrestrial-integrity-modeling @ git+https://github.com/springinnovate/nhi-terrestrial-integrity-modeling.git@<full-commit-sha>
+```
+
+```python
+from nhi_terrestrial_integrity_modeling.prepared_runner import run_habitat_condition
+from nhi_terrestrial_integrity_modeling.prepared_rasters import RasterBand
+from nhi_terrestrial_integrity_modeling.habitat_training import IntegrityConfiguration
+```
+
+The [runner's callable contract](scripts/prepared_runner.py) describes its named
+raster bands, aligned EPSG:6933 inputs, AOI, preset settings and result files.
+The installed library includes only the callable model code and its scientific
+and raster dependencies. The CLI workflows below run from this checkout with
+`python -m pip install -r requirements.txt`.
+
+The packaging test also needs the build dependencies declared in
+[pyproject.toml](pyproject.toml) installed in the test environment. Run the tests
+with `python -m unittest discover -s tests`.
+
 ## Cache Earth Engine raster tiles for an AOI
 
 Fetch an analysis-defined raster stack directly from Earth Engine without retaining a
