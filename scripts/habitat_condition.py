@@ -12,6 +12,13 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer
 
 
+FLOAT_NODATA = -9999.0
+STATUS_NODATA = 255
+STATUS_OUTSIDE_TARGET = 0
+STATUS_INSUFFICIENT_PREDICTORS = 1
+STATUS_PREDICTED = 2
+
+
 class FittedResponseModel(TypedDict):
     """Predictor definitions and fitted estimators needed to predict one response.
 
@@ -322,4 +329,214 @@ def fit_reference_departure_distribution(
         stabilized_covariance_condition_number=float(
             np.linalg.cond(stabilized_reference_covariance_matrix)
         ),
+    )
+
+
+@dataclass(frozen=True)
+class RasterWindowPrediction:
+    """Expected responses, departures and pixel status for one raster window.
+
+    Attributes:
+        expected_reference: Float32 expected values, ordered as the response
+            models, with shape (responses, rows, columns).
+        observed_minus_expected: Float32 observed-minus-expected values in the
+            same order and shape. Missing observations remain FLOAT_NODATA.
+        standardized_deviation: Float32 departures divided by each response's
+            cross-validated reference RMSE, with the same order and shape.
+        departure_percentile: Float32 (rows, columns) departure-distance
+            percentiles against the reference distribution; higher means farther
+            from reference conditions. Reference pixels and incomplete response
+            vectors remain FLOAT_NODATA.
+        inference_status: Uint8 (2, rows, columns) array: prediction status, then
+            missing-predictor count. Status is STATUS_NODATA outside the AOI,
+            STATUS_OUTSIDE_TARGET outside assessment, STATUS_INSUFFICIENT_PREDICTORS
+            when missingness exceeds the allowed fraction, or STATUS_PREDICTED.
+            Missing counts are STATUS_NODATA outside assessment. All other
+            uncalculated float outputs use FLOAT_NODATA.
+    """
+
+    expected_reference: np.ndarray
+    observed_minus_expected: np.ndarray
+    standardized_deviation: np.ndarray
+    departure_percentile: np.ndarray
+    inference_status: np.ndarray
+
+
+def predict_raster_window(
+    predictor_values: np.ndarray,
+    observed_responses: np.ndarray,
+    *,
+    predictor_names: tuple[str, ...],
+    response_names: tuple[str, ...],
+    response_models: tuple[FittedResponseModel, ...],
+    reference_rmses: tuple[float, ...],
+    reference_distribution: ReferenceDepartureDistribution,
+    aoi_pixel_mask: np.ndarray,
+    reference_pixel_mask: np.ndarray,
+    assessment_pixel_mask: np.ndarray | None,
+    maximum_predictor_missing_fraction: float,
+) -> RasterWindowPrediction:
+    """Predict reference conditions and score observed departures in one window.
+
+    Use this after reading aligned inputs and preparing their boolean masks.
+    Without an assessment mask, the target is AOI pixels with at least one valid
+    predictor. Otherwise, the target is the AOI intersected with that mask.
+    Allowed missing predictors are imputed by each fitted response model.
+    Predictions require no observed response; departures require that response,
+    and percentiles require all responses and exclude reference pixels.
+
+    Args:
+        predictor_values: Float64 (predictors, rows, columns) array containing
+            finite values or NaN for missing data, ordered as predictor_names.
+        observed_responses: Float64 (responses, rows, columns) array containing
+            finite values or NaN for missing data, ordered as response_models.
+        predictor_names: Ordered predictor columns shared by the fitted models.
+        response_names: Response labels in model order, used in prediction errors.
+        response_models: Fitted numerical models, in the same response order as
+            the reference distribution.
+        reference_rmses: Positive, finite cross-validated reference RMSEs in
+            response order, established by the fitting or model-loading caller.
+        reference_distribution: Fitted distance and empirical percentile model.
+        aoi_pixel_mask: Boolean mask selecting the exact analysis area.
+        reference_pixel_mask: Boolean mask identifying valid reference pixels
+            inside that area. Their combined percentiles are left as NoData.
+        assessment_pixel_mask: Optional boolean mask selecting assessment pixels.
+            All input arrays and masks share the caller's window shape.
+        maximum_predictor_missing_fraction: Training limit on the fraction of
+            missing predictors allowed for prediction.
+
+    Returns:
+        Expected responses, departures, reference percentiles and status arrays.
+        Expected values are rounded to float32 before subtraction; standardized
+        departures are rounded to float32 before distance calculation.
+
+    Raises:
+        RuntimeError: If a fitted model produces a nonfinite prediction.
+    """
+
+    predictor_count = len(predictor_names)
+    window_shape = aoi_pixel_mask.shape
+    predictor_value_validity = ~np.isnan(predictor_values)
+    response_value_validity = ~np.isnan(observed_responses)
+    missing_predictor_counts = np.count_nonzero(
+        ~predictor_value_validity,
+        axis=0,
+    ).astype(np.uint8)
+    if assessment_pixel_mask is None:
+        target_pixel_mask = aoi_pixel_mask & np.any(
+            predictor_value_validity,
+            axis=0,
+        )
+    else:
+        target_pixel_mask = aoi_pixel_mask & assessment_pixel_mask
+    usable_pixel_mask = target_pixel_mask & (
+        missing_predictor_counts / predictor_count
+        <= maximum_predictor_missing_fraction
+    )
+    complete_response_pixel_mask = usable_pixel_mask & np.all(
+        response_value_validity,
+        axis=0,
+    )
+
+    expected_output = np.full(
+        (len(response_models), *window_shape),
+        FLOAT_NODATA,
+        dtype=np.float32,
+    )
+    deviation_output = np.full_like(expected_output, FLOAT_NODATA)
+    standardized_output = np.full_like(expected_output, FLOAT_NODATA)
+    percentile_output = np.full(
+        window_shape,
+        FLOAT_NODATA,
+        dtype=np.float32,
+    )
+    status_output = np.full(
+        window_shape,
+        STATUS_NODATA,
+        dtype=np.uint8,
+    )
+    status_output[aoi_pixel_mask] = STATUS_OUTSIDE_TARGET
+    status_output[target_pixel_mask] = STATUS_INSUFFICIENT_PREDICTORS
+    status_output[usable_pixel_mask] = STATUS_PREDICTED
+    imputation_output = np.full(
+        window_shape,
+        STATUS_NODATA,
+        dtype=np.uint8,
+    )
+    imputation_output[target_pixel_mask] = missing_predictor_counts[
+        target_pixel_mask
+    ]
+
+    usable_pixel_mask_flat = usable_pixel_mask.ravel()
+    if np.any(usable_pixel_mask_flat):
+        predictor_table = pd.DataFrame(
+            predictor_values.reshape(predictor_count, -1).T[
+                usable_pixel_mask_flat
+            ],
+            columns=predictor_names,
+        )
+        for response_model_offset, response_model in enumerate(
+            response_models
+        ):
+            expected_reference_values = (
+                predict_expected_response(
+                    response_model,
+                    predictor_table,
+                )
+            )
+            if not np.isfinite(expected_reference_values).all():
+                raise RuntimeError(
+                    f"{response_names[response_model_offset]} produced a "
+                    "nonfinite prediction."
+                )
+            expected_output_flat = expected_output[
+                response_model_offset
+            ].ravel()
+            expected_output_flat[usable_pixel_mask_flat] = (
+                expected_reference_values.astype(np.float32)
+            )
+            observed_values = observed_responses[response_model_offset].ravel()
+            deviation_pixel_mask = (
+                usable_pixel_mask_flat
+                & response_value_validity[response_model_offset].ravel()
+            )
+            deviation_values = (
+                observed_values[deviation_pixel_mask]
+                - expected_output_flat[deviation_pixel_mask]
+            )
+            standardized_values = (
+                deviation_values / reference_rmses[response_model_offset]
+            )
+            deviation_output[response_model_offset].ravel()[
+                deviation_pixel_mask
+            ] = deviation_values.astype(np.float32)
+            standardized_output[response_model_offset].ravel()[
+                deviation_pixel_mask
+            ] = standardized_values.astype(np.float32)
+
+    complete_non_reference_pixel_mask = (
+        complete_response_pixel_mask & ~reference_pixel_mask
+    )
+    standardized_departure_vectors = standardized_output[
+        :, complete_non_reference_pixel_mask
+    ].T.astype(np.float64)
+    mahalanobis_distances = (
+        reference_distribution.calculate_mahalanobis_distances(
+            standardized_departure_vectors
+        )
+    )
+    departure_percentiles = (
+        reference_distribution.calculate_reference_departure_percentiles(
+            mahalanobis_distances
+        )
+    )
+    percentile_output[complete_non_reference_pixel_mask] = (
+        departure_percentiles.astype(np.float32)
+    )
+    return RasterWindowPrediction(
+        expected_reference=expected_output,
+        observed_minus_expected=deviation_output,
+        standardized_deviation=standardized_output,
+        departure_percentile=percentile_output,
+        inference_status=np.stack([status_output, imputation_output]),
     )

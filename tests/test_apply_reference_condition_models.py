@@ -25,14 +25,10 @@ from rasterio.warp import transform_bounds
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
+from scripts import habitat_condition
 from scripts.apply_reference_condition_models import (
-    FLOAT_NODATA,
     INFERENCE_WRITE_BATCH_SIZE,
     MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE,
-    STATUS_INSUFFICIENT_PREDICTORS,
-    STATUS_NODATA,
-    STATUS_OUTSIDE_TARGET,
-    STATUS_PREDICTED,
     build_reference_departure_calibration,
     iter_calculated_inference_tiles,
     load_response_models,
@@ -280,12 +276,12 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         source_values = np.concatenate(
             [response_values, predictor_values, reference_values]
         )
-        source_values[0, 0, 2] = FLOAT_NODATA
-        source_values[3, 0, 1] = FLOAT_NODATA
-        source_values[3:7, 0, 0] = FLOAT_NODATA
+        source_values[0, 0, 2] = habitat_condition.FLOAT_NODATA
+        source_values[3, 0, 1] = habitat_condition.FLOAT_NODATA
+        source_values[3:7, 0, 0] = habitat_condition.FLOAT_NODATA
         source_values[2, 0, 0] = predictor_values[0, 0, 0]
 
-        source_values[source_values == FLOAT_NODATA] = np.nan
+        source_values[source_values == habitat_condition.FLOAT_NODATA] = np.nan
         return source_values
 
     def _create_tile_bytes(
@@ -526,9 +522,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         self.assertTrue(bool(percentiles.mask[2, 2]))
         self.assertTrue(bool(percentiles.mask[0, 2]))
 
-        self.assertEqual(STATUS_INSUFFICIENT_PREDICTORS, status[0, 0, 0])
+        self.assertEqual(
+            habitat_condition.STATUS_INSUFFICIENT_PREDICTORS, status[0, 0, 0]
+        )
         self.assertEqual(4, status[1, 0, 0])
-        self.assertEqual(STATUS_PREDICTED, status[0, 0, 1])
+        self.assertEqual(habitat_condition.STATUS_PREDICTED, status[0, 0, 1])
         self.assertEqual(1, status[1, 0, 1])
         self.assertFalse(bool(expected.mask[0, 0, 2]))
         self.assertTrue(bool(deviations.mask[0, 0, 2]))
@@ -947,11 +945,11 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
             percentiles = percentile_source.read(1, masked=True)
         self.assertTrue(bool(expected.mask[0, 2, 3]))
         self.assertTrue(bool(percentiles.mask[2, 3]))
-        self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 2, 3])
-        self.assertEqual(STATUS_NODATA, status[1, 2, 3])
+        self.assertEqual(habitat_condition.STATUS_OUTSIDE_TARGET, status[0, 2, 3])
+        self.assertEqual(habitat_condition.STATUS_NODATA, status[1, 2, 3])
         self.assertTrue(bool(expected.mask[0, 3, 4]))
         self.assertTrue(bool(percentiles.mask[3, 4]))
-        self.assertEqual(STATUS_OUTSIDE_TARGET, status[0, 3, 4])
+        self.assertEqual(habitat_condition.STATUS_OUTSIDE_TARGET, status[0, 3, 4])
         self.assertEqual(
             "Synthetic habitat extent",
             expected_tags["application_mask_label"],
