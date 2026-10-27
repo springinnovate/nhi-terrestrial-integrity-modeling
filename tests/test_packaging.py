@@ -18,10 +18,11 @@ class PackagingTests(unittest.TestCase):
     """Check source archives, wheel contents and a real installed calculation."""
 
     def test_installed_source_archive_runs_without_the_checkout(self) -> None:
-        """Install a wheel rebuilt from the source archive and calculate a map."""
+        """Load scientific settings and calculate a map from a rebuilt, installed wheel."""
         repository = Path(__file__).resolve().parents[1]
         package = "nhi_terrestrial_integrity_modeling"
         modules = {
+            "analysis_config", "earth_engine_stack",
             "habitat_condition", "habitat_training", "prepared_rasters",
             "prepared_runner", "prepared_sampling", "spatial_sampling",
         }
@@ -43,6 +44,9 @@ class PackagingTests(unittest.TestCase):
             workspace = Path(temporary)
             source = workspace / "source"
             (source / "scripts").mkdir(parents=True)
+            (source / "config").mkdir()
+            for name in ("__init__.py", "south_africa_reference_condition_analysis.toml"):
+                shutil.copyfile(repository / "config" / name, source / "config" / name)
             for name in ("pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"):
                 shutil.copyfile(repository / name, source / name)
             for path in (repository / "scripts").glob("*.py"):
@@ -61,9 +65,11 @@ class PackagingTests(unittest.TestCase):
                 names = {name.partition("/")[2] for name in built.getnames()}
                 self.assertEqual(
                     {name for name in names if name.endswith(".py")},
-                    {f"scripts/{name}.py" for name in modules | {"__init__"}},
+                    {f"scripts/{name}.py" for name in modules | {"__init__"}}
+                    | {"config/__init__.py"},
                 )
-                self.assertFalse(any(name.endswith((".tif", ".sqlite")) for name in names))
+                self.assertIn("config/south_africa_reference_condition_analysis.toml", names)
+                self.assertFalse(any(name.endswith((".tif", ".sqlite", ".geojson")) for name in names))
             rebuilt = workspace / "rebuilt"
             run_python([
                 "-m", "pip", "wheel", "--no-cache-dir", "--no-index",
@@ -77,15 +83,21 @@ class PackagingTests(unittest.TestCase):
                     names = built.namelist()
                     self.assertEqual(
                         {name for name in names if name.endswith(".py")},
-                        {f"{package}/{name}.py" for name in modules | {"__init__"}},
+                        {f"{package}/{name}.py" for name in modules | {"__init__"}}
+                        | {f"{package}/config/__init__.py"},
                     )
-                    self.assertFalse(any(name.endswith((".tif", ".sqlite")) for name in names))
+                    self.assertIn(f"{package}/config/south_africa_reference_condition_analysis.toml", names)
+                    self.assertFalse(any(name.endswith((".tif", ".sqlite", ".geojson")) for name in names))
                     metadata_path, = [name for name in names if name.endswith("/METADATA")]
                     metadata = Parser().parsestr(built.read(metadata_path).decode())
                     self.assertEqual(
                         {re.split(r"[<>=!~; ]", requirement)[0]
                          for requirement in metadata.get_all("Requires-Dist", [])},
-                        {"numpy", "pandas", "pyproj", "rasterio", "scikit-learn", "shapely"},
+                        {"numpy", "pandas", "pyproj", "rasterio", "scikit-learn", "shapely", "earthengine-api"},
+                    )
+                    self.assertIn(
+                        'earthengine-api<2,>=1.7; extra == "earth-engine"',
+                        metadata.get_all("Requires-Dist", []),
                     )
             target = workspace / "installed"
             run_python([
@@ -95,6 +107,7 @@ class PackagingTests(unittest.TestCase):
             ], workspace)
             smoke = workspace / "smoke.py"
             smoke.write_text('''from pathlib import Path
+from importlib.resources import as_file, files
 import sys
 target = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(target))
@@ -105,6 +118,16 @@ from shapely.geometry import box
 from nhi_terrestrial_integrity_modeling.habitat_training import IntegrityConfiguration
 from nhi_terrestrial_integrity_modeling.prepared_rasters import RasterBand
 from nhi_terrestrial_integrity_modeling.prepared_runner import run_habitat_condition
+from nhi_terrestrial_integrity_modeling.analysis_config import load_raster_stack_configuration
+from nhi_terrestrial_integrity_modeling.earth_engine_stack import build_earth_engine_stack
+resource = files('nhi_terrestrial_integrity_modeling.config').joinpath(
+    'south_africa_reference_condition_analysis.toml')
+with as_file(resource) as configuration_path:
+    stack = load_raster_stack_configuration(configuration_path, year=2018)
+assert len(stack.bands) == 39 and stack.year == 2018
+assert not hasattr(stack, 'aoi_path') and not hasattr(stack, 'earth_engine')
+assert not any(name.endswith(('fetch_gee_raster_tiles', 'raster_cache_utils')) for name in sys.modules)
+assert callable(build_earth_engine_stack)
 rows, columns = np.indices((16, 24))
 x, category, reference = rows * .3 + columns * .07, (rows + columns) % 3, rows < 6
 response = 1 + .3*x + .1*category + .04*np.sin(rows + columns) + .2*(columns % 3)*~reference

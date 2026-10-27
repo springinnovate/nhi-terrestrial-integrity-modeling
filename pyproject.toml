@@ -19,13 +19,18 @@ dependencies = [
     "shapely>=2.0",
 ]
 
+[project.optional-dependencies]
+earth-engine = ["earthengine-api>=1.7,<2"]
+
 [project.urls]
 Repository = "https://github.com/springinnovate/nhi-terrestrial-integrity-modeling"
 
 [tool.setuptools]
-packages = []
+packages = ["nhi_terrestrial_integrity_modeling.config"]
 include-package-data = false
 py-modules = [
+    "nhi_terrestrial_integrity_modeling.analysis_config",
+    "nhi_terrestrial_integrity_modeling.earth_engine_stack",
     "nhi_terrestrial_integrity_modeling.habitat_condition",
     "nhi_terrestrial_integrity_modeling.habitat_training",
     "nhi_terrestrial_integrity_modeling.prepared_rasters",
@@ -36,3 +41,7 @@ py-modules = [
 
 [tool.setuptools.package-dir]
 nhi_terrestrial_integrity_modeling = "scripts"
+"nhi_terrestrial_integrity_modeling.config" = "config"
+
+[tool.setuptools.package-data]
+"nhi_terrestrial_integrity_modeling.config" = ["south_africa_reference_condition_analysis.toml"]

@@ -37,7 +37,7 @@
 # The ordered [[bands]] tables below are the authoritative schema for that image.
 # They define which data layers are included, their order and names, their analysis
 # roles, and the Earth Engine sources they require. The computation key selects an
-# implementation in fetch_gee_raster_tiles.py, so calculations remain Python code
+# implementation in earth_engine_stack.py, so calculations remain Python code
 # while this TOML controls which calculations make up this analysis's stack.
 # Earth Engine evaluates every configured layer on the common output [grid], which
 # gives every band the same CRS, pixel size, tile dimensions, and alignment.
