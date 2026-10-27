@@ -9,7 +9,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 DEFAULT_ANALYSIS_CONFIG_PATH = (
@@ -156,18 +156,15 @@ class InferenceSettings:
 
 
 @dataclass(frozen=True)
-class AnalysisConfiguration:
-    """Represent one complete, validated reference-condition analysis.
+class RasterStackConfiguration:
+    """Define the scientific variables and grid of an Earth Engine raster stack.
+
+    This configuration contains no local AOI, credentials, cache paths or model
+    execution settings. Use it to construct the same stack for different areas.
 
     Attributes:
-        path: Resolved TOML source path.
-        configuration_sha256: Hash of normalized effective TOML content.
         raster_configuration_sha256: Hash of settings affecting fetched pixels.
-        analysis_name: File-safe analysis identifier.
-        display_name: Human-readable AOI or ecoregion name.
-        aoi_path: Resolved local single-layer GDAL-compatible vector AOI.
-        year: Source-data year used throughout the analysis.
-        earth_engine: Earth Engine project and local cache settings.
+        year: Source-data year used to construct the raster bands.
         stack_name: File-safe raster-stack name.
         stack_version: Explicit stack-definition version.
         minimum_year: First supported complete-stack year.
@@ -179,21 +176,12 @@ class AnalysisConfiguration:
         stream_upstream_area_threshold_km2: Stream extraction threshold.
         grid: Deterministic raster cache grid.
         reference: Reference-site thresholds.
-        sampling: Spatial sample construction settings.
-        model: Response-model fitting and validation settings.
-        inference: Raster-inference settings.
         datasets: Earth Engine dataset IDs keyed by stable aliases.
         bands: Ordered raster bands included in this stack.
     """
 
-    path: Path
-    configuration_sha256: str
     raster_configuration_sha256: str
-    analysis_name: str
-    display_name: str
-    aoi_path: Path
     year: int
-    earth_engine: EarthEngineSettings
     stack_name: str
     stack_version: int
     minimum_year: int
@@ -205,9 +193,6 @@ class AnalysisConfiguration:
     stream_upstream_area_threshold_km2: float
     grid: RasterCacheGrid
     reference: ReferenceSettings
-    sampling: SamplingSettings
-    model: ModelSettings
-    inference: InferenceSettings
     datasets: Mapping[str, str]
     bands: tuple[RasterBandDefinition, ...]
 
@@ -226,6 +211,37 @@ class AnalysisConfiguration:
         return tuple(
             f"y{band_year}_{band.identifier}_{band.suffix}" for band in self.bands
         )
+
+
+@dataclass(frozen=True)
+class AnalysisConfiguration(RasterStackConfiguration):
+    """Define a raster stack and the local analysis that uses it.
+
+    Inherited fields describe the scientific raster stack. These additional
+    settings identify local inputs and configure acquisition, sampling, fitting
+    and inference for the command-line workflow.
+
+    Attributes:
+        path: Resolved TOML source path.
+        configuration_sha256: Hash of normalized effective TOML content.
+        analysis_name: File-safe analysis identifier.
+        display_name: Human-readable AOI or ecoregion name.
+        aoi_path: Resolved local single-layer GDAL-compatible vector AOI.
+        earth_engine: Earth Engine project and local cache settings.
+        sampling: Spatial sample construction settings.
+        model: Response-model fitting and validation settings.
+        inference: Raster-inference settings.
+    """
+
+    path: Path
+    configuration_sha256: str
+    analysis_name: str
+    display_name: str
+    aoi_path: Path
+    earth_engine: EarthEngineSettings
+    sampling: SamplingSettings
+    model: ModelSettings
+    inference: InferenceSettings
 
     def columns_with_role(
         self,
@@ -298,37 +314,30 @@ class AnalysisConfiguration:
         )
 
 
-def load_analysis_configuration(
-    configuration_path: Path = DEFAULT_ANALYSIS_CONFIG_PATH,
-) -> AnalysisConfiguration:
-    """Load and validate one TOML analysis definition.
+def _parse_raster_stack_configuration(
+    raw_configuration: Mapping[str, Any], *, year: int | None
+) -> RasterStackConfiguration:
+    """Read the scientific sections of a parsed TOML analysis definition.
 
-    Local paths are resolved relative to the TOML file. The analysis definition
-    is the authoritative source for scientific settings used by every pipeline
-    stage.
+    Both configuration loaders use this parser so stack validation and cache
+    identity are independent of local analysis settings.
 
     Args:
-        configuration_path: Complete TOML analysis definition.
+        raw_configuration: Parsed TOML containing stack, grid, reference,
+            datasets and bands, plus analysis.year when no year is supplied.
+        year: Source-data year, or None to read analysis.year from the TOML.
 
     Returns:
-        Immutable typed configuration with a normalized content hash.
+        Validated scientific settings and a checksum of the settings that
+        determine downloaded pixels.
 
     Raises:
-        ValueError: If the analysis contract is internally inconsistent.
+        KeyError: If a required scientific setting is absent.
+        ValueError: If a scientific setting is invalid or the year is unsupported.
     """
-
-    resolved_configuration_path = configuration_path.expanduser().resolve()
-    with resolved_configuration_path.open("rb") as configuration_file:
-        raw_configuration = tomllib.load(configuration_file)
-
-    analysis_section = raw_configuration["analysis"]
-    earth_engine_section = raw_configuration["earth_engine"]
     stack_section = raw_configuration["stack"]
     grid_section = raw_configuration["grid"]
     reference_section = raw_configuration["reference"]
-    sampling_section = raw_configuration["sampling"]
-    model_section = raw_configuration["model"]
-    inference_section = raw_configuration["inference"]
     dataset_ids = {
         str(key): str(value) for key, value in raw_configuration["datasets"].items()
     }
@@ -346,13 +355,7 @@ def load_analysis_configuration(
         )
         for raw_band_definition in raw_configuration["bands"]
     )
-    analysis_name = str(analysis_section["name"])
     stack_name = str(stack_section["name"])
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", analysis_name):
-        raise ValueError(
-            "Analysis names must contain lowercase letters, numbers, hyphens, "
-            "or underscores."
-        )
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", stack_name):
         raise ValueError(
             "Raster-stack names must contain lowercase letters, numbers, hyphens, "
@@ -360,7 +363,9 @@ def load_analysis_configuration(
         )
     minimum_year = int(stack_section["minimum_year"])
     maximum_year = int(stack_section["maximum_year"])
-    analysis_year = int(analysis_section["year"])
+    analysis_year = int(
+        raw_configuration["analysis"]["year"] if year is None else year
+    )
     if minimum_year > maximum_year:
         raise ValueError("Raster-stack minimum_year cannot exceed maximum_year.")
     if not minimum_year <= analysis_year <= maximum_year:
@@ -372,29 +377,6 @@ def load_analysis_configuration(
         or int(grid_section["tile_size_pixels"]) <= 0
     ):
         raise ValueError("Raster cache pixel and tile sizes must be positive.")
-    if float(earth_engine_section["request_timeout_seconds"]) <= 0:
-        raise ValueError("Earth Engine request_timeout_seconds must be positive.")
-    if not 0 <= int(earth_engine_section["request_retry_count"]) < 100:
-        raise ValueError("Earth Engine request_retry_count must be between 0 and 99.")
-    if (
-        int(sampling_section["block_size_meters"]) <= 0
-        or int(sampling_section["samples_per_class_per_block"]) <= 0
-        or int(model_section["fold_count"]) < 2
-        or int(model_section["validation_block_size_meters"]) <= 0
-        or int(model_section["spline_knot_count"]) < 2
-        or float(model_section["ridge_alpha"]) < 0
-        or int(inference_section["worker_count"]) <= 0
-        or int(inference_section["window_size_pixels"]) <= 0
-    ):
-        raise ValueError("Analysis size, count, and penalty settings are invalid.")
-    bounded_fraction_values = (
-        float(model_section["minimum_predictor_coverage"]),
-        float(model_section["maximum_row_missing_fraction"]),
-        float(model_section["minimum_response_coverage"]),
-        float(inference_section["covariance_shrinkage"]),
-    )
-    if any(not 0.0 < value < 1.0 for value in bounded_fraction_values):
-        raise ValueError("Analysis coverage, missingness, and shrinkage must be 0-1.")
     band_identifiers = [band.identifier for band in band_definitions]
     if len(band_identifiers) != len(set(band_identifiers)):
         raise ValueError("Raster-stack band identifiers must be unique.")
@@ -434,8 +416,147 @@ def load_analysis_configuration(
         raise ValueError(
             "Reference-condition modeling requires exactly one categorical predictor."
         )
+    raster_configuration_bytes = json.dumps(
+        {
+            "year": analysis_year,
+            "stack": stack_section,
+            "grid": grid_section,
+            "reference": reference_section,
+            "datasets": dataset_ids,
+            "bands": raw_configuration["bands"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return RasterStackConfiguration(
+        raster_configuration_sha256=hashlib.sha256(
+            raster_configuration_bytes
+        ).hexdigest(),
+        year=analysis_year,
+        stack_name=stack_name,
+        stack_version=int(stack_section["version"]),
+        minimum_year=minimum_year,
+        maximum_year=maximum_year,
+        reference_start_year=int(stack_section["reference_start_year"]),
+        reference_end_year=int(stack_section["reference_end_year"]),
+        era5_start_year=int(stack_section["era5_start_year"]),
+        interannual_rainfall_window_years=int(
+            stack_section["interannual_rainfall_window_years"]
+        ),
+        stream_upstream_area_threshold_km2=float(
+            stack_section["stream_upstream_area_threshold_km2"]
+        ),
+        grid=RasterCacheGrid(
+            crs=str(grid_section["crs"]),
+            pixel_size_meters=int(grid_section["pixel_size_meters"]),
+            tile_size_pixels=int(grid_section["tile_size_pixels"]),
+            origin_x=int(grid_section["origin_x"]),
+            origin_y=int(grid_section["origin_y"]),
+        ),
+        reference=ReferenceSettings(
+            grassland_probability=int(
+                reference_section["grassland_probability"]
+            ),
+            human_modification=float(reference_section["human_modification"]),
+            human_influence=float(reference_section["human_influence"]),
+        ),
+        datasets=MappingProxyType(dataset_ids),
+        bands=band_definitions,
+    )
+
+
+def load_raster_stack_configuration(
+    configuration_path: Path, *, year: int | None = None
+) -> RasterStackConfiguration:
+    """Load Earth Engine variables and their grid without a local analysis AOI.
+
+    Only scientific settings are interpreted. A complete analysis TOML can be
+    used unchanged, or operational sections can be omitted. No credentials,
+    AOI files or output directories are resolved or accessed.
+
+    Args:
+        configuration_path: TOML containing stack, grid, reference, datasets
+            and ordered bands. analysis.year is required when year is omitted.
+        year: Optional source-data year overriding analysis.year in the file.
+
+    Returns:
+        Validated stack settings and ordered band definitions.
+
+    Raises:
+        OSError: If the configuration file cannot be read.
+        tomllib.TOMLDecodeError: If the file is not valid TOML.
+        KeyError: If a required scientific setting is absent.
+        ValueError: If a scientific setting is invalid or the year is unsupported.
+    """
+    with configuration_path.expanduser().resolve().open("rb") as configuration_file:
+        raw_configuration = tomllib.load(configuration_file)
+    return _parse_raster_stack_configuration(raw_configuration, year=year)
+
+
+def load_analysis_configuration(
+    configuration_path: Path = DEFAULT_ANALYSIS_CONFIG_PATH,
+) -> AnalysisConfiguration:
+    """Load and validate one TOML analysis definition.
+
+    Local paths are resolved relative to the TOML file. The analysis definition
+    is the authoritative source for scientific settings used by every pipeline
+    stage.
+
+    Args:
+        configuration_path: Complete TOML analysis definition.
+
+    Returns:
+        Immutable typed configuration with a normalized content hash.
+
+    Raises:
+        OSError: If the configuration file cannot be read.
+        tomllib.TOMLDecodeError: If the file is not valid TOML.
+        KeyError: If a required analysis setting is absent.
+        ValueError: If the analysis contract is internally inconsistent or the
+            configured AOI file does not exist.
+    """
+
+    resolved_configuration_path = configuration_path.expanduser().resolve()
+    with resolved_configuration_path.open("rb") as configuration_file:
+        raw_configuration = tomllib.load(configuration_file)
+
+    raster_stack = _parse_raster_stack_configuration(raw_configuration, year=None)
+    analysis_section = raw_configuration["analysis"]
+    earth_engine_section = raw_configuration["earth_engine"]
+    sampling_section = raw_configuration["sampling"]
+    model_section = raw_configuration["model"]
+    inference_section = raw_configuration["inference"]
+    analysis_name = str(analysis_section["name"])
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", analysis_name):
+        raise ValueError(
+            "Analysis names must contain lowercase letters, numbers, hyphens, "
+            "or underscores."
+        )
+    if float(earth_engine_section["request_timeout_seconds"]) <= 0:
+        raise ValueError("Earth Engine request_timeout_seconds must be positive.")
+    if not 0 <= int(earth_engine_section["request_retry_count"]) < 100:
+        raise ValueError("Earth Engine request_retry_count must be between 0 and 99.")
+    if (
+        int(sampling_section["block_size_meters"]) <= 0
+        or int(sampling_section["samples_per_class_per_block"]) <= 0
+        or int(model_section["fold_count"]) < 2
+        or int(model_section["validation_block_size_meters"]) <= 0
+        or int(model_section["spline_knot_count"]) < 2
+        or float(model_section["ridge_alpha"]) < 0
+        or int(inference_section["worker_count"]) <= 0
+        or int(inference_section["window_size_pixels"]) <= 0
+    ):
+        raise ValueError("Analysis size, count, and penalty settings are invalid.")
+    bounded_fraction_values = (
+        float(model_section["minimum_predictor_coverage"]),
+        float(model_section["maximum_row_missing_fraction"]),
+        float(model_section["minimum_response_coverage"]),
+        float(inference_section["covariance_shrinkage"]),
+    )
+    if any(not 0.0 < value < 1.0 for value in bounded_fraction_values):
+        raise ValueError("Analysis coverage, missingness, and shrinkage must be 0-1.")
     response_identifiers = {
-        band.identifier for band in band_definitions if band.role == "response"
+        band.identifier for band in raster_stack.bands if band.role == "response"
     }
     configured_responses = tuple(
         str(value) for value in model_section["responses"]
@@ -476,30 +597,16 @@ def load_analysis_configuration(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    raster_configuration_bytes = json.dumps(
-        {
-            "year": analysis_year,
-            "stack": stack_section,
-            "grid": grid_section,
-            "reference": reference_section,
-            "datasets": dataset_ids,
-            "bands": raw_configuration["bands"],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
     return AnalysisConfiguration(
         path=resolved_configuration_path,
         configuration_sha256=hashlib.sha256(
             normalized_configuration_bytes
         ).hexdigest(),
-        raster_configuration_sha256=hashlib.sha256(
-            raster_configuration_bytes
-        ).hexdigest(),
+        raster_configuration_sha256=raster_stack.raster_configuration_sha256,
         analysis_name=analysis_name,
         display_name=str(analysis_section["display_name"]),
         aoi_path=resolved_aoi_path,
-        year=analysis_year,
+        year=raster_stack.year,
         earth_engine=EarthEngineSettings(
             project=str(earth_engine_section["project"]),
             cache_directory=(
@@ -511,33 +618,21 @@ def load_analysis_configuration(
             ),
             request_retry_count=int(earth_engine_section["request_retry_count"]),
         ),
-        stack_name=stack_name,
-        stack_version=int(stack_section["version"]),
-        minimum_year=minimum_year,
-        maximum_year=maximum_year,
-        reference_start_year=int(stack_section["reference_start_year"]),
-        reference_end_year=int(stack_section["reference_end_year"]),
-        era5_start_year=int(stack_section["era5_start_year"]),
-        interannual_rainfall_window_years=int(
-            stack_section["interannual_rainfall_window_years"]
+        stack_name=raster_stack.stack_name,
+        stack_version=raster_stack.stack_version,
+        minimum_year=raster_stack.minimum_year,
+        maximum_year=raster_stack.maximum_year,
+        reference_start_year=raster_stack.reference_start_year,
+        reference_end_year=raster_stack.reference_end_year,
+        era5_start_year=raster_stack.era5_start_year,
+        interannual_rainfall_window_years=(
+            raster_stack.interannual_rainfall_window_years
         ),
-        stream_upstream_area_threshold_km2=float(
-            stack_section["stream_upstream_area_threshold_km2"]
+        stream_upstream_area_threshold_km2=(
+            raster_stack.stream_upstream_area_threshold_km2
         ),
-        grid=RasterCacheGrid(
-            crs=str(grid_section["crs"]),
-            pixel_size_meters=int(grid_section["pixel_size_meters"]),
-            tile_size_pixels=int(grid_section["tile_size_pixels"]),
-            origin_x=int(grid_section["origin_x"]),
-            origin_y=int(grid_section["origin_y"]),
-        ),
-        reference=ReferenceSettings(
-            grassland_probability=int(
-                reference_section["grassland_probability"]
-            ),
-            human_modification=float(reference_section["human_modification"]),
-            human_influence=float(reference_section["human_influence"]),
-        ),
+        grid=raster_stack.grid,
+        reference=raster_stack.reference,
         sampling=SamplingSettings(
             block_size_meters=int(sampling_section["block_size_meters"]),
             samples_per_class_per_block=int(
@@ -578,6 +673,6 @@ def load_analysis_configuration(
                 inference_section["covariance_shrinkage"]
             ),
         ),
-        datasets=MappingProxyType(dataset_ids),
-        bands=band_definitions,
+        datasets=raster_stack.datasets,
+        bands=raster_stack.bands,
     )

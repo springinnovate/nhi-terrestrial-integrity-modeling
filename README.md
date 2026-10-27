@@ -25,13 +25,37 @@ from nhi_terrestrial_integrity_modeling.habitat_training import IntegrityConfigu
 
 The [runner's callable contract](scripts/prepared_runner.py) describes its named
 raster bands, aligned EPSG:6933 inputs, AOI, preset settings and result files.
-The installed library includes only the callable model code and its scientific
-and raster dependencies. The CLI workflows below run from this checkout with
+The base installation contains the prepared-raster runner and its dependencies.
+The CLI workflows below run from this checkout with
 `python -m pip install -r requirements.txt`.
 
 The packaging test also needs the build dependencies declared in
 [pyproject.toml](pyproject.toml) installed in the test environment. Run the tests
 with `python -m unittest discover -s tests`.
+
+## Build the original Earth Engine image
+
+Install the optional client with `python -m pip install ".[earth-engine]"`.
+The scientific builder returns an Earth Engine image; the calling application
+initializes Earth Engine and owns downloading, progress and caching.
+
+```python
+from importlib.resources import as_file, files
+from nhi_terrestrial_integrity_modeling.analysis_config import load_raster_stack_configuration
+from nhi_terrestrial_integrity_modeling.earth_engine_stack import build_earth_engine_stack
+
+resource = files("nhi_terrestrial_integrity_modeling.config").joinpath(
+    "south_africa_reference_condition_analysis.toml"
+)
+with as_file(resource) as path:
+    stack = load_raster_stack_configuration(path, year=2018)
+image = build_earth_engine_stack(stack)  # After the caller initializes Earth Engine.
+```
+
+This uses the original scientific definition independently of its example AOI,
+project, cache and fitting settings. It does not open the AOI or request pixels.
+The caller chooses which bands to download; `d01` is the original computed
+reference mask, not a substitute for user-selected reference sites.
 
 ## Cache Earth Engine raster tiles for an AOI
 

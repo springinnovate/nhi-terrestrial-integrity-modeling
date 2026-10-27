@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 
-from scripts.analysis_config import load_analysis_configuration
+from scripts.analysis_config import (
+    RasterStackConfiguration,
+    load_analysis_configuration,
+    load_raster_stack_configuration,
+)
 
 
 MINIMAL_ANALYSIS_TOML = """
@@ -124,6 +129,69 @@ class AnalysisConfigurationTest(unittest.TestCase):
             '{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}',
             encoding="utf-8",
         )
+
+    def test_stack_loader_matches_full_analysis_and_existing_cache_identity(self) -> None:
+        """Read the same scientific fields without changing existing tile identity."""
+        configuration_path = self.temporary_path / "analysis.toml"
+        configuration_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+
+        analysis = load_analysis_configuration(configuration_path)
+        stack = load_raster_stack_configuration(configuration_path)
+
+        for field in fields(RasterStackConfiguration):
+            with self.subTest(field=field.name):
+                self.assertEqual(
+                    getattr(analysis, field.name), getattr(stack, field.name)
+                )
+        self.assertEqual(analysis.band_names(), stack.band_names())
+        self.assertEqual(
+            "103b3b34e98dad53887e6d8bfa8f52f5e927a62cc69332256a80f682c81574f0",
+            stack.raster_configuration_sha256,
+        )
+
+    def test_stack_loader_needs_no_local_aoi_or_operational_sections(self) -> None:
+        """Load scientific settings alone without resolving command-line input paths."""
+        full_path = self.temporary_path / "full.toml"
+        full_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+        stack_path = self.temporary_path / "stack.toml"
+        stack_path.write_text(
+            "[analysis]\nyear = 2019\n[stack]"
+            + MINIMAL_ANALYSIS_TOML.split("[stack]", 1)[1].split("[sampling]", 1)[0]
+            + "[datasets]"
+            + MINIMAL_ANALYSIS_TOML.split("[datasets]", 1)[1],
+            encoding="utf-8",
+        )
+        (self.temporary_path / "aoi.geojson").unlink()
+
+        self.assertEqual(
+            load_raster_stack_configuration(full_path),
+            load_raster_stack_configuration(stack_path),
+        )
+        with self.assertRaisesRegex(ValueError, "Analysis AOI does not exist"):
+            load_analysis_configuration(full_path)
+
+    def test_stack_year_override_updates_names_and_cache_identity(self) -> None:
+        """Apply a supported caller-selected year to the scientific stack."""
+        configuration_path = self.temporary_path / "analysis.toml"
+        configuration_path.write_text(MINIMAL_ANALYSIS_TOML, encoding="utf-8")
+        original = load_raster_stack_configuration(configuration_path)
+        changed = load_raster_stack_configuration(configuration_path, year=2018)
+
+        self.assertEqual(2018, changed.year)
+        self.assertEqual(original.band_names(2018), changed.band_names())
+        self.assertNotEqual(
+            original.raster_configuration_sha256, changed.raster_configuration_sha256
+        )
+        configuration_path.write_text(
+            "[earth_engine]"
+            + MINIMAL_ANALYSIS_TOML.split("[earth_engine]", 1)[1],
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            changed, load_raster_stack_configuration(configuration_path, year=2018)
+        )
+        with self.assertRaisesRegex(ValueError, "between 2017 and 2020"):
+            load_raster_stack_configuration(configuration_path, year=2016)
 
     def test_loads_default_39_band_pipeline_contract(self) -> None:
         """Expose the existing stack through configured names and roles."""
