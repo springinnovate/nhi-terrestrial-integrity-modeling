@@ -279,6 +279,15 @@ def build_earth_engine_stack(
     # sums and counts preserve the observation-weighted annual mean while keeping
     # each interactive Earth Engine reduction below its server-memory limit.
     def summarize_smap_month(month: Any) -> ee.Image:
+        """Return positive snow totals and counts, including empty months.
+
+        Args:
+            month: Calendar month number in the configured analysis year.
+
+        Returns:
+            Two masked bands when no positive observations are available;
+            otherwise their sum and observation count at each pixel.
+        """
         month_start = ee.Date.fromYMD(
             analysis_year,
             ee.Number(month).toInt(),
@@ -289,6 +298,12 @@ def build_earth_engine_stack(
             .filterDate(month_start, month_start.advance(1, "month"))
             .select("snow_depth")
             .map(lambda image: image.updateMask(image.gt(0)))
+            # Retain the band for empty months without adding observations.
+            .merge(
+                ee.ImageCollection.fromImages(
+                    [ee.Image.constant(0).rename("snow_depth").toFloat().selfMask()]
+                )
+            )
         )
         return positive_monthly_snow.sum().rename("snow_sum").addBands(
             positive_monthly_snow.count().rename("snow_count")
