@@ -78,7 +78,7 @@ class PreparedReferenceConditionData:
     retained_predictor_names: tuple[str, ...]
     excluded_predictor_names: tuple[str, ...]
     continuous_predictor_names: tuple[str, ...]
-    categorical_predictor_name: str
+    categorical_predictor_name: str | None
 
 
 def weighted_quantiles(
@@ -244,7 +244,7 @@ def prepare_reference_condition_data(
     sample_table: pd.DataFrame,
     configuration: ReferenceConditionConfiguration,
     predictor_names: tuple[str, ...],
-    categorical_predictor_name: str,
+    categorical_predictor_name: str | None,
 ) -> PreparedReferenceConditionData:
     """Select environmental predictors and prepare spatial validation rows.
 
@@ -264,8 +264,8 @@ def prepare_reference_condition_data(
         Prepared rows, folds, coverage diagnostics, and predictor names.
 
     Raises:
-        ValueError: If the categorical predictor does not meet the configured
-            predictor coverage threshold.
+        ValueError: If no predictor meets minimum coverage, or a selected
+            categorical predictor has insufficient coverage.
     """
 
     total_represented_area = float(sample_table["area_weight_m2"].sum())
@@ -301,7 +301,9 @@ def prepare_reference_condition_data(
     excluded_predictor_names = tuple(
         predictor_coverage.loc[~predictor_coverage["retained"], "predictor"]
     )
-    if categorical_predictor_name not in retained_predictor_names:
+    if not retained_predictor_names:
+        raise ValueError("No predictors meet the minimum coverage.")
+    if categorical_predictor_name is not None and categorical_predictor_name not in retained_predictor_names:
         raise ValueError(
             "The categorical predictor did not meet minimum coverage; it is "
             "required by the model contract."
@@ -341,17 +343,17 @@ def prepare_reference_condition_data(
 def calculate_imputation_values(
     training_table: pd.DataFrame,
     continuous_predictor_names: Sequence[str],
-    categorical_predictor_name: str,
+    categorical_predictor_name: str | None,
 ) -> dict[str, float]:
     """Learn area-weighted replacements from training rows only.
 
-    Continuous predictors use represented-area weighted medians. The categorical
+    Continuous predictors use represented-area weighted medians. A selected categorical
     predictor uses the category representing the largest total training area.
 
     Args:
         training_table: Rows available to a fold's training model.
         continuous_predictor_names: Continuous columns needing medians.
-        categorical_predictor_name: Categorical column needing a mode.
+        categorical_predictor_name: Optional categorical column needing a mode.
 
     Returns:
         Replacement value keyed by predictor column.
@@ -364,6 +366,9 @@ def calculate_imputation_values(
         imputation_values[predictor_name] = float(
             weighted_quantiles(predictor_values, area_weights, [0.5])[0]
         )
+
+    if categorical_predictor_name is None:
+        return imputation_values
 
     defined_categories = training_table[categorical_predictor_name].notna()
     category_areas = (
@@ -875,7 +880,7 @@ def fit_habitat_condition(
     configuration: IntegrityConfiguration,
     *,
     predictor_names: tuple[str, ...],
-    categorical_predictor_name: str,
+    categorical_predictor_name: str | None,
     response_names: tuple[str, ...],
     covariance_shrinkage: float,
     progress: Callable[[str, int, int], None] | None = None,
@@ -896,7 +901,7 @@ def fit_habitat_condition(
             same contracts used by preparation, screening and spatial fitting.
         predictor_names: Nonempty unique predictor columns present in the sample,
             including the categorical predictor. Caller owns role selection.
-        categorical_predictor_name: The one predictor treated as categorical.
+        categorical_predictor_name: Optional predictor treated as categorical.
         response_names: Nonempty unique response columns to try, in desired order.
             Responses failing scientific screening are reported and omitted.
         covariance_shrinkage: Preset fraction strictly between zero and one used
@@ -982,7 +987,9 @@ def fit_habitat_condition(
         progress("Calibrating reference departures", 1, 1)
     return FittedHabitatCondition(
         prepared_data=prepared,
-        predictor_names=(*prepared.continuous_predictor_names, categorical_predictor_name),
+        predictor_names=habitat_condition.ordered_predictor_names(
+            prepared.continuous_predictor_names, categorical_predictor_name,
+        ),
         response_coverage=coverage,
         responses=responses,
         reference_distribution=distribution,

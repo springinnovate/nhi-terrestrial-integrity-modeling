@@ -24,30 +24,47 @@ class FittedResponseModel(TypedDict):
 
     Attributes:
         continuous_predictor_names: Ordered columns represented by cubic splines.
-        categorical_predictor_name: Column represented by one-hot categories.
+        categorical_predictor_name: Column represented by one-hot categories, or None for continuous predictors alone.
         imputation_values: Training-derived replacements for missing predictors.
         preprocessor: Fitted spline and categorical transformations.
         regressor: Fitted area-weighted ridge regression.
     """
 
     continuous_predictor_names: tuple[str, ...]
-    categorical_predictor_name: str
+    categorical_predictor_name: str | None
     imputation_values: dict[str, float]
     preprocessor: ColumnTransformer
     regressor: Ridge
+
+
+def ordered_predictor_names(
+    continuous_predictor_names: tuple[str, ...], categorical_predictor_name: str | None,
+) -> tuple[str, ...]:
+    """Return columns in the order used to fit and apply a response model.
+
+    Args:
+        continuous_predictor_names: Columns represented by spline terms.
+        categorical_predictor_name: Optional column represented by category indicators.
+
+    Returns:
+        Continuous columns followed by the category column when selected.
+    """
+    if categorical_predictor_name is None:
+        return continuous_predictor_names
+    return (*continuous_predictor_names, categorical_predictor_name)
 
 
 def fit_response_model(
     training_table: pd.DataFrame,
     response_name: str,
     continuous_predictor_names: tuple[str, ...],
-    categorical_predictor_name: str,
+    categorical_predictor_name: str | None,
     imputation_values: dict[str, float],
     *,
     spline_knot_count: int,
     ridge_alpha: float,
 ) -> FittedResponseModel:
-    """Fit an area-weighted spline and categorical regression for one response.
+    """Fit one reference response from spline terms and optional category indicators.
 
     Args:
         training_table: Selected reference rows containing predictor columns,
@@ -55,7 +72,7 @@ def fit_response_model(
         response_name: Column to predict from the environmental predictors.
         continuous_predictor_names: Columns represented by independent cubic
             splines, using quantile knots and linear extrapolation.
-        categorical_predictor_name: Column represented by one-hot categories.
+        categorical_predictor_name: Column represented by one-hot categories, or None for continuous predictors alone.
         imputation_values: Training-derived replacement for each predictor.
         spline_knot_count: Number of knots for each continuous predictor.
         ridge_alpha: L2 regularization strength. Area weights are normalized
@@ -68,7 +85,7 @@ def fit_response_model(
         ValueError: If scikit-learn cannot fit the supplied data or settings.
     """
 
-    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
+    predictor_names = ordered_predictor_names(continuous_predictor_names, categorical_predictor_name)
     imputed_predictors = training_table.loc[:, predictor_names].fillna(
         imputation_values
     )
@@ -92,7 +109,7 @@ def fit_response_model(
                     sparse_output=False,
                     dtype=np.float64,
                 ),
-                [categorical_predictor_name],
+                [] if categorical_predictor_name is None else [categorical_predictor_name],
             ),
         ],
         sparse_threshold=0.0,
@@ -133,7 +150,7 @@ def predict_expected_response(
 
     continuous_predictor_names = fitted_model["continuous_predictor_names"]
     categorical_predictor_name = fitted_model["categorical_predictor_name"]
-    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
+    predictor_names = ordered_predictor_names(continuous_predictor_names, categorical_predictor_name)
     imputed_predictor_table = predictor_table.loc[:, predictor_names].fillna(
         fitted_model["imputation_values"]
     )

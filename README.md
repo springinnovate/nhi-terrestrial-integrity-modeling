@@ -249,7 +249,7 @@ response-band aliases such as `["d02", "d03", "d11"]` to fit a smaller candidate
 set; an empty list selects every configured response.
 
 Each continuous response receives its own regularized additive ridge regression.
-Configured continuous predictors enter as independent cubic splines, the configured
+Configured continuous predictors enter as independent cubic splines, an optional
 categorical predictor enters as one-hot categories, and no interactions are included.
 The validation design combines each 4 by 4 group of 25 km sampling blocks into a 100
 km validation block. Whole validation blocks are assigned to one of five folds. Each
