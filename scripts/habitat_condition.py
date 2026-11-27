@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+import pickle
 from typing import TypedDict
 
 import numpy as np
@@ -131,16 +133,84 @@ def predict_expected_response(
         numpy.ndarray: Expected reference-condition response for each input row.
     """
 
+    design_matrix = _transform_predictors(fitted_model, predictor_table)
+    return np.asarray(fitted_model["regressor"].predict(design_matrix))
+
+
+def _transform_predictors(
+    fitted_model: FittedResponseModel, predictor_table: pd.DataFrame,
+) -> np.ndarray:
+    """Build the dense predictor matrix expected by a fitted response regressor.
+
+    Args:
+        fitted_model: Source of the ordered columns, replacements for missing
+            predictors, and fitted spline and category transformations.
+        predictor_table: Predictor values for the rows to score.
+
+    Returns:
+        Transformed predictors in fitted feature order, one row per input row.
+    """
     continuous_predictor_names = fitted_model["continuous_predictor_names"]
     categorical_predictor_name = fitted_model["categorical_predictor_name"]
     predictor_names = (*continuous_predictor_names, categorical_predictor_name)
     imputed_predictor_table = predictor_table.loc[:, predictor_names].fillna(
         fitted_model["imputation_values"]
     )
-    design_matrix = fitted_model["preprocessor"].transform(
-        imputed_predictor_table
-    )
-    return np.asarray(fitted_model["regressor"].predict(design_matrix))
+    return fitted_model["preprocessor"].transform(imputed_predictor_table)
+
+
+class RasterResponseModels:
+    """Fitted responses grouped for repeated prediction over raster windows.
+
+    Prepare this once while the models are fixed, before iterating over windows.
+    Only model references and response offsets are retained between predictions.
+
+    Attributes:
+        response_count: Number of bands in the original response order.
+    """
+
+    def __init__(self, models: tuple[FittedResponseModel, ...]) -> None:
+        """Group models with identical predictor selection, imputation and fitted state.
+
+        Args:
+            models: Fitted or loaded responses in output band order.
+        """
+        self._models = models
+        self.response_count = len(models)
+        if len(models) == 1:
+            self._groups = ((0,),)
+            return
+        groups: dict[
+            tuple[tuple[str, ...], str | None, frozenset[tuple[str, float]], bytes],
+            list[int],
+        ] = {}
+        for offset, model in enumerate(models):
+            # Compare the complete fitted transformer, including learned knots,
+            # categories and feature order. Serialized bytes stay local to this
+            # setup call. Different representations conservatively stay separate.
+            key = (
+                tuple(model["continuous_predictor_names"]), model["categorical_predictor_name"],
+                frozenset(model["imputation_values"].items()),
+                pickle.dumps(model["preprocessor"], protocol=5),
+            )
+            groups.setdefault(key, []).append(offset)
+        self._groups = tuple(tuple(offsets) for offsets in groups.values())
+
+    def predict_responses(self, predictor_table: pd.DataFrame) -> Iterator[tuple[int, np.ndarray]]:
+        """Yield each band's offset and predictions using one dense matrix at a time.
+
+        Args:
+            predictor_table: Usable cells from one raster window.
+
+        Yields:
+            Original response offset and unrounded predictions in input row order.
+        """
+        for offsets in self._groups:
+            design_matrix = _transform_predictors(self._models[offsets[0]], predictor_table)
+            for offset in offsets:
+                predictions = self._models[offset]["regressor"].predict(design_matrix)
+                yield offset, np.asarray(predictions)
+            del design_matrix
 
 
 @dataclass(frozen=True)
@@ -368,7 +438,7 @@ def predict_raster_window(
     *,
     predictor_names: tuple[str, ...],
     response_names: tuple[str, ...],
-    response_models: tuple[FittedResponseModel, ...],
+    response_models: tuple[FittedResponseModel, ...] | RasterResponseModels,
     reference_rmses: tuple[float, ...],
     reference_distribution: ReferenceDepartureDistribution,
     aoi_pixel_mask: np.ndarray,
@@ -392,8 +462,8 @@ def predict_raster_window(
             finite values or NaN for missing data, ordered as response_models.
         predictor_names: Ordered predictor columns shared by the fitted models.
         response_names: Response labels in model order, used in prediction errors.
-        response_models: Fitted numerical models, in the same response order as
-            the reference distribution.
+        response_models: Fitted numerical models in reference distribution order.
+            For repeated windows, pass RasterResponseModels prepared once for this fit.
         reference_rmses: Positive, finite cross-validated reference RMSEs in
             response order, established by the fitting or model-loading caller.
         reference_distribution: Fitted distance and empirical percentile model.
@@ -414,6 +484,10 @@ def predict_raster_window(
         RuntimeError: If a fitted model produces a nonfinite prediction.
     """
 
+    model_groups = (
+        response_models if isinstance(response_models, RasterResponseModels)
+        else RasterResponseModels(response_models)
+    )
     predictor_count = len(predictor_names)
     window_shape = aoi_pixel_mask.shape
     predictor_value_validity = ~np.isnan(predictor_values)
@@ -439,7 +513,7 @@ def predict_raster_window(
     )
 
     expected_output = np.full(
-        (len(response_models), *window_shape),
+        (model_groups.response_count, *window_shape),
         FLOAT_NODATA,
         dtype=np.float32,
     )
@@ -475,15 +549,9 @@ def predict_raster_window(
             ],
             columns=predictor_names,
         )
-        for response_model_offset, response_model in enumerate(
-            response_models
+        for response_model_offset, expected_reference_values in (
+            model_groups.predict_responses(predictor_table)
         ):
-            expected_reference_values = (
-                predict_expected_response(
-                    response_model,
-                    predictor_table,
-                )
-            )
             if not np.isfinite(expected_reference_values).all():
                 raise RuntimeError(
                     f"{response_names[response_model_offset]} produced a "

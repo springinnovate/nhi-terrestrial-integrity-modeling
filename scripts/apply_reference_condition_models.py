@@ -1901,7 +1901,9 @@ def calculate_inference_tile(
     predictor_count = len(predictor_names)
     response_end_offset = predictor_count + len(response_models)
     response_names = tuple(model.response_band for model in response_models)
-    fitted_models = tuple(model.bundle for model in response_models)
+    fitted_models = habitat_condition.RasterResponseModels(
+        tuple(model.bundle for model in response_models)
+    )
     reference_rmses = tuple(model.reference_rmse for model in response_models)
     calculated_windows = []
     with ExitStack() as stack:

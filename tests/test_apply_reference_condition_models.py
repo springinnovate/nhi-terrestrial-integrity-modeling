@@ -25,7 +25,7 @@ from rasterio.warp import transform_bounds
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-from scripts import habitat_condition
+from scripts import apply_reference_condition_models as inference, habitat_condition
 from scripts.apply_reference_condition_models import (
     INFERENCE_WRITE_BATCH_SIZE,
     MAXIMUM_OUTPUT_RASTER_BLOCK_SIZE,
@@ -706,7 +706,7 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
         resumed_output = io.StringIO()
         with (
             patch(
-                "scripts.habitat_condition.predict_expected_response",
+                "scripts.habitat_condition.predict_raster_window",
                 side_effect=AssertionError(
                     "A completed inference tile must not be modeled again."
                 ),
@@ -740,18 +740,33 @@ class ApplyReferenceConditionModelsTest(unittest.TestCase):
                 worker_count=1,
             ),
         )
-        prediction_call_count = 0
+        tile_count = 0
+        calculate_tile = inference.calculate_inference_tile_from_context
 
-        def interrupt_second_tile(model_bundle, predictor_table):
-            nonlocal prediction_call_count
-            prediction_call_count += 1
-            if prediction_call_count == 9:
+        def interrupt_second_tile(
+            tile: inference.CachedRasterTile, context: inference.InferenceWorkerContext,
+        ) -> inference.ComputedInferenceTile:
+            """Calculate the first tile and simulate a failure on the next one.
+
+            Args:
+                tile: Source tile selected for inference.
+                context: Fitted models and settings for this run.
+
+            Returns:
+                First tile's computed raster windows.
+
+            Raises:
+                ConnectionError: When the second tile starts.
+            """
+            nonlocal tile_count
+            tile_count += 1
+            if tile_count == 2:
                 raise ConnectionError("synthetic interruption")
-            return predict_expected_response(model_bundle, predictor_table)
+            return calculate_tile(tile, context)
 
         with (
             patch(
-                "scripts.habitat_condition.predict_expected_response",
+                "scripts.apply_reference_condition_models.calculate_inference_tile_from_context",
                 side_effect=interrupt_second_tile,
             ),
             contextlib.redirect_stdout(io.StringIO()),

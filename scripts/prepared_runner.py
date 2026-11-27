@@ -14,7 +14,9 @@ from rasterio.features import geometry_mask, geometry_window
 from rasterio.windows import Window, transform as window_transform
 from shapely.geometry import MultiPolygon, Polygon, mapping
 
-from .habitat_condition import FLOAT_NODATA, STATUS_NODATA, predict_raster_window
+from .habitat_condition import (
+    FLOAT_NODATA, STATUS_NODATA, RasterResponseModels, predict_raster_window,
+)
 from .habitat_training import FittedHabitatCondition, IntegrityConfiguration, fit_habitat_condition
 from .prepared_rasters import RasterBand, open_prepared_rasters
 from .prepared_sampling import sample_prepared_rasters
@@ -150,7 +152,9 @@ def run_habitat_condition(
             response_names = tuple(fitted.responses)
             predictor_indices = [reader.band_names.index(name) for name in fitted.predictor_names]
             response_indices = [reader.band_names.index(name) for name in response_names]
-            response_models = tuple(response.model for response in fitted.responses.values())
+            response_models = RasterResponseModels(
+                tuple(response.model for response in fitted.responses.values())
+            )
             reference_rmses = tuple(
                 response.overall_metrics["weighted_rmse"] for response in fitted.responses.values()
             )

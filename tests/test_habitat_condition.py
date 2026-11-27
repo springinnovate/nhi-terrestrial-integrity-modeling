@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -247,6 +248,73 @@ class RasterPredictionTests(unittest.TestCase):
                 ):
                     self.assertEqual(wanted.dtype, actual.dtype)
                     np.testing.assert_array_equal(actual, wanted)
+
+    def test_window_shares_only_equivalent_fitted_transformations(self) -> None:
+        """Reuse one matrix per learned transform while preserving all outputs."""
+        x = np.arange(12, dtype=np.float64)
+        training = pd.DataFrame({
+            "x": x, "category": x % 3, "area_weight_m2": x + 1,
+            "first": x ** 2, "partial": 1 + np.sin(x),
+            "third": 7 - 2 * x, "other_fill": x % 4,
+        })
+        training.loc[x % 3 == 2, "partial"] = np.nan
+        names = ("first", "partial", "third", "other_fill")
+        models = tuple(
+            habitat_condition.fit_response_model(
+                training.dropna(subset=[name]), name, ("x",), "category",
+                {"x": 5.5, "category": 2. if name == "other_fill" else 0.},
+                spline_knot_count=3, ridge_alpha=1.,
+            )
+            for name in names
+        )
+        rmses = (1., 2., 3., 4.)
+        distribution = habitat_condition.fit_reference_departure_distribution(
+            np.random.default_rng(42).normal(size=(30, len(names))), np.ones(30), .1,
+        )
+        observed = np.zeros((len(names), *self.aoi.shape))
+        observed[1, 1, 1] = np.nan
+        usable = self.aoi & np.isfinite(self.predictors).any(axis=0)
+        table = pd.DataFrame(self.predictors[:, usable].T, columns=("x", "category"))
+        expected = np.full_like(observed, habitat_condition.FLOAT_NODATA, dtype=np.float32)
+        expected[:, usable] = np.stack([
+            habitat_condition.predict_expected_response(model, table) for model in models
+        ])
+        complete = usable & np.isfinite(observed).all(axis=0) & ~self.references
+        deviations = np.full_like(expected, habitat_condition.FLOAT_NODATA)
+        standardized = np.full_like(expected, habitat_condition.FLOAT_NODATA)
+        for offset, rmse in enumerate(rmses):
+            valid = usable & np.isfinite(observed[offset])
+            difference = observed[offset, valid] - expected[offset, valid]
+            deviations[offset, valid] = difference
+            standardized[offset, valid] = difference / rmse
+        percentiles = np.full_like(expected[0], habitat_condition.FLOAT_NODATA)
+        percentiles[complete] = distribution.calculate_reference_departure_percentiles(
+            distribution.calculate_mahalanobis_distances(standardized[:, complete].T)
+        )
+        expected_status = self._predict_window(None).inference_status
+        transformer = type(models[0]["preprocessor"])
+        with patch.object(
+            transformer, "transform", autospec=True, side_effect=transformer.transform,
+        ) as transform:
+            result = habitat_condition.predict_raster_window(
+                self.predictors, observed, predictor_names=("x", "category"),
+                response_names=names, response_models=models, reference_rmses=rmses,
+                reference_distribution=distribution, aoi_pixel_mask=self.aoi,
+                reference_pixel_mask=self.references, assessment_pixel_mask=None,
+                maximum_predictor_missing_fraction=.5,
+            )
+        for actual, wanted in (
+            (result.expected_reference, expected),
+            (result.observed_minus_expected, deviations),
+            (result.standardized_deviation, standardized),
+            (result.departure_percentile, percentiles),
+            (result.inference_status, expected_status),
+        ):
+            np.testing.assert_array_equal(actual, wanted)
+        # First and third are independent fits with identical preprocessing.
+        # Partial learned different knots/categories. Other_fill has the same
+        # fitted transformer as first and third but imputes a different category.
+        self.assertEqual(3, transform.call_count)
 
     def test_rejects_nonfinite_model_predictions(self) -> None:
         """Report the affected response when a fitted estimator returns NaN."""
