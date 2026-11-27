@@ -91,6 +91,7 @@ class PreparedRunnerTests(unittest.TestCase):
     def run_model(
         self, name: str, assessment: RasterBand | None = None,
         progress: Callable[[str, int, int], None] | None = None,
+        categorical_predictor: str | None = "category",
     ) -> HabitatConditionRun:
         """Calculate this fixture into a new directory.
 
@@ -98,17 +99,31 @@ class PreparedRunnerTests(unittest.TestCase):
             name: Output directory name within the test directory.
             assessment: Optional mask limiting predictions.
             progress: Optional supervising callback.
+            categorical_predictor: Use the category band, or omit it for a continuous-only fit.
 
         Returns:
             Completed run and its output paths.
         """
         return run_habitat_condition(
-            self.predictors, self.responses, self.reference_band, self.aoi,
+            self.predictors if categorical_predictor else self.predictors[1:],
+            self.responses, self.reference_band, self.aoi,
             self.directory / name, self.configuration,
-            categorical_predictor_name="category", samples_per_class_per_block=100,
+            categorical_predictor_name=categorical_predictor, samples_per_class_per_block=100,
             random_seed=17, tile_size_pixels=8, window_size_pixels=5,
             covariance_shrinkage=0.1, assessment_mask=assessment, progress=progress,
         )
+
+    def test_continuous_only_similarity_outside_reference_sites(self) -> None:
+        """Score background pixels using temperature alone and retain the reference mask."""
+        run = self.run_model("continuous", categorical_predictor=None)
+        self.assertEqual(("temperature",), run.fitted.predictor_names)
+        with rasterio.open(run.reference_similarity) as source:
+            similarity = source.read(1, masked=True)
+        self.assertTrue(similarity.mask[self.reference[1:11, 1:23] == 1].all())
+        scores = similarity.compressed()
+        self.assertGreater(scores.size, 0)
+        self.assertTrue(((scores >= 0) & (scores <= 1)).all())
+        self.assertGreater(np.ptp(scores), 0)
 
     def test_writes_similarity_and_diagnostics_with_both_mask_choices(self) -> None:
         """Match CLI window calculations while writing an AOI-aligned crop."""

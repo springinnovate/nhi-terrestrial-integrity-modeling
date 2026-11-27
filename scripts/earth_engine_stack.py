@@ -366,9 +366,6 @@ def build_earth_engine_stack(
             .select("soc_5-15cm_mean")
             .divide(10),
             "soil_moisture": gldas_annual.select("SoilMoi10_40cm_inst").mean(),
-            "landform_type": ee.Image(dataset_ids["srtm_landforms"]).select(
-                "constant"
-            ),
             "topographic_diversity": ee.Image(
                 dataset_ids["alos_topographic_diversity"]
             ).select("constant"),
@@ -377,6 +374,9 @@ def build_earth_engine_stack(
             "smap_snow_depth": smap_snow_depth,
         }
     )
+
+    if any(band.computation == "landform_type" for band in configuration.bands):
+        computed_images_by_name["landform_type"] = ee.Image(dataset_ids["srtm_landforms"]).select("constant")
 
     configured_band_images = [
         ee.Image(computed_images_by_name[band_definition.computation]).rename(

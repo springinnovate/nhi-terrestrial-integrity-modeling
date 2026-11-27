@@ -195,8 +195,8 @@ def build_response_model_artifact(
         The existing Joblib artifact fields, including fitted numerical estimators.
     """
 
-    predictor_names = (
-        *fitted_model["continuous_predictor_names"],
+    predictor_names = habitat_condition.ordered_predictor_names(
+        fitted_model["continuous_predictor_names"],
         fitted_model["categorical_predictor_name"],
     )
     response_definition = analysis_configuration.band_for_column(response_name)
@@ -766,8 +766,8 @@ def create_partial_response_figure(
     continuous_predictor_names = tuple(
         fitted_model["continuous_predictor_names"]
     )
-    categorical_predictor_name = str(fitted_model["categorical_predictor_name"])
-    predictor_names = (*continuous_predictor_names, categorical_predictor_name)
+    categorical_predictor_name = fitted_model["categorical_predictor_name"]
+    predictor_names = habitat_condition.ordered_predictor_names(continuous_predictor_names, categorical_predictor_name)
     baseline_predictor_values = {
         predictor_name: fitted_model["imputation_values"][predictor_name]
         for predictor_name in predictor_names
@@ -1356,7 +1356,9 @@ def run_integrity_parameter_gams(
             "family": "one regularized additive ridge regression per response",
             "training_population": "usable supplied reference-site rows only",
             "continuous_terms": "independent cubic spline bases",
-            "categorical_terms": "one-hot landform indicators",
+            "categorical_terms": (
+                "one-hot indicators" if prepared_reference_data.categorical_predictor_name else None
+            ),
             "interactions": False,
             "predictor_bands": "bands assigned the predictor role in TOML",
             "human_impact_predictors": False,

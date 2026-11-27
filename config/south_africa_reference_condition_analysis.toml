@@ -273,7 +273,7 @@ alos_topographic_diversity = "CSP/ERGo/1_0/Global/ALOS_topoDiversity"
 #   display_name: Human-readable report and figure label; it does not change values.
 #   role: "reference" is the binary d01 label, "response" is an ecological variable
 #     modeled from reference pixels, and "predictor" is an abiotic model input. The
-#     pipeline requires exactly one reference and one categorical predictor.
+#     stack needs exactly one reference band. A categorical predictor is optional.
 #   data_type: "binary", "continuous", or "categorical" interpretation. It controls
 #     downstream treatment; categorical predictors are one-hot encoded rather than
 #     passed through continuous spline terms.
@@ -597,6 +597,9 @@ role = "predictor"
 data_type = "continuous"
 sources = ["gldas"]
 
+# Each response model can fit a separate intercept for each SRTM landform
+# while sharing the same predictor curves. This can improve predictions when
+# ridges and valleys have different vegetation cover at the same rainfall.
 [[bands]]
 id = "d35"
 computation = "landform_type"
@@ -695,7 +698,7 @@ random_seed = 42
 #   minimum_predictor_coverage: Minimum represented-area share with a defined value
 #     for a predictor to be retained. At 0.80, a predictor must cover at least 80% of
 #     sampled represented area. Higher values exclude incomplete predictors sooner.
-#     The configured categorical predictor is required and cannot be screened out.
+#     If a selected categorical predictor falls below this threshold, the fit stops.
 #   maximum_row_missing_fraction: Largest missing share among retained predictors
 #     for a row to remain usable. At 0.20, no more than 20% may be missing; accepted
 #     missing values are imputed from each fold's training rows. Higher values retain

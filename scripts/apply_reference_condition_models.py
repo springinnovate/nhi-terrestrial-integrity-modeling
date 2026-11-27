@@ -729,9 +729,7 @@ def load_response_models(
         continuous_predictor_names = tuple(
             model_bundle["continuous_predictor_names"]
         )
-        categorical_predictor_name = str(
-            model_bundle["categorical_predictor_name"]
-        )
+        categorical_predictor_name = model_bundle["categorical_predictor_name"]
         out_of_fold_reference_rmse = float(
             model_bundle["reference_residual_rmse_oof"]
         )
@@ -749,8 +747,8 @@ def load_response_models(
                 response_name=str(model_bundle["response"]),
                 response_band=str(model_bundle["response_band"]),
                 display_name=str(model_bundle["display_name"]),
-                predictor_names=(
-                    *continuous_predictor_names,
+                predictor_names=habitat_condition.ordered_predictor_names(
+                    continuous_predictor_names,
                     categorical_predictor_name,
                 ),
                 reference_rmse=out_of_fold_reference_rmse,

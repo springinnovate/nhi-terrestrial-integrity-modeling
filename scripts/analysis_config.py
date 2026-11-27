@@ -407,14 +407,16 @@ def _parse_raster_stack_configuration(
         )
     if sum(band.role == "reference" for band in band_definitions) != 1:
         raise ValueError("A raster stack must define exactly one reference band.")
+    if not any(band.role == "predictor" for band in band_definitions):
+        raise ValueError("A raster stack must define at least one predictor.")
     categorical_predictor_definitions = [
         band
         for band in band_definitions
         if band.role == "predictor" and band.data_type == "categorical"
     ]
-    if len(categorical_predictor_definitions) != 1:
+    if len(categorical_predictor_definitions) > 1:
         raise ValueError(
-            "Reference-condition modeling requires exactly one categorical predictor."
+            "Reference-condition modeling supports at most one categorical predictor."
         )
     raster_configuration_bytes = json.dumps(
         {
