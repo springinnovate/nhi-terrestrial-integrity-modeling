@@ -237,6 +237,15 @@ class AnalysisConfigurationTest(unittest.TestCase):
             configuration.band_names(2018)[-1],
         )
 
+    def test_accepts_a_stack_with_only_continuous_predictors(self) -> None:
+        """Admit a scientific stack with continuous predictors alone."""
+        sections = MINIMAL_ANALYSIS_TOML.split("[[bands]]")
+        text = "[[bands]]".join(section for section in sections if 'id = "d35"' not in section)
+        path = self.temporary_path / "continuous.toml"
+        path.write_text(text, encoding="utf-8")
+        configuration = load_analysis_configuration(path)
+        self.assertTrue(all(band.data_type == "continuous" for band in configuration.bands if band.role == "predictor"))
+
     def test_uses_configured_order_and_earliest_available_year(self) -> None:
         """Honor a reduced order and select one column per configured role band."""
 

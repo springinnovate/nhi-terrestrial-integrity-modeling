@@ -80,8 +80,8 @@ def prepare_reference_condition_data(
         Prepared rows, folds, coverage diagnostics, and predictor names.
 
     Raises:
-        ValueError: If categorical landform does not meet the configured
-            predictor coverage threshold.
+        ValueError: If no predictor meets minimum coverage, or a selected
+            categorical predictor has insufficient coverage.
     """
 
     predictor_columns_by_identifier = analysis_configuration.columns_with_role(
@@ -89,14 +89,12 @@ def prepare_reference_condition_data(
         "predictor",
     )
     predictor_names = tuple(predictor_columns_by_identifier.values())
-    categorical_predictor_identifier = next(
-        band.identifier
-        for band in analysis_configuration.bands
-        if band.role == "predictor" and band.data_type == "categorical"
+    categorical_predictor_name = next(
+        (predictor_columns_by_identifier[band.identifier]
+         for band in analysis_configuration.bands
+         if band.role == "predictor" and band.data_type == "categorical"),
+        None,
     )
-    categorical_predictor_name = predictor_columns_by_identifier[
-        categorical_predictor_identifier
-    ]
     predictor_band_numbers_by_name = {
         column_name: int(identifier[1:])
         for identifier, column_name in predictor_columns_by_identifier.items()

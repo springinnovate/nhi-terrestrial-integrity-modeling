@@ -59,7 +59,7 @@ def run_habitat_condition(
     output_directory: Path,
     configuration: IntegrityConfiguration,
     *,
-    categorical_predictor_name: str,
+    categorical_predictor_name: str | None = None,
     samples_per_class_per_block: int,
     random_seed: int,
     tile_size_pixels: int,
@@ -77,7 +77,7 @@ def run_habitat_condition(
     keep their diagnostic predictions but receive no similarity score.
 
     Args:
-        predictor_bands: Nonempty named predictor selection, including exactly one
+        predictor_bands: Nonempty named predictor selection, including at most one
             categorical predictor. Names must be unique across both band roles.
         response_bands: Nonempty named response selection in requested fit order.
             Responses rejected by scientific screening remain in fit diagnostics.
@@ -88,7 +88,7 @@ def run_habitat_condition(
             are never overwritten. The runner owns these outputs until success.
         configuration: Valid model-preset fitting settings, including sampling-block
             width and the maximum predictor missing fraction used for prediction.
-        categorical_predictor_name: Name of the selected categorical predictor.
+        categorical_predictor_name: Name of the categorical predictor, or None to fit continuous predictors alone.
         samples_per_class_per_block: Positive reference/background sampling cap.
         random_seed: Seed for the existing deterministic pixel selector.
         tile_size_pixels: Positive virtual sampling tile width; preserve the CLI's
@@ -119,8 +119,10 @@ def run_habitat_condition(
     """
     predictor_names = tuple(band.name for band in predictor_bands)
     response_names = tuple(band.name for band in response_bands)
-    if not predictor_names or not response_names or categorical_predictor_name not in predictor_names:
-        raise ValueError("Select predictors including the categorical band, and at least one response.")
+    if not predictor_names or not response_names:
+        raise ValueError("Select at least one predictor and one response.")
+    if categorical_predictor_name is not None and categorical_predictor_name not in predictor_names:
+        raise ValueError("Select the categorical band among the predictors.")
     if window_size_pixels <= 0:
         raise ValueError("Prediction window size must be positive.")
 

@@ -279,6 +279,15 @@ def build_earth_engine_stack(
     # sums and counts preserve the observation-weighted annual mean while keeping
     # each interactive Earth Engine reduction below its server-memory limit.
     def summarize_smap_month(month: Any) -> ee.Image:
+        """Return positive snow totals and counts, including empty months.
+
+        Args:
+            month: Calendar month number in the configured analysis year.
+
+        Returns:
+            Two masked bands when no positive observations are available;
+            otherwise their sum and observation count at each pixel.
+        """
         month_start = ee.Date.fromYMD(
             analysis_year,
             ee.Number(month).toInt(),
@@ -289,6 +298,12 @@ def build_earth_engine_stack(
             .filterDate(month_start, month_start.advance(1, "month"))
             .select("snow_depth")
             .map(lambda image: image.updateMask(image.gt(0)))
+            # Retain the band for empty months without adding observations.
+            .merge(
+                ee.ImageCollection.fromImages(
+                    [ee.Image.constant(0).rename("snow_depth").toFloat().selfMask()]
+                )
+            )
         )
         return positive_monthly_snow.sum().rename("snow_sum").addBands(
             positive_monthly_snow.count().rename("snow_count")
@@ -351,9 +366,6 @@ def build_earth_engine_stack(
             .select("soc_5-15cm_mean")
             .divide(10),
             "soil_moisture": gldas_annual.select("SoilMoi10_40cm_inst").mean(),
-            "landform_type": ee.Image(dataset_ids["srtm_landforms"]).select(
-                "constant"
-            ),
             "topographic_diversity": ee.Image(
                 dataset_ids["alos_topographic_diversity"]
             ).select("constant"),
@@ -362,6 +374,9 @@ def build_earth_engine_stack(
             "smap_snow_depth": smap_snow_depth,
         }
     )
+
+    if any(band.computation == "landform_type" for band in configuration.bands):
+        computed_images_by_name["landform_type"] = ee.Image(dataset_ids["srtm_landforms"]).select("constant")
 
     configured_band_images = [
         ee.Image(computed_images_by_name[band_definition.computation]).rename(
